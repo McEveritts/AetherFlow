@@ -1,7 +1,9 @@
 use af_hardware::RenderNode;
+use af_transcode::argv::WORKER_LOCAL_PROTOCOL_WHITELIST;
 use af_transcode::capabilities::{probe_capabilities, CapabilitiesConfig, TranscodeCapabilities};
 use af_transcode::config::{
-    ENV_DISPATCHER_SOCKET, ENV_HANDSHAKE_TIMEOUT_MS, ENV_REAL_FFMPEG, ENV_SHIM_RECURSION_GUARD,
+    DEFAULT_WORKER_MAX_JOBS, ENV_DISPATCHER_SOCKET, ENV_HANDSHAKE_TIMEOUT_MS, ENV_REAL_FFMPEG,
+    ENV_SHIM_RECURSION_GUARD, ENV_WORKER_MAX_JOBS,
 };
 use af_transcode::protocol::{read_frame, write_frame, ErrorKind, Frame, StartRequest};
 use af_transcode::shim::{run_shim_protocol, LocalFallbackReason, ShimConfig, ShimDecision};
@@ -467,7 +469,9 @@ exit 42
     assert_eq!(output.status.code(), Some(42));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stdout.contains("OUT_ARGS:-i /srv/media/in.mkv -c:v libx264 out.m3u8"));
+    assert!(stdout.contains(&format!(
+        "OUT_ARGS:-protocol_whitelist {WORKER_LOCAL_PROTOCOL_WHITELIST} -i /srv/media/in.mkv -c:v libx264 out.m3u8"
+    )));
     assert!(stdout.contains(&format!("OUT_TMPDIR:{}", dir.path().display())));
     assert!(stdout.contains("OUT_LDPRELOAD:unset"));
     assert!(stdout.contains("IN:chunk-one\n"));
@@ -996,7 +1000,10 @@ async fn worker_validates_start_env_cwd_concurrency_and_vendor_render_node_rewri
             .map(ToString::to_string)
             .collect();
         assert_eq!(lines[1], "vaapi=va:/dev/dri/renderD129,driver=iHD");
-        assert_eq!(lines[7], "/srv/media/dev/dri/renderD128/clip.mkv");
+        assert_eq!(lines[6], "-protocol_whitelist");
+        assert_eq!(lines[7], WORKER_LOCAL_PROTOCOL_WHITELIST);
+        assert_eq!(lines[8], "-i");
+        assert_eq!(lines[9], "/srv/media/dev/dri/renderD128/clip.mkv");
     }
 
     let _ = shutdown_tx.send(());
@@ -1245,6 +1252,22 @@ exit 1
         serde_json::from_slice(&out.stdout).expect("valid capabilities JSON");
     assert_eq!(parsed.ffmpeg_version.as_deref(), Some("8.1.3-Jellyfin"));
     assert_eq!(parsed.encoders, vec!["h264_vaapi", "hevc_qsv", "libx264"]);
+    assert_eq!(parsed.worker_max_jobs, Some(DEFAULT_WORKER_MAX_JOBS));
+
+    // Verify `AF_TRANSCODE_WORKER_MAX_JOBS` is advertised in `worker_max_jobs`.
+    let out_custom = StdCommand::new(af_transcode_bin())
+        .arg("capabilities")
+        .env(ENV_REAL_FFMPEG, &fake_ffmpeg)
+        .env(ENV_WORKER_MAX_JOBS, "12")
+        .output()
+        .expect("run af-transcode capabilities with worker max jobs");
+    assert!(
+        out_custom.status.success(),
+        "capabilities CLI custom max jobs failed"
+    );
+    let parsed_custom: TranscodeCapabilities =
+        serde_json::from_slice(&out_custom.stdout).expect("valid custom capabilities JSON");
+    assert_eq!(parsed_custom.worker_max_jobs, Some(12));
 }
 
 #[tokio::test]
@@ -1463,4 +1486,259 @@ async fn worker_backpressures_high_volume_stdin_and_reaps_overflowing_disconnect
     let _ = shutdown2.send(());
     worker2.await.unwrap();
     reaped.expect("overflowing paused-stdin disconnect left child running");
+}
+
+#[tokio::test]
+async fn worker_rejects_network_protocols_and_widened_whitelist_without_spawning_ffmpeg() {
+    let dir = TempDir::new("ssrf-reject");
+    let worker_sock = dir.path().join("worker.sock");
+    let sentinel = dir.path().join("ffmpeg-spawned");
+    let fake_ffmpeg = write_executable_script(
+        dir.path(),
+        "real-ffmpeg",
+        &format!("#!/bin/sh\ntouch '{}'\nexit 0\n", sentinel.display()),
+    );
+
+    let cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    let (shutdown_tx, worker_handle) = start_fixture_worker(cfg).await;
+
+    let rejected_cases: &[(&str, &[&str])] = &[
+        (
+            "http input",
+            &["-i", "http://169.254.169.254/latest/meta-data", "out.m3u8"],
+        ),
+        (
+            "https input",
+            &["-i", "https://example.com/live.m3u8", "out.m3u8"],
+        ),
+        (
+            "rtsp input",
+            &["-i", "rtsp://10.0.0.1:554/stream", "out.m3u8"],
+        ),
+        (
+            "unix socket input",
+            &["-i", "unix:/run/aetherflow/runner.sock", "out.m3u8"],
+        ),
+        (
+            "nested subfile http",
+            &[
+                "-i",
+                "subfile,,start,0,end,64,,:http://127.0.0.1/x",
+                "out.m3u8",
+            ],
+        ),
+        (
+            "concat remote",
+            &[
+                "-i",
+                "concat:/srv/media/a.ts|http://127.0.0.1/b.ts",
+                "out.m3u8",
+            ],
+        ),
+        (
+            "positional udp output",
+            &[
+                "-i",
+                "/srv/media/a.mkv",
+                "-f",
+                "mpegts",
+                "udp://10.0.0.1:1234",
+            ],
+        ),
+        (
+            "progress http exfil",
+            &[
+                "-i",
+                "/srv/media/a.mkv",
+                "-progress",
+                "http://127.0.0.1/p",
+                "out.m3u8",
+            ],
+        ),
+        (
+            "lavfi movie SSRF",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                r"movie=http\://127.0.0.1/a.mp4",
+                "out.m3u8",
+            ],
+        ),
+        (
+            "caller widens protocol_whitelist",
+            &[
+                "-protocol_whitelist",
+                "file,http,https,tcp,tls",
+                "-i",
+                "/srv/media/a.m3u8",
+                "out.m3u8",
+            ],
+        ),
+        (
+            "caller protocol_whitelist unix",
+            &[
+                "-protocol_whitelist",
+                "file,unix",
+                "-i",
+                "/srv/media/a.mkv",
+                "out.m3u8",
+            ],
+        ),
+        (
+            "caller protocol_whitelist all",
+            &[
+                "-protocol_whitelist",
+                "all",
+                "-i",
+                "/srv/media/a.mkv",
+                "out.m3u8",
+            ],
+        ),
+    ];
+
+    for (name, raw_args) in rejected_cases {
+        let mut s = UnixStream::connect(&worker_sock).await.unwrap();
+        write_frame(
+            &mut s,
+            &Frame::Start(StartRequest {
+                args: raw_args.iter().map(|a| (*a).to_string()).collect(),
+                cwd: dir.path().to_string_lossy().into_owned(),
+                env_subset: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+        let reply = read_frame(&mut s).await.unwrap().expect("error reply");
+        assert!(
+            matches!(
+                reply,
+                Frame::Error {
+                    kind: ErrorKind::InvalidRequest,
+                    ..
+                }
+            ),
+            "case '{name}' must be rejected with InvalidRequest, got {reply:?}"
+        );
+    }
+
+    assert!(
+        !sentinel.exists(),
+        "real ffmpeg must NEVER be spawned for SSRF/network-protocol requests"
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = worker_handle.await;
+}
+
+#[tokio::test]
+async fn worker_injects_local_whitelist_per_input_and_clamps_untrusted_and_symlinked_cwd() {
+    let dir = TempDir::new("cwd-wl");
+    let worker_sock = dir.path().join("worker.sock");
+    let allowed_sub = dir.path().join("sub");
+    fs::create_dir(&allowed_sub).unwrap();
+    let escape_symlink = dir.path().join("escape-to-etc");
+    symlink("/etc", &escape_symlink).unwrap();
+
+    let fake_ffmpeg = write_executable_script(
+        dir.path(),
+        "real-ffmpeg",
+        "#!/bin/sh\nprintf 'PWD:%s\\n' \"$(pwd -P)\"\nprintf 'ARG:%s\\n' \"$@\"\n",
+    );
+
+    let cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    let (shutdown_tx, worker_handle) = start_fixture_worker(cfg).await;
+
+    let run_job = |args: Vec<String>, cwd: String| {
+        let sock = worker_sock.clone();
+        async move {
+            let mut s = UnixStream::connect(&sock).await.unwrap();
+            write_frame(
+                &mut s,
+                &Frame::Start(StartRequest {
+                    args,
+                    cwd,
+                    env_subset: vec![],
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(read_frame(&mut s).await.unwrap(), Some(Frame::Started));
+            let mut out = Vec::new();
+            while let Some(frame) = read_frame(&mut s).await.unwrap() {
+                match frame {
+                    Frame::Stdout(b) => out.extend_from_slice(&b),
+                    Frame::Exit(code) => {
+                        assert_eq!(code, 0);
+                        break;
+                    }
+                    other => panic!("unexpected frame: {other:?}"),
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        }
+    };
+
+    let canonical_safe = fs::canonicalize(dir.path()).unwrap();
+    let canonical_sub = fs::canonicalize(&allowed_sub).unwrap();
+
+    // 1. Out-of-root cwd (`/`) is clamped to worker safe directory; multi-input receives whitelist before EACH `-i`.
+    let out_root = run_job(
+        vec![
+            "-protocol_whitelist".into(),
+            "file,pipe".into(),
+            "-i".into(),
+            "/media/Movie: Part 1.mkv".into(),
+            "-i".into(),
+            "file:///media/sub.srt".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "out.m3u8".into(),
+        ],
+        "/".to_string(),
+    )
+    .await;
+    let lines: Vec<&str> = out_root.lines().collect();
+    assert_eq!(lines[0], format!("PWD:{}", canonical_safe.display()));
+    assert_eq!(
+        &lines[1..],
+        &[
+            "ARG:-protocol_whitelist",
+            "ARG:file,pipe",
+            "ARG:-i",
+            "ARG:/media/Movie: Part 1.mkv",
+            "ARG:-protocol_whitelist",
+            &format!("ARG:{WORKER_LOCAL_PROTOCOL_WHITELIST}"),
+            "ARG:-i",
+            "ARG:file:///media/sub.srt",
+            "ARG:-c:v",
+            "ARG:libx264",
+            "ARG:out.m3u8",
+        ]
+    );
+
+    // 2. Symlink escape (`dir/escape-to-etc -> /etc`) is canonicalized and clamped to worker safe directory.
+    let out_sym = run_job(
+        vec!["-i".into(), "/srv/media/a.mkv".into(), "out.m3u8".into()],
+        escape_symlink.to_string_lossy().into_owned(),
+    )
+    .await;
+    assert_eq!(
+        out_sym.lines().next(),
+        Some(format!("PWD:{}", canonical_safe.display()).as_str())
+    );
+
+    // 3. Allowed subdirectory inside worker safe root is preserved.
+    let out_sub = run_job(
+        vec!["-i".into(), "/srv/media/a.mkv".into(), "out.m3u8".into()],
+        allowed_sub.to_string_lossy().into_owned(),
+    )
+    .await;
+    assert_eq!(
+        out_sub.lines().next(),
+        Some(format!("PWD:{}", canonical_sub.display()).as_str())
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = worker_handle.await;
 }

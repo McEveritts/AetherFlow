@@ -1488,6 +1488,12 @@ fn pattern_matches(pattern: &str, canonical: &CanonicalPath, case_insensitive: b
     pat_segs.len() == req_segs.len()
 }
 
+/// Returns `true` when `id` names Jellyfin or a `jellyfin-ffmpeg*` package, which may be
+/// updated remotely using `updates:write` without requiring full `marketplace:write`.
+pub(crate) fn is_jellyfin_update_package_id(id: &str) -> bool {
+    id.eq_ignore_ascii_case("jellyfin") || id.to_ascii_lowercase().starts_with("jellyfin-ffmpeg")
+}
+
 /// Classifies `(method, canonical_path)` into an explicit allow requirement, forbidden decision,
 /// or fail-closed unclassified decision.
 pub fn classify(method: &Method, canonical: &CanonicalPath) -> RouteDecision {
@@ -1510,6 +1516,18 @@ pub fn classify(method: &Method, canonical: &CanonicalPath) -> RouteDecision {
 
     for rule in ALLOWED_RULES {
         if rule.method == req_method && pattern_matches(rule.pattern, canonical, false) {
+            if rule.pattern == "/api/v1/admin/packages/:id/update" {
+                let is_jellyfin = canonical
+                    .segments()
+                    .get(4)
+                    .is_some_and(|id| is_jellyfin_update_package_id(id));
+                if !is_jellyfin {
+                    return RouteDecision::Allowed(ScopeRequirement::Area(
+                        Area::Marketplace,
+                        Mode::Write,
+                    ));
+                }
+            }
             return RouteDecision::Allowed(rule.requirement);
         }
     }
@@ -2004,29 +2022,55 @@ mod tests {
 
     #[test]
     fn package_update_route_accepts_marketplace_write_or_updates_write_only() {
-        let canonical = canonicalize("/api/v1/admin/packages/jellyfin/update").unwrap();
-        let RouteDecision::Allowed(req) = classify(&Method::POST, &canonical) else {
-            panic!("expected Allowed classification for POST /api/v1/admin/packages/:id/update");
-        };
-        assert_eq!(req.label(), "marketplace:write | updates:write");
-
         let mut updates_write = AccessMap::none();
         updates_write.updates = AccessLevel::Write;
-        assert!(access_allows(&updates_write, req));
 
         let mut marketplace_write = AccessMap::none();
         marketplace_write.marketplace = AccessLevel::Write;
-        assert!(access_allows(&marketplace_write, req));
 
         let mut updates_read = AccessMap::none();
         updates_read.updates = AccessLevel::Read;
-        assert!(!access_allows(&updates_read, req));
 
         let mut marketplace_read = AccessMap::none();
         marketplace_read.marketplace = AccessLevel::Read;
-        assert!(!access_allows(&marketplace_read, req));
 
-        assert!(!access_allows(&AccessMap::read_only_all(), req));
-        assert!(!access_allows(&AccessMap::none(), req));
+        // Jellyfin and jellyfin-ffmpeg* allow updates:write OR marketplace:write.
+        for path in [
+            "/api/v1/admin/packages/jellyfin/update",
+            "/api/v1/admin/packages/Jellyfin/update",
+            "/api/v1/admin/packages/jellyfin-ffmpeg/update",
+            "/api/v1/admin/packages/jellyfin-ffmpeg8/update",
+        ] {
+            let canonical = canonicalize(path).unwrap();
+            let RouteDecision::Allowed(req) = classify(&Method::POST, &canonical) else {
+                panic!("expected Allowed classification for POST {path}");
+            };
+            assert_eq!(req.label(), "marketplace:write | updates:write", "{path}");
+            assert!(access_allows(&updates_write, req), "{path}");
+            assert!(access_allows(&marketplace_write, req), "{path}");
+            assert!(!access_allows(&updates_read, req), "{path}");
+            assert!(!access_allows(&marketplace_read, req), "{path}");
+            assert!(!access_allows(&AccessMap::read_only_all(), req), "{path}");
+            assert!(!access_allows(&AccessMap::none(), req), "{path}");
+        }
+
+        // Non-Jellyfin packages require marketplace:write strictly; updates:write is denied.
+        for path in [
+            "/api/v1/admin/packages/sonarr/update",
+            "/api/v1/admin/packages/plex/update",
+            "/api/v1/admin/packages/radarr/update",
+            "/api/v1/admin/packages/jellyfin-plugin/update",
+        ] {
+            let canonical = canonicalize(path).unwrap();
+            let RouteDecision::Allowed(req) = classify(&Method::POST, &canonical) else {
+                panic!("expected Allowed classification for POST {path}");
+            };
+            assert_eq!(req.label(), "marketplace:write", "{path}");
+            assert!(!access_allows(&updates_write, req), "{path}");
+            assert!(access_allows(&marketplace_write, req), "{path}");
+            assert!(!access_allows(&marketplace_read, req), "{path}");
+            assert!(!access_allows(&AccessMap::read_only_all(), req), "{path}");
+            assert!(!access_allows(&AccessMap::none(), req), "{path}");
+        }
     }
 }

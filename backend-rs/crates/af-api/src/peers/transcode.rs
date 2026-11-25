@@ -22,7 +22,9 @@
 //!   `X-AF-Grant-Token` + `AccessLevel::Write` on `Area::Transcoding` + active `account_type='peer'`
 //!   run-as user + per-link WebSocket concurrency permit, auditing every start, denial, and end.
 
-use super::errors::{redact_sensitive_text, PeerError};
+use super::errors::{
+    bytes_rejection_to_peer_error, parse_required_json_bytes, redact_sensitive_text, PeerError,
+};
 use super::grants::read_committed_received_grant_token;
 use super::health::{evaluate_compatibility, CompatibilityStatus};
 use super::listener::{
@@ -40,9 +42,10 @@ use crate::ws::{extract_client_ip_for_peer, PeerIp};
 use af_db::peers::{self as db_peers, PeerLink, PeerMount, TranscodeJob, TranscodeWorker};
 use af_models::constant_time_eq;
 use af_runner::{
-    systemd_escape_path, JellyfinTranscodePaths, ParityFileCleanupReport, PeerCredentialSecret,
-    PeerCredentialSlot, PeerNetworkError, PeerNetworkRequest, PeerStorageRequest,
-    PeerTranscodeError, PeerTranscodeRequest, PeerTranscodeResponse, DEFAULT_JELLYFIN_TMP_DIR,
+    systemd_escape_path, validate_peer_mount_segment, JellyfinTranscodePaths,
+    ParityFileCleanupReport, PeerCredentialSecret, PeerCredentialSlot, PeerNetworkError,
+    PeerNetworkRequest, PeerStorageRequest, PeerTranscodeError, PeerTranscodeRequest,
+    PeerTranscodeResponse, DEFAULT_JELLYFIN_CACHE_DIR, DEFAULT_JELLYFIN_TMP_DIR,
     DEFAULT_JELLYFIN_TRANSCODE_DIR, DEFAULT_PEER_MOUNTS_ROOT, DEFAULT_TRANSCODE_SHIM_PATH,
 };
 use af_transcode::argv;
@@ -61,6 +64,7 @@ use af_transcode::protocol::{
 };
 use axum::body::Bytes;
 use axum::extract::connect_info::ConnectInfo;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, State};
@@ -72,7 +76,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::future::BoxFuture;
 use futures::{SinkExt as _, StreamExt as _};
 use rand::Rng as _;
-use rusqlite::OptionalExtension as _;
+use rusqlite::{OptionalExtension as _, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest as _, Sha1};
 use std::cmp::Ordering;
@@ -109,13 +113,59 @@ const JELLYFIN_PROBE_MAX_BODY_BYTES: usize = 256 * 1024;
 const JELLYFIN_ENABLE_PROBE_RETRIES: usize = 5;
 const JELLYFIN_ENABLE_PROBE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_PARITY_TEST_TIMEOUT: Duration = Duration::from_secs(5);
-const TRANSCODE_MOUNT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+/// Strictly exceeds `af_runner::peer_transcode::TRANSCODE_MOUNT_CLIENT_TIMEOUT` (150 s) so slow mount starts on
+/// the worker do not get prematurely cancelled by the controller HTTP client.
+pub(crate) const TRANSCODE_MOUNT_SYNC_TIMEOUT: Duration = Duration::from_secs(180);
+const AUTO_RESYNC_MOUNT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PENDING_DISPATCHER_CONNS: usize = 128;
 const MAX_TUNNEL_TRANSCODE_PATHS: usize = 32;
+const MAX_TRANSCODE_PATH_BYTES: usize = 4096;
 const MOUNT_PURPOSE_MEDIA: &str = "media";
 const MOUNT_PURPOSE_TRANSCODE: &str = "transcode";
 const MOUNT_PURPOSE_TRANSCODE_BIND: &str = "transcode_bind";
 const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+const DEFAULT_BIND_MEDIA_ROOTS: &[&str] = &[
+    "/mnt",
+    "/media",
+    "/srv",
+    "/downloads",
+    "/data",
+    "/var/lib/jellyfin",
+];
+
+const FORBIDDEN_TRANSCODE_SYSTEM_PREFIXES: &[&str] = &[
+    "/etc",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/boot",
+    "/root",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/usr",
+    "/var/lib/aetherflow",
+    "/var/run",
+    "/var/spool",
+    "/opt/AetherFlow",
+];
+
+const FORBIDDEN_TRANSCODE_EXACT_PATHS: &[&str] = &[
+    "/",
+    "/tmp",
+    "/var/tmp",
+    "/var",
+    "/home",
+    "/mnt",
+    "/mnt/af-peers",
+    "/var/lib",
+    "/var/cache",
+];
 
 static TEMP_DISPATCHER_SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -392,7 +442,16 @@ impl TranscodeRuntimeState {
         link_id: &str,
         max_jobs: usize,
     ) -> Option<ActiveJobGuard> {
-        let cap = max_jobs.clamp(WORKER_MAX_JOBS_MIN as usize, WORKER_MAX_JOBS_MAX as usize);
+        let mut cap = max_jobs.clamp(WORKER_MAX_JOBS_MIN as usize, WORKER_MAX_JOBS_MAX as usize);
+        if let Some(worker_cap) = self
+            .remote_capabilities_for(link_id)
+            .and_then(|c| c.worker_max_jobs)
+            .filter(|&n| n > 0)
+        {
+            let clamped_worker_cap =
+                worker_cap.clamp(WORKER_MAX_JOBS_MIN as usize, WORKER_MAX_JOBS_MAX as usize);
+            cap = cap.min(clamped_worker_cap);
+        }
         let mut map = self.active_jobs.lock().unwrap_or_else(|e| e.into_inner());
         let current = map.get(link_id).copied().unwrap_or(0);
         if current >= cap {
@@ -575,6 +634,7 @@ impl Drop for ActiveJobGuard {
 /// Returns the currently cached local `TranscodeCapabilities` without ever spawning a
 /// subprocess probe. Used by public `GET /health` so unconfigured standalone instances remain
 /// completely dormant and avoid disclosing local hardware/package details.
+#[allow(dead_code)]
 pub(crate) fn cached_local_capabilities_snapshot_only(
     runtime: &PeerRuntime,
 ) -> Option<TranscodeCapabilities> {
@@ -920,34 +980,62 @@ pub(crate) async fn handle_remote_health_transcode_caps(
         .or_else(|| remote_caps.package_version.clone());
     let db_encoders_json = serde_json::to_string(&remote_caps.encoders).ok();
     let db_render_node = remote_caps.primary_render_node.clone();
-    let link_id_c = link.id.clone();
+    let link_id_read = link.id.clone();
 
-    let worker_enabled = runtime
+    // Compare incoming metadata against the existing `transcode_workers` row first so steady-state
+    // 15-second health ticks skip unconditional SQLite write transactions.
+    let existing_worker = runtime
         .db
-        .write(&server, "health_transcode_sync", move |conn| {
-            conn.execute(
-                "INSERT INTO transcode_workers (\
-                    link_id, enabled, weight, max_jobs, ffmpeg_version, encoders, render_node, \
-                    parity_ok, parity_error\
-                 ) VALUES (?1, 0, 1, 2, ?2, ?3, ?4, 0, NULL) \
-                 ON CONFLICT(link_id) DO UPDATE SET \
-                    ffmpeg_version = excluded.ffmpeg_version, \
-                    encoders = excluded.encoders, \
-                    render_node = excluded.render_node",
-                rusqlite::params![link_id_c, db_ffmpeg_ver, db_encoders_json, db_render_node],
-            )
-            .map_err(|err| {
-                PeerError::internal("local", "health_transcode_sync", err.to_string())
-            })?;
-
-            let enabled = db_peers::get_transcode_worker(conn, &link_id_c)
+        .read(&server, "health_transcode_check", move |conn| {
+            Ok(db_peers::get_transcode_worker(conn, &link_id_read)
                 .ok()
-                .flatten()
-                .is_some_and(|w| w.enabled);
-            Ok(enabled)
+                .flatten())
         })
         .await
-        .unwrap_or(false);
+        .ok()
+        .flatten();
+
+    let worker_enabled = match existing_worker {
+        Some(existing)
+            if existing.ffmpeg_version == db_ffmpeg_ver
+                && existing.encoders == db_encoders_json
+                && existing.render_node == db_render_node =>
+        {
+            existing.enabled
+        }
+        _ => {
+            let link_id_c = link.id.clone();
+            runtime
+                .db
+                .write(&server, "health_transcode_sync", move |conn| {
+                    conn.execute(
+                        "INSERT INTO transcode_workers (\
+                            link_id, enabled, weight, max_jobs, ffmpeg_version, encoders, render_node, \
+                            parity_ok, parity_error\
+                         ) VALUES (?1, 0, 1, 2, ?2, ?3, ?4, 0, NULL) \
+                         ON CONFLICT(link_id) DO UPDATE SET \
+                            ffmpeg_version = excluded.ffmpeg_version, \
+                            encoders = excluded.encoders, \
+                            render_node = excluded.render_node \
+                         WHERE transcode_workers.ffmpeg_version IS NOT excluded.ffmpeg_version \
+                            OR transcode_workers.encoders IS NOT excluded.encoders \
+                            OR transcode_workers.render_node IS NOT excluded.render_node",
+                        rusqlite::params![link_id_c, db_ffmpeg_ver, db_encoders_json, db_render_node],
+                    )
+                    .map_err(|err| {
+                        PeerError::internal("local", "health_transcode_sync", err.to_string())
+                    })?;
+
+                    let enabled = db_peers::get_transcode_worker(conn, &link_id_c)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|w| w.enabled);
+                    Ok(enabled)
+                })
+                .await
+                .unwrap_or(false)
+        }
+    };
 
     if !worker_enabled {
         return;
@@ -1033,75 +1121,46 @@ pub(crate) async fn prune_old_transcode_jobs(runtime: &PeerRuntime) -> usize {
         .unwrap_or(0)
 }
 
-/// Best-effort teardown of transcode exports/mounts and runtime caches when a peer link is
-/// revoked or deleted. Completely dormant (zero runner calls) if `link_id` has no transcode
-/// worker row or transcode mounts.
-pub(crate) async fn cleanup_revoked_link_transcode_best_effort(
+/// Tears down local `transcode_bind` (first) and `transcode` (second) mounts for `link_id`
+/// while the caller already holds `runtime.lock_link(link_id)`, removing cleaned `peer_mounts`
+/// rows inside an IMMEDIATE SQLite transaction and propagating runner or DB errors so retries
+/// never leave orphan mounts behind.
+async fn cleanup_worker_transcode_mounts_for_link_locked(
     runtime: &PeerRuntime,
     link_id: &str,
-) {
-    runtime.transcode_state.clear_link_state(link_id);
-
+    step: &str,
+) -> Result<(), PeerError> {
     let server = runtime.local_server_name();
     let lid = link_id.to_string();
-    let (had_worker, transcode_mounts, bind_mounts) = runtime
+    let server_c = server.clone();
+    let step_c = step.to_string();
+    let (bind_mounts, transcode_mounts) = runtime
         .db
-        .read(&server, "transcode_revoke_cleanup", move |conn| {
-            let has_worker = db_peers::get_transcode_worker(conn, &lid)
-                .ok()
-                .flatten()
-                .is_some();
-            let all_mounts = db_peers::list_peer_mounts_for_link(conn, &lid).unwrap_or_default();
-            let transcode_mounts: Vec<(String, String)> = all_mounts
-                .iter()
-                .filter(|m| m.purpose == MOUNT_PURPOSE_TRANSCODE)
-                .map(|m| (m.id.clone(), m.mount_path.clone()))
-                .collect();
+        .read(&server, step, move |conn| {
+            let all_mounts = db_peers::list_peer_mounts_for_link(conn, &lid)
+                .map_err(|err| PeerError::internal(&server_c, &step_c, err.to_string()))?;
             let bind_mounts: Vec<(String, String)> = all_mounts
                 .iter()
                 .filter(|m| m.purpose == MOUNT_PURPOSE_TRANSCODE_BIND)
                 .map(|m| (m.id.clone(), m.mount_path.clone()))
                 .collect();
-            Ok((has_worker, transcode_mounts, bind_mounts))
+            let transcode_mounts: Vec<(String, String)> = all_mounts
+                .iter()
+                .filter(|m| m.purpose == MOUNT_PURPOSE_TRANSCODE)
+                .map(|m| (m.id.clone(), m.mount_path.clone()))
+                .collect();
+            Ok((bind_mounts, transcode_mounts))
         })
-        .await
-        .unwrap_or((false, Vec::new(), Vec::new()));
+        .await?;
 
-    if !had_worker && transcode_mounts.is_empty() && bind_mounts.is_empty() {
-        return;
+    if bind_mounts.is_empty() && transcode_mounts.is_empty() {
+        return Ok(());
     }
 
-    if had_worker {
-        let lid_upd = link_id.to_string();
-        let _ = runtime
-            .db
-            .write(&server, "transcode_revoke_cleanup", move |conn| {
-                let _ = conn.execute(
-                    "UPDATE transcode_workers SET enabled = 0 WHERE link_id = ?1",
-                    rusqlite::params![lid_upd],
-                );
-                Ok(())
-            })
-            .await;
-
-        if let Err(err) = runtime
-            .transcode_runner
-            .dispatch(&PeerTranscodeRequest::RemoveTranscodeExports {
-                link_id: link_id.to_string(),
-            })
-            .await
-        {
-            if !err.is_not_found() {
-                tracing::warn!(
-                    link_id = %link_id,
-                    %err,
-                    "Best-effort transcode export removal failed during link revocation"
-                );
-            }
-        }
-    }
-
+    let mut first_error: Option<PeerError> = None;
     let mut removed_mount_ids: Vec<String> = Vec::new();
+
+    // Tear down `transcode_bind` mounts BEFORE `transcode` or media NFS mounts.
     for (mount_id, mount_path) in bind_mounts {
         match runtime
             .transcode_runner
@@ -1113,9 +1172,13 @@ pub(crate) async fn cleanup_revoked_link_transcode_best_effort(
             Err(err) => {
                 tracing::warn!(
                     link_id = %link_id,
+                    step = %step,
                     %err,
-                    "Best-effort transcode bind-mount removal failed during link revocation"
+                    "Transcode bind-mount removal failed during teardown"
                 );
+                if first_error.is_none() {
+                    first_error = Some(map_transcode_runner_error(err, &server, step));
+                }
             }
         }
     }
@@ -1140,27 +1203,242 @@ pub(crate) async fn cleanup_revoked_link_transcode_best_effort(
             Err(err) => {
                 tracing::warn!(
                     link_id = %link_id,
+                    step = %step,
                     %err,
-                    "Best-effort transcode mount removal failed during link revocation"
+                    "Transcode NFS mount removal failed during teardown"
                 );
+                if first_error.is_none() {
+                    first_error = Some(map_transcode_runner_error(err, &server, step));
+                }
             }
         }
     }
 
     if !removed_mount_ids.is_empty() {
         let lid_del = link_id.to_string();
-        let _ = runtime
+        let server_c = server.clone();
+        let step_c = step.to_string();
+        if let Err(err) = runtime
             .db
-            .write(&server, "transcode_revoke_cleanup", move |conn| {
+            .write(&server, step, move |conn| {
+                let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+                    .map_err(|e| PeerError::internal(&server_c, &step_c, e.to_string()))?;
                 for mid in removed_mount_ids {
-                    let _ = conn.execute(
-                        "DELETE FROM peer_mounts WHERE id = ?1 AND link_id = ?2",
-                        rusqlite::params![mid, lid_del],
-                    );
+                    tx.execute(
+                        "DELETE FROM peer_mounts WHERE id = ?1 AND link_id = ?2 \
+                         AND purpose IN (?3, ?4)",
+                        rusqlite::params![
+                            mid,
+                            lid_del,
+                            MOUNT_PURPOSE_TRANSCODE,
+                            MOUNT_PURPOSE_TRANSCODE_BIND
+                        ],
+                    )
+                    .map_err(|e| PeerError::internal(&server_c, &step_c, e.to_string()))?;
                 }
+                tx.commit()
+                    .map_err(|e| PeerError::internal(&server_c, &step_c, e.to_string()))?;
                 Ok(())
             })
-            .await;
+            .await
+        {
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+    }
+
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Tears down all local `transcode_bind` (first) and `transcode` (second) mounts owned by
+/// `link_id` when inbound `transcoding: write` is revoked or downgraded, or when disabling the
+/// local worker service. Completely dormant (zero locks or runner calls) when `link_id` has no
+/// worker transcode mounts.
+pub(crate) async fn cleanup_worker_transcode_mounts_for_link(
+    runtime: &PeerRuntime,
+    link_id: &str,
+    step: &str,
+) -> Result<(), PeerError> {
+    let server = runtime.local_server_name();
+    let lid = link_id.to_string();
+    let server_c = server.clone();
+    let step_c = step.to_string();
+    let has_any = runtime
+        .db
+        .read(&server, step, move |conn| {
+            let mounts = db_peers::list_peer_mounts_for_link(conn, &lid)
+                .map_err(|err| PeerError::internal(&server_c, &step_c, err.to_string()))?;
+            Ok(mounts.iter().any(|m| {
+                m.purpose == MOUNT_PURPOSE_TRANSCODE || m.purpose == MOUNT_PURPOSE_TRANSCODE_BIND
+            }))
+        })
+        .await?;
+    if !has_any {
+        return Ok(());
+    }
+
+    let _link_guard = runtime.lock_link(link_id, step).await?;
+    cleanup_worker_transcode_mounts_for_link_locked(runtime, link_id, step).await
+}
+
+/// Tears down all transcode bind mounts, transcode NFS mounts, transcode exports, and DB rows
+/// (`peer_mounts` and `transcode_workers`) for `link_id` while the caller holds
+/// `runtime.lock_link(link_id)`. Propagates runner/DB errors instead of swallowing them so link
+/// revocation remains retryable until all transcode resources are cleanly removed.
+///
+/// Completely dormant (zero runner calls) when `link_id` has no `transcode_workers` row or
+/// transcode/bind mounts.
+pub(crate) async fn cleanup_revoked_link_transcode_locked(
+    runtime: &PeerRuntime,
+    link_id: &str,
+    step: &str,
+) -> Result<(), PeerError> {
+    runtime.transcode_state.clear_link_state(link_id);
+
+    let server = runtime.local_server_name();
+    let lid = link_id.to_string();
+    let server_c = server.clone();
+    let step_c = step.to_string();
+    let (had_worker, has_mounts) = runtime
+        .db
+        .read(&server, step, move |conn| {
+            let has_worker = db_peers::get_transcode_worker(conn, &lid)
+                .map_err(|err| PeerError::internal(&server_c, &step_c, err.to_string()))?
+                .is_some();
+            let all_mounts = db_peers::list_peer_mounts_for_link(conn, &lid)
+                .map_err(|err| PeerError::internal(&server_c, &step_c, err.to_string()))?;
+            let has_mounts = all_mounts.iter().any(|m| {
+                m.purpose == MOUNT_PURPOSE_TRANSCODE || m.purpose == MOUNT_PURPOSE_TRANSCODE_BIND
+            });
+            Ok((has_worker, has_mounts))
+        })
+        .await?;
+
+    if !had_worker && !has_mounts {
+        return Ok(());
+    }
+
+    let mut first_error: Option<PeerError> = None;
+
+    // 1. Tear down `transcode_bind` first, then `transcode` mounts, deleting cleaned DB rows.
+    if has_mounts {
+        if let Err(err) =
+            cleanup_worker_transcode_mounts_for_link_locked(runtime, link_id, step).await
+        {
+            first_error = Some(err);
+        }
+    }
+
+    // 2. Disable and tear down controller transcode exports + `transcode_workers` row.
+    if had_worker {
+        let lid_upd = link_id.to_string();
+        let server_c = server.clone();
+        let step_c = step.to_string();
+        if let Err(err) = runtime
+            .db
+            .write(&server, step, move |conn| {
+                conn.execute(
+                    "UPDATE transcode_workers SET enabled = 0, parity_ok = 0 WHERE link_id = ?1",
+                    rusqlite::params![lid_upd],
+                )
+                .map_err(|e| PeerError::internal(&server_c, &step_c, e.to_string()))?;
+                Ok(())
+            })
+            .await
+        {
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
+
+        match runtime
+            .transcode_runner
+            .dispatch(&PeerTranscodeRequest::RemoveTranscodeExports {
+                link_id: link_id.to_string(),
+            })
+            .await
+        {
+            Ok(_) => {
+                let lid_del = link_id.to_string();
+                let server_c = server.clone();
+                let step_c = step.to_string();
+                if let Err(err) = runtime
+                    .db
+                    .write(&server, step, move |conn| {
+                        conn.execute(
+                            "DELETE FROM transcode_workers WHERE link_id = ?1",
+                            rusqlite::params![lid_del],
+                        )
+                        .map_err(|e| PeerError::internal(&server_c, &step_c, e.to_string()))?;
+                        Ok(())
+                    })
+                    .await
+                {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+            Err(err) if err.is_not_found() => {
+                let lid_del = link_id.to_string();
+                let server_c = server.clone();
+                let step_c = step.to_string();
+                if let Err(db_err) = runtime
+                    .db
+                    .write(&server, step, move |conn| {
+                        conn.execute(
+                            "DELETE FROM transcode_workers WHERE link_id = ?1",
+                            rusqlite::params![lid_del],
+                        )
+                        .map_err(|e| PeerError::internal(&server_c, &step_c, e.to_string()))?;
+                        Ok(())
+                    })
+                    .await
+                {
+                    if first_error.is_none() {
+                        first_error = Some(db_err);
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    link_id = %link_id,
+                    step = %step,
+                    %err,
+                    "Transcode export removal failed during link revocation"
+                );
+                if first_error.is_none() {
+                    first_error = Some(map_transcode_runner_error(err, &server, step));
+                }
+            }
+        }
+    }
+
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Thin logging wrapper around [`cleanup_revoked_link_transcode_locked`] retained for any internal
+/// best-effort callers and tests.
+#[allow(dead_code)]
+pub(crate) async fn cleanup_revoked_link_transcode_best_effort(
+    runtime: &PeerRuntime,
+    link_id: &str,
+) {
+    if let Err(err) =
+        cleanup_revoked_link_transcode_locked(runtime, link_id, "transcode_revoke_cleanup").await
+    {
+        tracing::warn!(
+            link_id = %link_id,
+            %err,
+            "Best-effort transcode revocation cleanup encountered an error"
+        );
     }
 }
 
@@ -2266,6 +2544,7 @@ pub(crate) enum TunnelTranscodeMountRequest {
         #[serde(default)]
         media_binds: Vec<TranscodeMediaBindSpec>,
     },
+    #[serde(alias = "remove")]
     Teardown,
 }
 
@@ -2287,18 +2566,247 @@ fn dedup_preserve_order(paths: Vec<String>) -> Vec<String> {
     out
 }
 
+fn is_under_peer_mounts_root(path: &str) -> bool {
+    let root = DEFAULT_PEER_MOUNTS_ROOT.trim_end_matches('/');
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn is_strict_descendant_path(child: &str, ancestor: &str) -> bool {
+    if child == ancestor {
+        return false;
+    }
+    if ancestor == "/" {
+        return child.starts_with('/');
+    }
+    child
+        .strip_prefix(ancestor)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn has_sensitive_dot_segment(path: &str) -> bool {
+    path.split('/').skip(1).any(|seg| seg == ".ssh")
+}
+
+fn validate_canonical_transcode_path_syntax(
+    path: &str,
+    allow_peer_mounts_subpath: bool,
+) -> Result<String, String> {
+    if path.is_empty() || path.len() > MAX_TRANSCODE_PATH_BYTES {
+        return Err("Path must be a non-empty canonical absolute path".to_string());
+    }
+    if path.trim() != path {
+        return Err("Path must not have leading or trailing whitespace".to_string());
+    }
+    if !path.starts_with('/') {
+        return Err("Path must be an absolute path starting with '/'".to_string());
+    }
+    if path == "/" || path.ends_with('/') || path.contains("//") {
+        return Err(
+            "Path must be a canonical non-root path without duplicate or trailing slashes"
+                .to_string(),
+        );
+    }
+    if path.chars().any(|c| {
+        c.is_control()
+            || matches!(
+                c,
+                '"' | '\'' | '\\' | '#' | ';' | ',' | ':' | '(' | ')' | '*' | '?' | '[' | ']'
+            )
+    }) {
+        return Err("Path contains disallowed control or config-syntax characters".to_string());
+    }
+    for segment in path.split('/').skip(1) {
+        if segment.is_empty() || segment == "." || segment == ".." || segment.len() > 255 {
+            return Err(
+                "Path must not contain empty, '.', '..', or oversized segments".to_string(),
+            );
+        }
+    }
+    if FORBIDDEN_TRANSCODE_EXACT_PATHS.contains(&path) {
+        return Err(format!("Refusing sensitive top-level directory '{path}'"));
+    }
+    for prefix in FORBIDDEN_TRANSCODE_SYSTEM_PREFIXES {
+        if path == *prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return Err(format!("Refusing restricted system path '{path}'"));
+        }
+    }
+    if is_under_peer_mounts_root(path) {
+        if !allow_peer_mounts_subpath {
+            return Err(format!(
+                "Refusing peer mount hierarchy path '{path}' for transcode directory"
+            ));
+        }
+        let _ = extract_peer_mount_segments(path)?;
+    }
+    Ok(path.to_string())
+}
+
+fn extract_peer_mount_segments(path: &str) -> Result<(String, String), String> {
+    let prefix = format!("{}/", DEFAULT_PEER_MOUNTS_ROOT.trim_end_matches('/'));
+    let Some(rest) = path.strip_prefix(&prefix) else {
+        return Err(format!(
+            "Peer mount path '{path}' must lie under {DEFAULT_PEER_MOUNTS_ROOT}/<link>/<export>"
+        ));
+    };
+    let mut parts = rest.split('/');
+    let link_seg = parts.next().unwrap_or("");
+    let export_seg = parts.next().unwrap_or("");
+    if link_seg.is_empty() || export_seg.is_empty() {
+        return Err(format!(
+            "Peer mount path '{path}' must specify <link>/<export>"
+        ));
+    }
+    validate_peer_mount_segment(link_seg).map_err(|err| err.to_string())?;
+    validate_peer_mount_segment(export_seg).map_err(|err| err.to_string())?;
+    Ok((link_seg.to_string(), export_seg.to_string()))
+}
+
+fn normalize_allowed_bind_root(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('/') || trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    let normalized = if trimmed.len() > 1 {
+        trimmed.trim_end_matches('/')
+    } else {
+        trimmed
+    };
+    if normalized == "/" || normalized.contains("//") {
+        return None;
+    }
+    if normalized
+        .split('/')
+        .skip(1)
+        .any(|s| s.is_empty() || s == "." || s == "..")
+    {
+        return None;
+    }
+    Some(normalized.to_string())
+}
+
+fn resolve_worker_bind_media_allowed_roots(runtime: &PeerRuntime) -> Option<Vec<String>> {
+    #[cfg(test)]
+    if let Some(ref roots) = runtime.allowed_fs_roots_override {
+        return Some(
+            roots
+                .iter()
+                .filter_map(|p| normalize_allowed_bind_root(&p.to_string_lossy()))
+                .collect(),
+        );
+    }
+    let _ = runtime;
+    let env_raw = std::env::var("AF_ALLOWED_FS_ROOTS").ok()?;
+    let trimmed = env_raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        trimmed
+            .split(',')
+            .filter_map(normalize_allowed_bind_root)
+            .collect(),
+    )
+}
+
+/// Enforces the worker-side explicit allowlist on `transcode_paths`: every path must be canonical
+/// and match one of the worker's own inspected Jellyfin cache/transcode/tmp directories, default
+/// `/var/cache/jellyfin*` directories, or a direct single-segment subdirectory under
+/// `/var/cache/jellyfin/`.
+fn validate_worker_transcode_path_allowed(
+    raw_path: &str,
+    worker_paths: &JellyfinTranscodePaths,
+) -> Result<String, String> {
+    let canonical = validate_canonical_transcode_path_syntax(raw_path, false)?;
+    let inspected_temp = worker_paths
+        .transcoding_temp_path
+        .trim()
+        .trim_end_matches('/');
+    let inspected_tmp = worker_paths.tmp_dir.trim().trim_end_matches('/');
+    let inspected_cache = worker_paths.cache_dir.trim().trim_end_matches('/');
+    let exact_allowed = [
+        inspected_temp,
+        inspected_tmp,
+        inspected_cache,
+        DEFAULT_JELLYFIN_CACHE_DIR,
+        DEFAULT_JELLYFIN_TRANSCODE_DIR,
+        DEFAULT_JELLYFIN_TMP_DIR,
+    ];
+    if exact_allowed
+        .iter()
+        .any(|allowed| !allowed.is_empty() && canonical == *allowed)
+    {
+        return Ok(canonical);
+    }
+    if let Some(sub) = canonical.strip_prefix(&format!("{DEFAULT_JELLYFIN_CACHE_DIR}/")) {
+        if !sub.is_empty() && !sub.contains('/') && sub != "." && sub != ".." {
+            return Ok(canonical);
+        }
+    }
+    Err(format!(
+        "Transcode mount path '{canonical}' is outside the worker Jellyfin cache/transcode allowlist"
+    ))
+}
+
+/// Enforces the worker-side allowlist on controller-holds-media `BindMedia` target paths (`to`
+/// outside `/mnt/af-peers/`).
+fn validate_bind_media_target_allowlist(
+    canonical_to: &str,
+    configured_roots: Option<&[String]>,
+) -> Result<(), String> {
+    if has_sensitive_dot_segment(canonical_to) {
+        return Err(format!(
+            "Refusing sensitive bind target path '{canonical_to}'"
+        ));
+    }
+    if let Some(roots) = configured_roots {
+        if roots
+            .iter()
+            .any(|root| canonical_to == root || is_strict_descendant_path(canonical_to, root))
+        {
+            return Ok(());
+        }
+        return Err(format!(
+            "Bind target '{canonical_to}' is outside allowed AF_ALLOWED_FS_ROOTS media roots"
+        ));
+    }
+    if DEFAULT_BIND_MEDIA_ROOTS
+        .iter()
+        .any(|root| is_strict_descendant_path(canonical_to, root))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "Bind target '{canonical_to}' is outside allowed media roots"
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedBindEntry {
+    spec: TranscodeMediaBindSpec,
+    calling_link_segment: String,
+}
+
 /// Authenticated worker-side path-parity mount synchronization endpoint on the isolated WireGuard
 /// peer tunnel listener (`POST /peer/v1/transcode/mounts`).
 ///
 /// Enforces active link + constant-time `X-AF-Link-Token` + constant-time `X-AF-Grant-Token` +
-/// `transcoding: write` + active `account_type = 'peer'` admin subject. Cross-checks every
-/// requested media bind against this worker's own `peer_exports` / `peer_mounts` rows for the
-/// calling link so a peer can never bind arbitrary local host directories.
+/// `transcoding: write` + active `account_type = 'peer'` admin subject. Enforces explicit
+/// worker-side allowlists on `transcode_paths` and `media_binds`, calling-link confinement under
+/// `/mnt/af-peers/`, cross-checks every media bind against this worker's own `peer_exports` /
+/// `peer_mounts` rows for the calling link, and rolls back atomically on partial mount or DB
+/// failure.
 pub(crate) async fn handle_tunnel_transcode_mounts(
     State(runtime): State<Arc<PeerRuntime>>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let route_label = "POST /peer/v1/transcode/mounts";
     let local_server = runtime.local_server_name();
@@ -2322,17 +2830,31 @@ pub(crate) async fn handle_tunnel_transcode_mounts(
         Err(resp) => return *resp,
     };
 
-    let req: TunnelTranscodeMountRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
+    let body = match body {
+        Ok(bytes) => bytes,
         Err(err) => {
-            return PeerError::invalid_request(
-                &local_server,
-                "tunnel_transcode_mounts",
-                format!("Invalid transcode mount request payload: {err}"),
-                "Provide {\"action\":\"sync\",\"transcode_paths\":[...]} or {\"action\":\"teardown\"}",
-            )
-            .into_response();
+            return bytes_rejection_to_peer_error(err, &local_server, "tunnel_transcode_mounts")
+                .into_response();
         }
+    };
+    if body.len() > ADMIN_TRANSCODE_BODY_LIMIT_BYTES {
+        return PeerError::payload_too_large(
+            &local_server,
+            "tunnel_transcode_mounts",
+            format!("Request body exceeds the {ADMIN_TRANSCODE_BODY_LIMIT_BYTES}-byte limit"),
+            "Reduce the transcode mount sync payload size and retry",
+        )
+        .into_response();
+    }
+
+    let req: TunnelTranscodeMountRequest = match parse_required_json_bytes(
+        &headers,
+        &body,
+        &local_server,
+        "tunnel_transcode_mounts",
+    ) {
+        Ok(r) => r,
+        Err(err) => return err.into_response(),
     };
 
     match handle_tunnel_transcode_mounts_inner(&runtime, &verified, req).await {
@@ -2343,6 +2865,51 @@ pub(crate) async fn handle_tunnel_transcode_mounts(
         )
             .into_response(),
         Err(err) => err.into_response(),
+    }
+}
+
+async fn rollback_newly_created_worker_mounts(
+    runtime: &PeerRuntime,
+    link_id: &str,
+    newly_applied_binds: &[VerifiedBindEntry],
+    newly_mounted_tc_paths: &[String],
+) {
+    for prev in newly_applied_binds.iter().rev() {
+        if let Err(rb_err) = runtime
+            .transcode_runner
+            .dispatch(&PeerTranscodeRequest::RemoveBindMedia {
+                to: prev.spec.to.clone(),
+            })
+            .await
+        {
+            if !rb_err.is_not_found() {
+                tracing::error!(
+                    link_id = %link_id,
+                    to = %prev.spec.to,
+                    %rb_err,
+                    "Rollback RemoveBindMedia failed during transcode mount sync"
+                );
+            }
+        }
+    }
+    if !newly_mounted_tc_paths.is_empty() {
+        if let Err(rb_err) = runtime
+            .transcode_runner
+            .dispatch(&PeerTranscodeRequest::RemoveTranscodeMounts {
+                link_id: link_id.to_string(),
+                paths: newly_mounted_tc_paths.to_vec(),
+            })
+            .await
+        {
+            if !rb_err.is_not_found() {
+                tracing::error!(
+                    link_id = %link_id,
+                    paths = ?newly_mounted_tc_paths,
+                    %rb_err,
+                    "Rollback RemoveTranscodeMounts failed during transcode mount sync"
+                );
+            }
+        }
     }
 }
 
@@ -2416,13 +2983,19 @@ async fn handle_tunnel_transcode_mounts_inner(
                 runtime
                     .db
                     .write(&server, step, move |conn| {
+                        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+                            .map_err(|err| {
+                            PeerError::internal(&server_c, step, err.to_string())
+                        })?;
                         for mid in removed_ids {
-                            conn.execute(
+                            tx.execute(
                                 "DELETE FROM peer_mounts WHERE id = ?1 AND link_id = ?2",
                                 rusqlite::params![mid, lid_del],
                             )
                             .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?;
                         }
+                        tx.commit()
+                            .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?;
                         Ok(())
                     })
                     .await?;
@@ -2458,8 +3031,8 @@ async fn handle_tunnel_transcode_mounts_inner(
             transcode_paths,
             media_binds,
         } => {
-            let clean_paths = dedup_preserve_order(transcode_paths);
-            if clean_paths.is_empty() || clean_paths.len() > MAX_TUNNEL_TRANSCODE_PATHS {
+            let raw_paths = dedup_preserve_order(transcode_paths);
+            if raw_paths.is_empty() || raw_paths.len() > MAX_TUNNEL_TRANSCODE_PATHS {
                 return Err(PeerError::invalid_request(
                     &server,
                     step,
@@ -2478,14 +3051,36 @@ async fn handle_tunnel_transcode_mounts_inner(
                 ));
             }
 
-            // Load existing mounts & exports to verify ownership, prevent cross-link mount
-            // collisions, and authorize every media_bind against this server's own records.
+            // Explicit allowlist on `transcode_paths`: validate every path against this worker's
+            // inspected Jellyfin cache/transcode/tmp directories BEFORE invoking any mutating
+            // runner action.
+            let (worker_paths, _) = inspect_jellyfin_paths_best_effort(runtime).await;
+            let mut clean_paths: Vec<String> = Vec::with_capacity(raw_paths.len());
+            for path in &raw_paths {
+                let allowed = validate_worker_transcode_path_allowed(path, &worker_paths).map_err(
+                    |reason| {
+                        PeerError::invalid_request(
+                            &server,
+                            step,
+                            reason,
+                            "Use only Jellyfin cache/transcode/tmp directories allowed on the worker",
+                        )
+                    },
+                )?;
+                clean_paths.push(allowed);
+            }
+
+            // Load existing mounts, peer links, and exports to verify ownership, prevent
+            // cross-link mount collisions, and authorize every media_bind against this server's
+            // own records.
             let lid = link.id.clone();
             let server_c = server.clone();
-            let (all_mounts, link_exports, link_media_mounts) = runtime
+            let (all_mounts, all_links, link_exports, link_media_mounts) = runtime
                 .db
                 .read(&server, step, move |conn| {
                     let all_mounts = db_peers::list_peer_mounts(conn)
+                        .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?;
+                    let all_links = db_peers::list_peer_links(conn)
                         .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?;
                     let link_exports = db_peers::list_peer_exports_for_link(conn, &lid)
                         .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?;
@@ -2494,7 +3089,7 @@ async fn handle_tunnel_transcode_mounts_inner(
                         .filter(|m| m.link_id == lid && m.purpose == MOUNT_PURPOSE_MEDIA)
                         .cloned()
                         .collect();
-                    Ok((all_mounts, link_exports, link_media_mounts))
+                    Ok((all_mounts, all_links, link_exports, link_media_mounts))
                 })
                 .await?;
 
@@ -2513,8 +3108,23 @@ async fn handle_tunnel_transcode_mounts_inner(
                 }
             }
 
-            let peer_mounts_prefix = format!("{}/", DEFAULT_PEER_MOUNTS_ROOT.trim_end_matches('/'));
-            let mut verified_binds: Vec<TranscodeMediaBindSpec> = Vec::new();
+            let calling_link_segment = super::storage::derive_link_mount_segment(link);
+            // When the worker holds media and exports it to the controller, the controller mounts
+            // the worker's export under `/mnt/af-peers/<worker-server-name>/<export>`. Allow this
+            // worker's own local server segment on `to` ONLY when it does not collide with another
+            // peer link's mount segment, so cross-link shadowing of any other peer is impossible.
+            let local_server_segment = validate_peer_mount_segment(&server)
+                .ok()
+                .map(str::to_string)
+                .filter(|loc_seg| {
+                    !all_links.iter().any(|other| {
+                        other.id != link.id
+                            && super::storage::derive_link_mount_segment(other) == *loc_seg
+                    })
+                });
+            let bind_allowed_roots = resolve_worker_bind_media_allowed_roots(runtime);
+
+            let mut verified_binds: Vec<VerifiedBindEntry> = Vec::new();
             let mut seen_bind_targets = HashSet::new();
             for bind in media_binds {
                 let from = bind.from.trim().to_string();
@@ -2554,52 +3164,219 @@ async fn handle_tunnel_transcode_mounts_inner(
                     }
                 }
 
-                // Authorize against this worker's own peer_exports (B holds media, A mounted it)
-                // OR this worker's own peer_mounts (A holds media, B mounted it).
-                let allowed_by_export = link_exports.iter().any(|exp| {
-                    exp.path == from
-                        && to.starts_with(&peer_mounts_prefix)
-                        && (!bind.writable || exp.writable)
-                });
-                let allowed_by_media_mount = link_media_mounts.iter().any(|m| {
-                    m.mount_path == from && m.remote_path == to && (!bind.writable || m.writable)
-                });
-                if !allowed_by_export && !allowed_by_media_mount {
-                    runtime
-                        .db
-                        .record_audit(
-                            verified.run_as_user_id,
-                            verified.run_as_username.clone(),
-                            "peer_transcode_denied".to_string(),
-                            "peer_grant".to_string(),
-                            verified.grant.id.clone(),
+                let from_is_peer = is_under_peer_mounts_root(&from);
+                let to_is_peer = is_under_peer_mounts_root(&to);
+                let confined_seg = match (from_is_peer, to_is_peer) {
+                    // Worker-holds-media: local exported path -> `/mnt/af-peers/<seg>/<export>`
+                    (false, true) => {
+                        let (to_link_seg, _) =
+                            extract_peer_mount_segments(&to).map_err(|reason| {
+                                PeerError::invalid_request(
+                                    &server,
+                                    step,
+                                    reason,
+                                    "Provide a canonical target path under /mnt/af-peers/<link>/<export>",
+                                )
+                            })?;
+                        let allowed_by_export = link_exports
+                            .iter()
+                            .any(|exp| exp.path == from && (!bind.writable || exp.writable));
+                        if !allowed_by_export {
+                            runtime
+                                .db
+                                .record_audit(
+                                    verified.run_as_user_id,
+                                    verified.run_as_username.clone(),
+                                    "peer_transcode_denied".to_string(),
+                                    "peer_grant".to_string(),
+                                    verified.grant.id.clone(),
+                                    format!(
+                                        "Denied unauthorized media bind '{from}' -> '{to}' from {} (request_id={})",
+                                        link.name, verified.request_id
+                                    ),
+                                    verified.source_ip_str.clone(),
+                                    String::new(),
+                                )
+                                .await;
+                            return Err(PeerError::peer_scope_denied(
+                                &server,
+                                step,
+                                format!(
+                                    "Media bind '{from}' -> '{to}' is not backed by an active peer export for '{}'",
+                                    link.name
+                                ),
+                            ));
+                        }
+                        if validate_canonical_transcode_path_syntax(&from, false).is_err()
+                            || validate_canonical_transcode_path_syntax(&to, true).is_err()
+                            || has_sensitive_dot_segment(&from)
+                        {
+                            return Err(PeerError::invalid_request(
+                                &server,
+                                step,
+                                format!("Media bind '{from}' -> '{to}' uses a disallowed or non-canonical path"),
+                                "Use clean canonical media export and peer mount paths",
+                            ));
+                        }
+                        let segment_allowed = to_link_seg == calling_link_segment
+                            || local_server_segment.as_deref() == Some(to_link_seg.as_str());
+                        if !segment_allowed {
+                            runtime
+                                .db
+                                .record_audit(
+                                    verified.run_as_user_id,
+                                    verified.run_as_username.clone(),
+                                    "peer_transcode_denied".to_string(),
+                                    "peer_grant".to_string(),
+                                    verified.grant.id.clone(),
+                                    format!(
+                                        "Denied cross-link media bind '{from}' -> '{to}' from {} (calling_seg={}, request_id={})",
+                                        link.name, calling_link_segment, verified.request_id
+                                    ),
+                                    verified.source_ip_str.clone(),
+                                    String::new(),
+                                )
+                                .await;
+                            return Err(PeerError::invalid_request(
+                                &server,
+                                step,
+                                format!(
+                                    "Media bind destination '{to}' lies outside calling link segment '{calling_link_segment}'"
+                                ),
+                                "Bind worker exports strictly under the calling peer's own /mnt/af-peers/<segment>/ hierarchy",
+                            ));
+                        }
+                        to_link_seg
+                    }
+                    // Controller-holds-media: `/mnt/af-peers/<calling_link>/<export>` -> allowed local media root
+                    (true, false) => {
+                        let (from_link_seg, _) =
+                            extract_peer_mount_segments(&from).map_err(|reason| {
+                                PeerError::invalid_request(
+                                    &server,
+                                    step,
+                                    reason,
+                                    "Provide a canonical source path under /mnt/af-peers/<link>/<export>",
+                                )
+                            })?;
+                        if from_link_seg != calling_link_segment {
+                            runtime
+                                .db
+                                .record_audit(
+                                    verified.run_as_user_id,
+                                    verified.run_as_username.clone(),
+                                    "peer_transcode_denied".to_string(),
+                                    "peer_grant".to_string(),
+                                    verified.grant.id.clone(),
+                                    format!(
+                                        "Denied cross-link media bind source '{from}' -> '{to}' from {} (calling_seg={}, request_id={})",
+                                        link.name, calling_link_segment, verified.request_id
+                                    ),
+                                    verified.source_ip_str.clone(),
+                                    String::new(),
+                                )
+                                .await;
+                            return Err(PeerError::invalid_request(
+                                &server,
+                                step,
+                                format!(
+                                    "Media bind source '{from}' lies outside calling link segment '{calling_link_segment}'"
+                                ),
+                                "Bind only peer mounts belonging to the calling link",
+                            ));
+                        }
+                        let canonical_to = validate_canonical_transcode_path_syntax(&to, false)
+                            .and_then(|canon| {
+                                validate_bind_media_target_allowlist(
+                                    &canon,
+                                    bind_allowed_roots.as_deref(),
+                                )?;
+                                Ok(canon)
+                            })
+                            .map_err(|reason| {
+                                PeerError::invalid_request(
+                                    &server,
+                                    step,
+                                    reason,
+                                    "Bind controller media only inside allowed media storage roots",
+                                )
+                            })?;
+                        if validate_canonical_transcode_path_syntax(&from, true).is_err() {
+                            return Err(PeerError::invalid_request(
+                                &server,
+                                step,
+                                format!("Media bind source '{from}' is not a valid canonical peer mount path"),
+                                "Provide a valid /mnt/af-peers/<link>/<export> source path",
+                            ));
+                        }
+                        let allowed_by_media_mount = link_media_mounts.iter().any(|m| {
+                            m.mount_path == from
+                                && m.remote_path == canonical_to
+                                && (!bind.writable || m.writable)
+                        });
+                        if !allowed_by_media_mount {
+                            runtime
+                                .db
+                                .record_audit(
+                                    verified.run_as_user_id,
+                                    verified.run_as_username.clone(),
+                                    "peer_transcode_denied".to_string(),
+                                    "peer_grant".to_string(),
+                                    verified.grant.id.clone(),
+                                    format!(
+                                        "Denied unauthorized media bind '{from}' -> '{to}' from {} (request_id={})",
+                                        link.name, verified.request_id
+                                    ),
+                                    verified.source_ip_str.clone(),
+                                    String::new(),
+                                )
+                                .await;
+                            return Err(PeerError::peer_scope_denied(
+                                &server,
+                                step,
+                                format!(
+                                    "Media bind '{from}' -> '{to}' is not backed by an active peer mount for '{}'",
+                                    link.name
+                                ),
+                            ));
+                        }
+                        calling_link_segment.clone()
+                    }
+                    (true, true) => {
+                        return Err(PeerError::invalid_request(
+                            &server,
+                            step,
                             format!(
-                                "Denied unauthorized media bind '{from}' -> '{to}' from {} (request_id={})",
-                                link.name, verified.request_id
+                                "Refusing media bind with both source and destination under {DEFAULT_PEER_MOUNTS_ROOT}"
                             ),
-                            verified.source_ip_str.clone(),
-                            String::new(),
-                        )
-                        .await;
-                    return Err(PeerError::peer_scope_denied(
-                        &server,
-                        step,
-                        format!(
-                            "Media bind '{from}' -> '{to}' is not backed by an active peer export or mount for '{}'",
-                            link.name
-                        ),
-                    ));
-                }
+                            "Specify exactly one path under /mnt/af-peers/<link>/<export>",
+                        ));
+                    }
+                    (false, false) => {
+                        return Err(PeerError::invalid_request(
+                            &server,
+                            step,
+                            format!(
+                                "Media bind requires exactly one of 'from' or 'to' to lie under {DEFAULT_PEER_MOUNTS_ROOT}/<link>/<export>"
+                            ),
+                            "Bind between a local media folder and a peer mount path",
+                        ));
+                    }
+                };
 
-                verified_binds.push(TranscodeMediaBindSpec {
-                    from,
-                    to,
-                    writable: bind.writable,
+                verified_binds.push(VerifiedBindEntry {
+                    spec: TranscodeMediaBindSpec {
+                        from,
+                        to,
+                        writable: bind.writable,
+                    },
+                    calling_link_segment: confined_seg,
                 });
             }
 
             // Also auto-add local A-holds-media bind aliases if B mounted A's media exports at
-            // `/mnt/af-peers/<A>/<slug>` and `remote_path` does not collide with an existing mount.
+            // `/mnt/af-peers/<A>/<slug>` and `remote_path` passes the worker media-root allowlist
+            // and does not collide with an existing mount.
             for m in &link_media_mounts {
                 if !seen_bind_targets.contains(&m.remote_path)
                     && !clean_paths.contains(&m.remote_path)
@@ -2609,11 +3386,33 @@ async fn handle_tunnel_transcode_mounts_inner(
                             && (ex.link_id != link.id || ex.purpose != MOUNT_PURPOSE_TRANSCODE_BIND)
                     })
                 {
+                    let seg_ok = extract_peer_mount_segments(&m.mount_path)
+                        .is_ok_and(|(seg, _)| seg == calling_link_segment);
+                    let target_ok = validate_canonical_transcode_path_syntax(&m.remote_path, false)
+                        .and_then(|canon| {
+                            validate_bind_media_target_allowlist(
+                                &canon,
+                                bind_allowed_roots.as_deref(),
+                            )
+                        })
+                        .is_ok();
+                    if !seg_ok || !target_ok {
+                        tracing::warn!(
+                            link_id = %link.id,
+                            from = %m.mount_path,
+                            to = %m.remote_path,
+                            "Skipping controller-holds-media auto-bind outside worker allowlist or calling link segment"
+                        );
+                        continue;
+                    }
                     seen_bind_targets.insert(m.remote_path.clone());
-                    verified_binds.push(TranscodeMediaBindSpec {
-                        from: m.mount_path.clone(),
-                        to: m.remote_path.clone(),
-                        writable: false,
+                    verified_binds.push(VerifiedBindEntry {
+                        spec: TranscodeMediaBindSpec {
+                            from: m.mount_path.clone(),
+                            to: m.remote_path.clone(),
+                            writable: false,
+                        },
+                        calling_link_segment: calling_link_segment.clone(),
                     });
                 }
             }
@@ -2625,7 +3424,8 @@ async fn handle_tunnel_transcode_mounts_inner(
                 .await
                 .map_err(|err| PeerError::internal(&server, step, err.to_string()))?;
 
-            // Remove any stale transcode mounts/binds from prior syncs for this link.
+            // Snapshot prior transcode mounts/binds for this link so rollback only removes newly
+            // added mounts and stale mounts are torn down only after the new state commits.
             let prev_tc_mounts: Vec<PeerMount> = all_mounts
                 .iter()
                 .filter(|m| m.link_id == link.id && m.purpose == MOUNT_PURPOSE_TRANSCODE)
@@ -2636,33 +3436,19 @@ async fn handle_tunnel_transcode_mounts_inner(
                 .filter(|m| m.link_id == link.id && m.purpose == MOUNT_PURPOSE_TRANSCODE_BIND)
                 .cloned()
                 .collect();
-
-            let stale_tc: Vec<&PeerMount> = prev_tc_mounts
+            let prev_tc_set: HashSet<&str> = prev_tc_mounts
                 .iter()
-                .filter(|m| !clean_paths.contains(&m.mount_path))
+                .map(|m| m.mount_path.as_str())
                 .collect();
-            if !stale_tc.is_empty() {
-                let stale_paths: Vec<String> =
-                    stale_tc.iter().map(|m| m.mount_path.clone()).collect();
-                let _ = runtime
-                    .transcode_runner
-                    .dispatch(&PeerTranscodeRequest::RemoveTranscodeMounts {
-                        link_id: link.id.clone(),
-                        paths: stale_paths,
-                    })
-                    .await;
-            }
-            for old_bind in prev_binds
+            let prev_bind_map: HashMap<&str, (&str, bool)> = prev_binds
                 .iter()
-                .filter(|m| !verified_binds.iter().any(|b| b.to == m.mount_path))
-            {
-                let _ = runtime
-                    .transcode_runner
-                    .dispatch(&PeerTranscodeRequest::RemoveBindMedia {
-                        to: old_bind.mount_path.clone(),
-                    })
-                    .await;
-            }
+                .map(|m| (m.mount_path.as_str(), (m.remote_path.as_str(), m.writable)))
+                .collect();
+            let newly_mounted_tc_paths: Vec<String> = clean_paths
+                .iter()
+                .filter(|p| !prev_tc_set.contains(p.as_str()))
+                .cloned()
+                .collect();
 
             // Mount controller's transcode/tmp/cache directories at identical paths.
             runtime
@@ -2676,42 +3462,54 @@ async fn handle_tunnel_transcode_mounts_inner(
                 .and_then(|resp| resp.into_mutation())
                 .map_err(|err| map_transcode_runner_error(err, &server, step))?;
 
-            // Bind authorized media folders at identical paths.
+            // Bind authorized media folders at identical paths. On any failure, roll back both
+            // newly applied `BindMedia` mounts and newly mounted `MountTranscodeDirs` mounts.
             let mut applied_binds: Vec<TranscodeMediaBindSpec> = Vec::new();
-            for bind in &verified_binds {
+            let mut newly_applied_binds: Vec<VerifiedBindEntry> = Vec::new();
+            for entry in &verified_binds {
                 if let Err(err) = runtime
                     .transcode_runner
                     .dispatch(&PeerTranscodeRequest::BindMedia {
-                        from: bind.from.clone(),
-                        to: bind.to.clone(),
-                        writable: bind.writable,
+                        from: entry.spec.from.clone(),
+                        to: entry.spec.to.clone(),
+                        writable: entry.spec.writable,
+                        calling_link_segment: Some(entry.calling_link_segment.clone()),
                     })
                     .await
                     .and_then(|resp| resp.into_mutation())
                 {
-                    for prev in applied_binds.iter().rev() {
-                        let _ = runtime
-                            .transcode_runner
-                            .dispatch(&PeerTranscodeRequest::RemoveBindMedia {
-                                to: prev.to.clone(),
-                            })
-                            .await;
-                    }
+                    rollback_newly_created_worker_mounts(
+                        runtime,
+                        &link.id,
+                        &newly_applied_binds,
+                        &newly_mounted_tc_paths,
+                    )
+                    .await;
                     return Err(map_transcode_runner_error(err, &server, step));
                 }
-                applied_binds.push(bind.clone());
+                let existed_identically = prev_bind_map.get(entry.spec.to.as_str()).is_some_and(
+                    |&(prev_from, prev_writable)| {
+                        prev_from == entry.spec.from && prev_writable == entry.spec.writable
+                    },
+                );
+                if !existed_identically {
+                    newly_applied_binds.push(entry.clone());
+                }
+                applied_binds.push(entry.spec.clone());
             }
 
-            // Persist `peer_mounts` rows (`purpose = "transcode"` and `"transcode_bind"`) so
-            // revocation cleanup and `af cluster diagnose` track them accurately.
+            // Persist `peer_mounts` rows (`purpose = "transcode"` and `"transcode_bind"`) inside a
+            // single IMMEDIATE SQLite transaction so DB and host mount state remain atomic.
             let lid_w = link.id.clone();
             let paths_w = clean_paths.clone();
             let binds_w = applied_binds.clone();
             let server_c = server.clone();
-            runtime
+            let db_res = runtime
                 .db
                 .write(&server, step, move |conn| {
-                    conn.execute(
+                    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+                        .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?;
+                    tx.execute(
                         "DELETE FROM peer_mounts WHERE link_id = ?1 AND purpose IN (?2, ?3)",
                         rusqlite::params![
                             lid_w,
@@ -2733,7 +3531,7 @@ async fn handle_tunnel_transcode_mounts_inner(
                             state: "mounted".to_string(),
                             last_error: None,
                         };
-                        db_peers::insert_peer_mount(conn, &mount)
+                        db_peers::insert_peer_mount(&tx, &mount)
                             .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?;
                     }
 
@@ -2749,12 +3547,73 @@ async fn handle_tunnel_transcode_mounts_inner(
                             state: "mounted".to_string(),
                             last_error: None,
                         };
-                        db_peers::insert_peer_mount(conn, &mount)
+                        db_peers::insert_peer_mount(&tx, &mount)
                             .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?;
                     }
+                    tx.commit()
+                        .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?;
                     Ok(())
                 })
-                .await?;
+                .await;
+
+            if let Err(db_err) = db_res {
+                rollback_newly_created_worker_mounts(
+                    runtime,
+                    &link.id,
+                    &newly_applied_binds,
+                    &newly_mounted_tc_paths,
+                )
+                .await;
+                return Err(db_err);
+            }
+
+            // Now that the new mounts and DB state committed cleanly, tear down any stale mounts
+            // from prior syncs (binds first, then transcode NFS mounts).
+            for old_bind in prev_binds
+                .iter()
+                .filter(|m| !applied_binds.iter().any(|b| b.to == m.mount_path))
+            {
+                if let Err(err) = runtime
+                    .transcode_runner
+                    .dispatch(&PeerTranscodeRequest::RemoveBindMedia {
+                        to: old_bind.mount_path.clone(),
+                    })
+                    .await
+                {
+                    if !err.is_not_found() {
+                        tracing::warn!(
+                            link_id = %link.id,
+                            to = %old_bind.mount_path,
+                            %err,
+                            "Best-effort stale transcode bind removal failed after sync"
+                        );
+                    }
+                }
+            }
+            let stale_tc: Vec<String> = prev_tc_mounts
+                .iter()
+                .filter(|m| !clean_paths.contains(&m.mount_path))
+                .map(|m| m.mount_path.clone())
+                .collect();
+            if !stale_tc.is_empty() {
+                if let Err(err) = runtime
+                    .transcode_runner
+                    .dispatch(&PeerTranscodeRequest::RemoveTranscodeMounts {
+                        link_id: link.id.clone(),
+                        paths: stale_tc.clone(),
+                    })
+                    .await
+                {
+                    if !err.is_not_found() {
+                        tracing::warn!(
+                            link_id = %link.id,
+                            paths = ?stale_tc,
+                            %err,
+                            "Best-effort stale transcode mount removal failed after sync"
+                        );
+                    }
+                }
+            }
 
             runtime
                 .db
@@ -3240,6 +4099,22 @@ fn worker_render_nodes_for(
     Vec::new()
 }
 
+/// Computes effective worker concurrency by clamping the controller-configured `max_jobs`
+/// against the worker's advertised `AF_TRANSCODE_WORKER_MAX_JOBS` cap when present.
+pub(crate) fn effective_worker_max_jobs(
+    configured_max_jobs: i64,
+    remote_caps: Option<&TranscodeCapabilities>,
+) -> usize {
+    let configured = configured_max_jobs.clamp(WORKER_MAX_JOBS_MIN, WORKER_MAX_JOBS_MAX) as usize;
+    match remote_caps.and_then(|c| c.worker_max_jobs) {
+        Some(cap_max) if cap_max > 0 => {
+            let clamped = cap_max.clamp(WORKER_MAX_JOBS_MIN as usize, WORKER_MAX_JOBS_MAX as usize);
+            configured.min(clamped)
+        }
+        _ => configured,
+    }
+}
+
 async fn collect_eligible_workers(
     runtime: &PeerRuntime,
     required_cap: &argv::Capability,
@@ -3307,14 +4182,11 @@ async fn collect_eligible_workers(
             continue;
         }
 
-        let max_jobs = worker
-            .max_jobs
-            .clamp(WORKER_MAX_JOBS_MIN, WORKER_MAX_JOBS_MAX) as usize;
+        let remote_caps = runtime.transcode_state.remote_capabilities_for(&link.id);
+        let max_jobs = effective_worker_max_jobs(worker.max_jobs, remote_caps.as_ref());
         if runtime.transcode_state.active_jobs_for(&link.id) >= max_jobs {
             continue;
         }
-
-        let remote_caps = runtime.transcode_state.remote_capabilities_for(&link.id);
         let worker_pkg_ver = remote_caps
             .as_ref()
             .and_then(|c| c.package_version.as_deref());
@@ -3446,10 +4318,21 @@ pub(crate) async fn stop_dispatcher(runtime: &PeerRuntime) {
     }
 }
 
-/// Dormant-safe startup hook called by `peers::start_with_runtime`: does NOTHING when no peer
-/// identity is configured. When an identity exists, inspects Jellyfin paths and starts the
-/// dispatcher only if both the shim and Jellyfin drop-in are already enabled.
+/// Dormant-safe startup hook called by `peers::start_with_runtime`: delegates to
+/// [`reconcile_dispatcher_if_configured`] so standalone instances remain completely dormant.
 pub(crate) async fn start_dispatcher_if_configured(runtime: &Arc<PeerRuntime>) {
+    reconcile_dispatcher_if_configured(runtime).await;
+}
+
+/// Reconciles the local Jellyfin transcode dispatcher on boot and every 15-second peer health
+/// tick: returns immediately when the dispatcher is already active or no peer identity exists,
+/// logs a warning on transient `InspectJellyfinPaths` failures instead of failing silently, and
+/// automatically starts the dispatcher once `dropin_enabled && shim_installed` succeeds.
+pub(crate) async fn reconcile_dispatcher_if_configured(runtime: &Arc<PeerRuntime>) {
+    if runtime.transcode_state.is_dispatcher_active().await {
+        return;
+    }
+
     let server = runtime.local_server_name();
     let has_identity = runtime
         .db
@@ -3469,7 +4352,13 @@ pub(crate) async fn start_dispatcher_if_configured(runtime: &Arc<PeerRuntime>) {
         .and_then(|resp| resp.into_jellyfin_paths())
     {
         Ok(p) => p,
-        Err(_) => return,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                "Failed inspecting Jellyfin transcode paths while reconciling dispatcher; will retry on next health tick"
+            );
+            return;
+        }
     };
 
     if paths.dropin_enabled && paths.shim_installed {
@@ -3477,7 +4366,7 @@ pub(crate) async fn start_dispatcher_if_configured(runtime: &Arc<PeerRuntime>) {
         // local due to a cold cache.
         let _ = refresh_local_capabilities_if_stale(runtime).await;
         if let Err(err) = ensure_dispatcher_started(runtime).await {
-            tracing::warn!(%err, "Failed starting transcode dispatcher during startup");
+            tracing::warn!(%err, "Failed starting transcode dispatcher during reconciliation");
         }
     }
 }
@@ -3654,6 +4543,40 @@ async fn handle_dispatcher_connection(
         let _ = tokio::time::timeout(
             KILL_SIGNAL_WRITE_TIMEOUT,
             write_frame(&mut shim_writer, &Frame::RunLocal),
+        )
+        .await;
+        return;
+    }
+
+    // Isolated transcode workers run with `PrivateNetwork=yes` and a local-only protocol
+    // whitelist, so network-protocol inputs or non-local `-protocol_whitelist` flags must run
+    // locally on the controller without contacting any remote worker.
+    if argv::has_network_input(&start_req.args)
+        || argv::has_disallowed_protocol_whitelist(&start_req.args)
+    {
+        tracing::info!(
+            reason = "network_input_local_only",
+            "Transcode job uses a network input or non-local protocol whitelist; returning Frame::RunLocal"
+        );
+        let job_id = Uuid::new_v4().to_string();
+        let request_id = format!("tc-{}", Uuid::new_v4().simple());
+        let now_rfc = runtime.now().to_rfc3339();
+        let _ = tokio::time::timeout(
+            DEFAULT_FRAME_WRITE_TIMEOUT,
+            write_frame(&mut shim_writer, &Frame::RunLocal),
+        )
+        .await;
+        insert_transcode_job_row(
+            &runtime,
+            TranscodeJob {
+                id: job_id,
+                link_id: None,
+                started_at: now_rfc.clone(),
+                ended_at: Some(now_rfc),
+                exit_code: None,
+                request_id: Some(request_id),
+                ran_locally: true,
+            },
         )
         .await;
         return;
@@ -4242,7 +5165,7 @@ async fn relay_active_dispatcher_job(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2-Second Worker Path-Parity Test
+// Worker Path-Parity Test (1-second clip / 5-second timeout)
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn cleanup_parity_output(
@@ -4681,6 +5604,9 @@ pub struct TranscodeWorkerView {
     pub ineligible_reason: Option<String>,
     pub weight: i64,
     pub max_jobs: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_max_jobs: Option<usize>,
+    pub effective_max_jobs: usize,
     pub active_jobs: usize,
     pub unhealthy_until: Option<String>,
     pub ffmpeg_version: Option<String>,
@@ -4883,7 +5809,9 @@ async fn build_transcode_config_response(
         let supports_transcode = parsed_caps.iter().any(|c| c == "transcode");
         let grant = received_grants.get(&link.id);
         let has_transcode_write_grant = grant.is_some_and(|g| g.access.transcoding.allows_write());
-        let has_updates_write_grant = grant.is_some_and(|g| g.access.updates.allows_write());
+        let has_updates_write_grant = grant.is_some_and(|g| {
+            g.access.updates.allows_write() || g.access.marketplace.allows_write()
+        });
 
         let db_w = worker_map.get(&link.id);
         let enabled = db_w.is_some_and(|w| w.enabled);
@@ -4903,6 +5831,11 @@ async fn build_transcode_config_response(
         let unhealthy_until = unhealthy_until_dt.map(|dt| dt.to_rfc3339());
 
         let remote_caps = runtime.transcode_state.remote_capabilities_for(&link.id);
+        let worker_max_jobs = remote_caps
+            .as_ref()
+            .and_then(|c| c.worker_max_jobs)
+            .filter(|&n| n > 0);
+        let effective_max_jobs = effective_worker_max_jobs(max_jobs, remote_caps.as_ref());
         let ffmpeg_version = remote_caps
             .as_ref()
             .and_then(|c| c.ffmpeg_version.clone())
@@ -4965,11 +5898,11 @@ async fn build_transcode_config_response(
                 false,
                 Some("Waiting for FFmpeg version report from both servers".to_string()),
             )
-        } else if active_jobs >= max_jobs as usize {
+        } else if active_jobs >= effective_max_jobs {
             (
                 false,
                 Some(format!(
-                    "Worker is at maximum concurrent jobs ({active_jobs}/{max_jobs})"
+                    "Worker is at maximum concurrent jobs ({active_jobs}/{effective_max_jobs})"
                 )),
             )
         } else {
@@ -4989,6 +5922,8 @@ async fn build_transcode_config_response(
             ineligible_reason,
             weight,
             max_jobs,
+            worker_max_jobs,
+            effective_max_jobs,
             active_jobs,
             unhealthy_until,
             ffmpeg_version,
@@ -5095,8 +6030,19 @@ pub async fn put_transcode_settings(
     Extension(auth_user): Extension<AuthUser>,
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return bytes_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "put_transcode_settings",
+            )
+            .into_response();
+        }
+    };
     match put_transcode_settings_inner(&runtime, &auth_user, peer_ip, &headers, &body).await {
         Ok(resp) => (
             StatusCode::OK,
@@ -5372,6 +6318,79 @@ async fn setup_worker_path_parity_mounts(
     .await
 }
 
+/// Best-effort bounded resync of `/peer/v1/transcode/mounts` triggered after P7 peer storage
+/// export/mount mutations when `link_id` is an enabled transcode worker and controller offloading
+/// is active. Completely dormant (zero runner or HTTP calls) otherwise. Caller MUST NOT hold
+/// `link_lock`.
+pub(crate) async fn resync_worker_transcode_mounts_if_active_best_effort(
+    runtime: &PeerRuntime,
+    link_id: &str,
+) {
+    let server = runtime.local_server_name();
+    let lid = link_id.to_string();
+    let active_worker_link = runtime
+        .db
+        .read(&server, "transcode_storage_resync", move |conn| {
+            let Some(worker) = db_peers::get_transcode_worker(conn, &lid).ok().flatten() else {
+                return Ok(None);
+            };
+            if !worker.enabled {
+                return Ok(None);
+            }
+            let link = db_peers::get_peer_link(conn, &lid)
+                .ok()
+                .flatten()
+                .filter(|l| is_active_link_state(&l.state));
+            Ok(link)
+        })
+        .await
+        .ok()
+        .flatten();
+
+    let Some(link) = active_worker_link else {
+        return;
+    };
+
+    let dispatcher_active = runtime.transcode_state.is_dispatcher_active().await;
+    let (paths_snapshot, inspected) = inspect_jellyfin_paths_best_effort(runtime).await;
+    let offloading_active = dispatcher_active
+        || (inspected && paths_snapshot.dropin_enabled && paths_snapshot.shim_installed);
+    if !offloading_active {
+        return;
+    }
+
+    match tokio::time::timeout(
+        AUTO_RESYNC_MOUNT_TIMEOUT,
+        setup_worker_path_parity_mounts(runtime, &link, &paths_snapshot),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            tracing::info!(
+                link_id = %link.id,
+                peer = %link.name,
+                "Auto-resynced transcode path-parity mounts after peer storage update"
+            );
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(
+                link_id = %link.id,
+                peer = %link.name,
+                error = %redact_sensitive_text(&err),
+                "Best-effort transcode mount auto-resync failed after peer storage update"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                link_id = %link.id,
+                peer = %link.name,
+                timeout_secs = AUTO_RESYNC_MOUNT_TIMEOUT.as_secs(),
+                "Best-effort transcode mount auto-resync timed out after peer storage update"
+            );
+        }
+    }
+}
+
 async fn put_transcode_settings_inner(
     runtime: &Arc<PeerRuntime>,
     auth_user: &AuthUser,
@@ -5391,14 +6410,8 @@ async fn put_transcode_settings_inner(
         ));
     }
 
-    let req: UpdateTranscodeConfigReq = serde_json::from_slice(raw_body).map_err(|err| {
-        PeerError::invalid_request(
-            &server,
-            step,
-            format!("Invalid transcode settings payload: {err}"),
-            "Provide valid optional fields: enabled, worker_service_enabled, workers, or run_parity_test_link_id",
-        )
-    })?;
+    let req: UpdateTranscodeConfigReq =
+        parse_required_json_bytes(headers, raw_body, &server, step)?;
 
     // Pre-validate worker updates and parity link target before mutating anything.
     let mut validated_workers: Vec<(PeerLink, &UpdateTranscodeWorkerReq)> = Vec::new();
@@ -5596,6 +6609,105 @@ async fn put_transcode_settings_inner(
                 .and_then(|resp| resp.into_mutation())
                 .map_err(|err| map_transcode_runner_error(err, &server, "disable_jellyfin"))?;
 
+            // Tear down controller transcode exports for all configured workers and send
+            // best-effort remote mount teardown to enabled workers without failing local disable
+            // if a remote worker is currently offline.
+            let server_c = server.clone();
+            let (all_workers, links_by_id) = runtime
+                .db
+                .read(&server, "disable_transcode_teardown", move |conn| {
+                    let workers = db_peers::list_transcode_workers(conn).map_err(|err| {
+                        PeerError::internal(
+                            &server_c,
+                            "disable_transcode_teardown",
+                            err.to_string(),
+                        )
+                    })?;
+                    let links: HashMap<String, PeerLink> = db_peers::list_peer_links(conn)
+                        .map_err(|err| {
+                            PeerError::internal(
+                                &server_c,
+                                "disable_transcode_teardown",
+                                err.to_string(),
+                            )
+                        })?
+                        .into_iter()
+                        .map(|l| (l.id.clone(), l))
+                        .collect();
+                    Ok((workers, links))
+                })
+                .await?;
+
+            for worker in all_workers {
+                runtime
+                    .transcode_state
+                    .clear_worker_unhealthy(&worker.link_id);
+                let mut teardown_note: Option<String> = None;
+                if worker.enabled {
+                    if let Some(link) = links_by_id.get(&worker.link_id) {
+                        let remote_res = tokio::time::timeout(
+                            AUTO_RESYNC_MOUNT_TIMEOUT,
+                            send_remote_transcode_mounts(
+                                runtime,
+                                link,
+                                &TunnelTranscodeMountRequest::Teardown,
+                            ),
+                        )
+                        .await;
+                        let err_opt = match remote_res {
+                            Ok(Ok(())) => None,
+                            Ok(Err(err)) => Some(err),
+                            Err(_) => Some(format!(
+                                "Timed out after {}s waiting for remote mount teardown",
+                                AUTO_RESYNC_MOUNT_TIMEOUT.as_secs()
+                            )),
+                        };
+                        if let Some(err) = err_opt {
+                            let redacted = redact_sensitive_text(&err);
+                            tracing::warn!(
+                                link_id = %link.id,
+                                peer = %link.name,
+                                error = %redacted,
+                                "Best-effort remote transcode mount teardown failed while disabling controller offloading"
+                            );
+                            teardown_note = Some(format!(
+                                "Remote mount teardown skipped (worker unreachable during disable): {redacted}"
+                            ));
+                        }
+                    }
+                }
+                if let Err(err) = runtime
+                    .transcode_runner
+                    .dispatch(&PeerTranscodeRequest::RemoveTranscodeExports {
+                        link_id: worker.link_id.clone(),
+                    })
+                    .await
+                {
+                    if !err.is_not_found() {
+                        tracing::warn!(
+                            link_id = %worker.link_id,
+                            %err,
+                            "Best-effort transcode export removal failed while disabling controller offloading"
+                        );
+                    }
+                }
+                let lid_upd = worker.link_id.clone();
+                let note_c = teardown_note;
+                let _ = runtime
+                    .db
+                    .write(&server, "disable_transcode_teardown", move |conn| {
+                        conn.execute(
+                            "UPDATE transcode_workers SET enabled = 0, parity_ok = 0, parity_error = ?2 WHERE link_id = ?1",
+                            rusqlite::params![lid_upd, note_c],
+                        )
+                        .map_err(|err| {
+                            PeerError::internal("local", "disable_transcode_teardown", err.to_string())
+                        })?;
+                        Ok(())
+                    })
+                    .await;
+            }
+
             runtime
                 .db
                 .record_audit(
@@ -5604,7 +6716,7 @@ async fn put_transcode_settings_inner(
                     "peer_transcode_disabled".to_string(),
                     "peer_transcode".to_string(),
                     server.clone(),
-                    "Disabled distributed Jellyfin transcoding dispatcher and removed Jellyfin drop-in"
+                    "Disabled distributed Jellyfin transcoding dispatcher, removed Jellyfin drop-in, and tore down worker transcode exports/mounts"
                         .to_string(),
                     client_ip.clone(),
                     String::new(),
@@ -5615,6 +6727,37 @@ async fn put_transcode_settings_inner(
 
     // 2. Toggle local transcode worker systemd service.
     if let Some(worker_enable) = req.worker_service_enabled {
+        // When disabling the local worker service, tear down ALL local worker transcode/bind
+        // mounts (binds first, then transcode NFS mounts, deleting `peer_mounts` rows) BEFORE
+        // removing `af-transcode-worker.service`.
+        if !worker_enable {
+            let server_c = server.clone();
+            let mount_link_ids: Vec<String> = runtime
+                .db
+                .read(&server, "remove_worker_unit", move |conn| {
+                    let mut ids: Vec<String> = db_peers::list_peer_mounts(conn)
+                        .map_err(|err| {
+                            PeerError::internal(&server_c, "remove_worker_unit", err.to_string())
+                        })?
+                        .into_iter()
+                        .filter(|m| {
+                            m.purpose == MOUNT_PURPOSE_TRANSCODE
+                                || m.purpose == MOUNT_PURPOSE_TRANSCODE_BIND
+                        })
+                        .map(|m| m.link_id)
+                        .collect();
+                    ids.sort();
+                    ids.dedup();
+                    Ok(ids)
+                })
+                .await?;
+
+            for lid in mount_link_ids {
+                cleanup_worker_transcode_mounts_for_link(runtime, &lid, "remove_worker_unit")
+                    .await?;
+            }
+        }
+
         let runner_req = if worker_enable {
             PeerTranscodeRequest::InstallWorkerUnit
         } else {
@@ -5791,8 +6934,8 @@ async fn put_transcode_settings_inner(
             .await;
     }
 
-    // 4. Execute explicit 2-second parity test if requested (unless path-parity mount setup
-    //    already failed for that exact link in step 3 above).
+    // 4. Execute explicit 1-second clip / 5-second timeout parity test if requested (unless
+    //    path-parity mount setup already failed for that exact link in step 3 above).
     if let Some(link) = explicit_parity_link {
         if !setup_failed_links.contains(&link.id) {
             let res = run_worker_parity_test(

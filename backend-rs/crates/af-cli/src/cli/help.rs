@@ -174,20 +174,30 @@ Manage local /etc/hosts, dnsmasq, and Pi-hole DNS mappings.
         .to_string(),
         HelpTopic::Cluster => "\
 USAGE:
-  af cluster diagnose <link> [--db <path>]
+  af cluster diagnose <link> [--db <path>] [--json] [--socket <path>] [--root <dir>] [--dry-run]
 
 Inspect read-only Peer Clustering diagnostics for a peer link (matched by exact id, exact name,
 or case-insensitive name):
-  - Link health summary (state, tunnel IP, endpoint, version, capabilities, RTT, error history)
+  - Link health summary (canonical public state, internal ownership state, tunnel IP, endpoint,
+    version, capabilities, RTT, error history)
   - Live WireGuard afpeer0 handshake and traffic counters via af-runner (/v1/peer-network)
-  - Outgoing and incoming grant access summaries (all token hashes and secrets redacted)
-  - Configured NFS exports and mounts with live systemd state and sentinel probe (/v1/peer-storage)
+  - Inbound (this server -> peer) and outbound (peer -> this server) grant access summaries
+    (all token hashes and secrets redacted)
+  - Configured NFS exports and mounts with live systemd state and sentinel probe for media mounts
+    via af-runner (/v1/peer-storage); transcode/transcode_bind rows skip storage probes
   - Transcode worker capabilities, parity state, and up to 10 recent transcode jobs
   - Last 20 redacted audit trail entries related to the peer link
 
 OPTIONS:
-  --db <path>    Override SQLite database path (defaults to AF_DB_PATH, DB_PATH,
-                 AETHERFLOW_DB_PATH, or /var/lib/aetherflow/aetherflow.sqlite|.db under --root)
+  --db <path>        Override SQLite database path (must stay within --root when active;
+                     defaults to AF_DB_PATH, DB_PATH, AETHERFLOW_DB_PATH, DATA_DIR/STATE_DIRECTORY,
+                     env files, or /var/lib/aetherflow/aetherflow.sqlite under --root)
+
+GLOBAL OPTIONS:
+  --json             Emit machine-readable JSON response envelope
+  --socket <path>    Override runner Unix socket (default: /run/aetherflow/runner.sock)
+  --root <dir>       Override filesystem root for isolated inspection (confines DB paths)
+  --dry-run, -n      Print resolved database and socket paths without opening SQLite or runner IPC
 "
         .to_string(),
     }

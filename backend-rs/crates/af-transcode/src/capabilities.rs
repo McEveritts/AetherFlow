@@ -2,7 +2,8 @@
 
 use crate::argv::{Capability, HwAccel};
 use crate::config::{
-    configured_real_ffmpeg_path, validate_real_ffmpeg_path, DEFAULT_PROBE_TIMEOUT,
+    configured_real_ffmpeg_path, configured_worker_max_jobs, validate_real_ffmpeg_path,
+    DEFAULT_PROBE_TIMEOUT,
 };
 use af_hardware::RenderNode;
 use anyhow::Context;
@@ -61,6 +62,8 @@ pub struct TranscodeCapabilities {
     pub render_nodes: Vec<RenderNodeInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_render_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_max_jobs: Option<usize>,
 }
 
 /// Configuration for probing transcode capabilities (supports isolated fixtures in tests).
@@ -340,6 +343,7 @@ pub async fn probe_capabilities(
         encoders,
         render_nodes,
         primary_render_node,
+        worker_max_jobs: Some(configured_worker_max_jobs()),
     })
 }
 
@@ -449,5 +453,33 @@ install ok installed\tjellyfin-ffmpeg8\t8.1.3-1-trixie
             select_render_node(&cuda_cap, &[amd, intel, nvidia]),
             Some(PathBuf::from("/dev/dri/renderD130"))
         );
+    }
+
+    #[test]
+    fn transcode_capabilities_worker_max_jobs_serde_is_backwards_compatible() {
+        // Legacy JSON fixture omitting `worker_max_jobs` deserializes with `None`.
+        let legacy_json = r#"{
+            "ffmpeg_path": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+            "ffmpeg_version": "8.1.3-Jellyfin",
+            "encoders": ["h264_vaapi", "libx264"],
+            "render_nodes": [],
+            "primary_render_node": null
+        }"#;
+        let legacy: TranscodeCapabilities =
+            serde_json::from_str(legacy_json).expect("deserialize legacy capabilities");
+        assert_eq!(legacy.worker_max_jobs, None);
+
+        // `None` is omitted on serialization (`skip_serializing_if`).
+        let legacy_serialized = serde_json::to_string(&legacy).expect("serialize legacy");
+        assert!(!legacy_serialized.contains("worker_max_jobs"));
+
+        // `Some(n)` is serialized and round-trips cleanly.
+        let mut advertised = legacy;
+        advertised.worker_max_jobs = Some(12);
+        let advertised_json = serde_json::to_string(&advertised).expect("serialize advertised");
+        assert!(advertised_json.contains("\"worker_max_jobs\":12"));
+        let round_trip: TranscodeCapabilities =
+            serde_json::from_str(&advertised_json).expect("deserialize round trip");
+        assert_eq!(round_trip.worker_max_jobs, Some(12));
     }
 }

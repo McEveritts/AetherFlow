@@ -20,8 +20,8 @@ use super::pairing::sha256_prefixed;
 use super::scopes::{self, RouteDecision};
 use super::{
     capabilities, grants, is_live_link_state, is_revoked_or_revoking_state, links, pairing,
-    ListenerHandle, PeerListenerRuntime, PeerRuntime, PeerWsPermit, HEADER_GRANT_TOKEN,
-    HEADER_LINK_TOKEN, HEADER_ORIGIN_OPERATOR, PEER_PROTOCOL_VERSION,
+    ListenerHandle, PeerListenerRuntime, PeerRuntime, PeerWsPermit, RevocationEvent,
+    HEADER_GRANT_TOKEN, HEADER_LINK_TOKEN, HEADER_ORIGIN_OPERATOR, PEER_PROTOCOL_VERSION,
 };
 use crate::auth::{api_error, AuthUser, PeerPrincipal, SessionAuthTime};
 use crate::middlewares::{is_websocket_upgrade_request, GuardedBody};
@@ -38,12 +38,16 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use tokio::sync::{watch, OwnedSemaphorePermit};
+use tokio::sync::{broadcast, watch, OwnedSemaphorePermit};
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
 pub(crate) const TUNNEL_INTERNAL_BODY_LIMIT_BYTES: usize = 8192;
+const LISTENER_REVOCATION_NONE: u8 = 0;
+const LISTENER_REVOCATION_LINK: u8 = 1;
+const LISTENER_REVOCATION_GRANT: u8 = 2;
 
 #[derive(Clone)]
 struct ListenerState {
@@ -273,17 +277,168 @@ fn strip_untrusted_peer_headers(headers: &mut HeaderMap) {
     }
 }
 
+/// Tunnel-wide middleware normalizing/generating `X-Request-ID`, scoping
+/// `af_runner::with_runner_request_id` around every tunnel endpoint (internal routes,
+/// transcode WS, and scoped management dispatch), and echoing `X-Request-ID` on responses.
+async fn tunnel_request_id_middleware(mut req: Request, next: axum::middleware::Next) -> Response {
+    let request_id = extract_or_generate_request_id(req.headers());
+    if let Ok(hv) = HeaderValue::from_str(&request_id) {
+        req.headers_mut()
+            .insert(HeaderName::from_static("x-request-id"), hv);
+    }
+    let mut resp = af_runner::with_runner_request_id(request_id.clone(), next.run(req)).await;
+    if let Ok(hv) = HeaderValue::from_str(&request_id) {
+        resp.headers_mut()
+            .insert(HeaderName::from_static("x-request-id"), hv);
+    }
+    resp
+}
+
+async fn wait_for_listener_cancel(rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow_and_update() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+fn spawn_listener_revocation_watcher(
+    runtime: Arc<PeerRuntime>,
+    link_id: String,
+    grant_id: String,
+    run_as_user_id: i64,
+    mut revocation_rx: broadcast::Receiver<RevocationEvent>,
+) -> (watch::Receiver<bool>, Arc<AtomicU8>) {
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let reason = Arc::new(AtomicU8::new(LISTENER_REVOCATION_NONE));
+    let reason_c = Arc::clone(&reason);
+
+    tokio::spawn(async move {
+        let recheck_revocation = |rt: &Arc<PeerRuntime>, lid: &str, gid: &str, uid: i64| {
+            let rt = Arc::clone(rt);
+            let check_lid = lid.to_string();
+            let check_gid = gid.to_string();
+            async move {
+                rt.db
+                    .read("local", "listener_revocation_recheck", move |conn| {
+                        let link_ok = db_peers::get_peer_link(conn, &check_lid)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|l| is_live_link_state(&l.state));
+                        if !link_ok {
+                            return Ok(Some(LISTENER_REVOCATION_LINK));
+                        }
+                        let grant_ok = db_peers::get_active_peer_grant_for_link(conn, &check_lid)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|g| g.id == check_gid);
+                        if !grant_ok {
+                            return Ok(Some(LISTENER_REVOCATION_GRANT));
+                        }
+                        let subject_ok = crate::auth::load_active_peer_subject(conn, uid)
+                            .is_ok_and(|s| s.role == "admin");
+                        if !subject_ok {
+                            return Ok(Some(LISTENER_REVOCATION_GRANT));
+                        }
+                        Ok(None)
+                    })
+                    .await
+                    .unwrap_or(Some(LISTENER_REVOCATION_GRANT))
+            }
+        };
+
+        if let Some(code) = recheck_revocation(&runtime, &link_id, &grant_id, run_as_user_id).await
+        {
+            reason_c.store(code, Ordering::Release);
+            let _ = cancel_tx.send(true);
+            return;
+        }
+
+        loop {
+            tokio::select! {
+                _ = cancel_tx.closed() => break,
+                recv = revocation_rx.recv() => {
+                    match recv {
+                        Ok(RevocationEvent::LinkRevoked { link_id: revoked_id, .. }) => {
+                            if revoked_id == link_id {
+                                reason_c.store(LISTENER_REVOCATION_LINK, Ordering::Release);
+                                let _ = cancel_tx.send(true);
+                                break;
+                            }
+                        }
+                        Ok(RevocationEvent::GrantRevoked {
+                            link_id: revoked_id,
+                            grant_id: revoked_grant_id,
+                            run_as_user_id: revoked_uid,
+                        }) => {
+                            if revoked_id == link_id
+                                && (revoked_grant_id == grant_id || revoked_uid == run_as_user_id)
+                            {
+                                reason_c.store(LISTENER_REVOCATION_GRANT, Ordering::Release);
+                                let _ = cancel_tx.send(true);
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            if let Some(code) =
+                                recheck_revocation(&runtime, &link_id, &grant_id, run_as_user_id)
+                                    .await
+                            {
+                                reason_c.store(code, Ordering::Release);
+                                let _ = cancel_tx.send(true);
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            reason_c.store(LISTENER_REVOCATION_LINK, Ordering::Release);
+                            let _ = cancel_tx.send(true);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    (cancel_rx, reason)
+}
+
 /// Link-authenticated `GET /health` over the WireGuard tunnel.
 async fn tunnel_health(
     State(runtime): State<Arc<PeerRuntime>>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
 ) -> Response {
-    let (_auth, _permit) =
+    let (auth, _permit) =
         match authenticate_active_link(&runtime, connect_info, &headers, "GET /health").await {
             Ok(ok) => ok,
             Err(err) => return err.into_response(),
         };
+
+    let local_server = runtime.local_server_name();
+    let link_id_lookup = auth.link.id.clone();
+    let inbound_grant_generation = match runtime
+        .db
+        .read(&local_server, "tunnel_health", move |conn| {
+            let active_grant = db_peers::get_active_peer_grant_for_link(conn, &link_id_lookup)
+                .map_err(|err| PeerError::internal("local", "tunnel_health", err.to_string()))?;
+            let epoch = db_peers::get_peer_grant_epoch(conn, &link_id_lookup)
+                .map_err(|err| PeerError::internal("local", "tunnel_health", err.to_string()))?;
+            let generation = if active_grant.is_some() {
+                Some(epoch.map(|e| e.issuer_generation).unwrap_or(1))
+            } else {
+                epoch.and_then(|e| e.active_op_id.is_some().then_some(e.issuer_generation))
+            };
+            Ok(generation)
+        })
+        .await
+    {
+        Ok(gen) => gen,
+        Err(err) => return err.into_response(),
+    };
 
     let transcode_caps = super::transcode::cached_local_capabilities_nonblocking(&runtime);
 
@@ -296,6 +451,7 @@ async fn tunnel_health(
             "peer_protocol": PEER_PROTOCOL_VERSION,
             "capabilities": capabilities(),
             "transcode": transcode_caps,
+            "inbound_grant_generation": inbound_grant_generation,
         })),
     )
         .into_response()
@@ -317,6 +473,9 @@ async fn tunnel_management_or_deny_fallback(
         .as_ref()
         .is_ok_and(scopes::CanonicalPath::is_websocket_path)
         && is_websocket_upgrade_request(req.headers(), req.method());
+    // Subscribe before loading link/grant state so revocations concurrent with dispatch cannot slip
+    // through on non-WebSocket HTTP management requests.
+    let revocation_rx = (!is_ws).then(|| runtime.subscribe_revocations());
     let (auth, permit) = match authenticate_active_link_for_kind(
         runtime,
         connect_info,
@@ -717,10 +876,86 @@ async fn tunnel_management_or_deny_fallback(
     exts.insert(principal);
     exts.insert(run_as_auth_user);
 
-    // The management handler can deny access based on the requested changes.
-    let mut response = match state.management_router.clone().oneshot(req).await {
-        Ok(response) => response,
-        Err(never) => match never {},
+    let mut http_cancel_state = revocation_rx.map(|rev_rx| {
+        spawn_listener_revocation_watcher(
+            Arc::clone(runtime),
+            auth.link.id.clone(),
+            grant.id.clone(),
+            run_as_subject.user_id,
+            rev_rx,
+        )
+    });
+
+    // The management handler can deny access based on the requested changes, or the link/grant
+    // can be revoked while the request is in flight (pre-headers or while streaming the body).
+    let response_opt = if let Some((ref mut cancel_rx, _)) = http_cancel_state {
+        tokio::select! {
+            biased;
+            _ = wait_for_listener_cancel(cancel_rx) => None,
+            res = state.management_router.clone().oneshot(req) => match res {
+                Ok(response) => Some(response),
+                Err(never) => match never {},
+            },
+        }
+    } else {
+        match state.management_router.clone().oneshot(req).await {
+            Ok(response) => Some(response),
+            Err(never) => match never {},
+        }
+    };
+
+    let mut response = match response_opt {
+        Some(response) => response,
+        None => {
+            let revoked_code = http_cancel_state
+                .as_ref()
+                .map(|(_, reason)| reason.load(Ordering::Acquire))
+                .unwrap_or(LISTENER_REVOCATION_GRANT);
+            let (err, reason_label) = if revoked_code == LISTENER_REVOCATION_LINK {
+                (
+                    PeerError::link_revoked(
+                        &local_server,
+                        "tunnel_dispatch",
+                        format!(
+                            "Link with '{}' was revoked while request was in flight",
+                            auth.link.name
+                        ),
+                    ),
+                    "link_revoked_in_flight",
+                )
+            } else {
+                (
+                    PeerError::peer_scope_denied(
+                        &local_server,
+                        "tunnel_dispatch",
+                        format!(
+                            "Management grant for '{}' was revoked while request was in flight",
+                            auth.link.name
+                        ),
+                    ),
+                    "grant_revoked_in_flight",
+                )
+            };
+            runtime
+                .db
+                .record_audit(
+                    run_as_subject.user_id,
+                    run_as_username,
+                    "peer_management_denied".to_string(),
+                    "peer_grant".to_string(),
+                    grant.id,
+                    format!(
+                        "Aborted in-flight {method} {} via {} (server={local_server}, operator={operator_display}, request_id={request_id}, reason={reason_label}, code={})",
+                        canonical.as_str(),
+                        auth.link.name,
+                        err.code(),
+                    ),
+                    source_ip_str,
+                    String::new(),
+                )
+                .await;
+            return err.into_response();
+        }
     };
     let (audit_action, outcome) = match response.extensions_mut().remove::<PeerError>() {
         Some(PeerError::PeerScopeDenied(denial)) => (
@@ -762,13 +997,15 @@ async fn tunnel_management_or_deny_fallback(
             String::new(),
         )
         .await;
-    guard_management_response(response, http_permit, ws_permit)
+    let http_cancel = http_cancel_state.map(|(rx, _)| rx);
+    guard_management_response(response, http_permit, ws_permit, http_cancel)
 }
 
 fn guard_management_response(
     response: Response,
     http_permit: Option<OwnedSemaphorePermit>,
     ws_permit: Option<PeerWsPermit>,
+    http_cancel: Option<watch::Receiver<bool>>,
 ) -> Response {
     let body_permit = http_permit.or_else(|| {
         if response.status() == StatusCode::SWITCHING_PROTOCOLS {
@@ -777,9 +1014,17 @@ fn guard_management_response(
             ws_permit.and_then(|permit| permit.take())
         }
     });
-    if let Some(permit) = body_permit {
+    let body_cancel = if response.status() == StatusCode::SWITCHING_PROTOCOLS {
+        None
+    } else {
+        http_cancel
+    };
+    if body_permit.is_some() || body_cancel.is_some() {
         let (parts, body) = response.into_parts();
-        return Response::from_parts(parts, GuardedBody::wrap(body, Some(permit)));
+        return Response::from_parts(
+            parts,
+            GuardedBody::wrap_with_cancel(body, body_permit, body_cancel),
+        );
     }
     response
 }
@@ -847,6 +1092,7 @@ pub(crate) fn build_listener_router(runtime: Arc<PeerRuntime>) -> Router {
         .fallback(tunnel_management_or_deny_fallback)
         .method_not_allowed_fallback(tunnel_management_or_deny_fallback)
         .with_state(listener_state)
+        .layer(axum::middleware::from_fn(tunnel_request_id_middleware))
 }
 
 /// Binds and spawns the peer listener strictly on `<tunnel_ip>:<port>`, constraining production
@@ -900,6 +1146,7 @@ pub(crate) async fn spawn_tunnel_listener(
     socket.bind(bind_addr)?;
     let tcp_listener = socket.listen(1024)?;
     let bound_addr = tcp_listener.local_addr()?;
+    let interface_index = runtime.current_interface_index(bind_device);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let app = build_listener_router(runtime);
 
@@ -924,6 +1171,7 @@ pub(crate) async fn spawn_tunnel_listener(
     Ok(ListenerHandle {
         tunnel_ip,
         interface: bind_device.map(str::to_string),
+        interface_index,
         bound_addr,
         shutdown_tx,
         task,
@@ -934,6 +1182,7 @@ pub(crate) async fn spawn_tunnel_listener(
 mod response_permit_tests {
     use super::*;
     use axum::body::{Body, Bytes};
+    use futures::StreamExt as _;
     use tokio::sync::Semaphore;
 
     #[test]
@@ -952,11 +1201,41 @@ mod response_permit_tests {
                     Result<Bytes, std::io::Error>,
                 >()))
                 .unwrap();
-            let response = guard_management_response(response, http_permit, ws_permit);
+            let response = guard_management_response(response, http_permit, ws_permit, None);
             assert_eq!(response.status(), status);
             assert_eq!(pool.available_permits(), 0);
             drop(response);
             assert_eq!(pool.available_permits(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn guarded_management_response_aborts_stream_and_releases_permit_on_cancel() {
+        let pool = Arc::new(Semaphore::new(1));
+        let acquired = pool.clone().try_acquire_owned().unwrap();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from_stream(futures::stream::pending::<
+                Result<Bytes, std::io::Error>,
+            >()))
+            .unwrap();
+        let response = guard_management_response(response, Some(acquired), None, Some(cancel_rx));
+        assert_eq!(pool.available_permits(), 0);
+        let mut stream = response.into_body().into_data_stream();
+
+        let _ = cancel_tx.send(true);
+        let next = tokio::time::timeout(std::time::Duration::from_millis(500), stream.next())
+            .await
+            .expect("cancelled body must resolve promptly");
+        assert!(
+            matches!(next, Some(Err(_))),
+            "expected cancellation error frame, got {next:?}"
+        );
+        assert_eq!(
+            pool.available_permits(),
+            1,
+            "permit must release immediately upon stream cancellation"
+        );
     }
 }

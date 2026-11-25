@@ -4501,8 +4501,9 @@ pub(crate) async fn handle_peer_network(
     // Run mutating operations in a detached Tokio task so caller disconnect cannot abort an
     // in-flight apply, rollback, subprocess cleanup, or lock release.
     let result = if req.is_mutating() {
+        use tracing::Instrument;
         let mgr = Arc::clone(&manager);
-        match tokio::spawn(async move { mgr.execute(&req).await }).await {
+        match tokio::spawn(async move { mgr.execute(&req).await }.in_current_span()).await {
             Ok(res) => res,
             Err(_) => Err(PeerNetworkError::Runtime(
                 "Peer-network operation task terminated unexpectedly".to_string(),

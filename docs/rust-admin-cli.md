@@ -189,6 +189,26 @@ af provision reset --confirm
 - **14 Rust-Native Foundation Steps**: `checkroot`, `logcheck`, `checkkernel`, `makedirs`, `boot`, `harden_perms`, `bashrc`, `hostname`, `locale`, `skel`, `apachesudo`, `build_modern`, `bbr`, and `perms` execute natively in Rust with `# STATE_VERSION=2` persistence, ancestor symlink rejection, and atomic writes.
 - **Safe Config Overlay**: `af provision overlay-config` tracks stock SHA-256 digests in `<target>.aetherflow-sha256` and backs up operator-modified files to `<target>.user-backup.<timestamp>` (`0600`) before applying updates.
 
+### 10. Read-Only Peer Clustering Diagnostics (`af cluster`)
+
+```bash
+af cluster diagnose <link-id-or-name> [--db <path>] [--json] [--socket <path>] [--root <dir>] [--dry-run]
+```
+
+Inspects read-only Peer Clustering state for a peer link matched by exact `id`, exact `name`, or case-insensitive `name`:
+
+- **Flags**:
+  - `--db <path>`: Override the SQLite database path (defaults via `af_models` DB path helpers: `AF_DB_PATH`, `DB_PATH`, `AETHERFLOW_DB_PATH`, `DATA_DIR`/`STATE_DIRECTORY`, env files, or `/var/lib/aetherflow/aetherflow.sqlite` under `--root`).
+  - Global flags `--json`, `--socket <path>` (default `/run/aetherflow/runner.sock`), `--root <dir>`, and `--dry-run` (`-n`, prints resolved database and socket paths without opening SQLite or contacting the runner).
+- **Read-Only SQLite & Isolated-Root Confinement**: Opens SQLite strictly read-only (`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`, 3-second busy timeout) and validates `--db` and resolved DB paths against `--root` via `af_models` isolated-root helpers whenever an isolated root is active.
+- **Report Sections (`ClusterDiagnoseReport`)**:
+  - **Link health (`link`)**: Exposes canonical public `state` (`pending` / `active` / `down` / `revoked`) alongside durable `internal_state` and affirmative WireGuard ownership flag `wg_peer_owned`, plus tunnel IP, endpoint, `wg_port`, `peer_version`, `peer_protocol`, `capabilities`, `rtt_ms`, `last_ok_at`, `last_error`, and `consecutive_failures`.
+  - **WireGuard status (`wireguard`)**: Queries live `afpeer0` interface/service state, peer handshake age, and RX/TX counters via `/v1/peer-network`.
+  - **Canonical grant summaries (`grants`)**: Reports `inbound` (`peer_grants`, access **this server → peer**) and `outbound` (`peer_received_grants`, access **peer → this server**) with all token hashes, credential IDs, pairing strings, and keys redacted.
+  - **Exports & mounts (`exports`, `mounts`)**: Lists configured NFS exports and mounts. Live `/v1/peer-storage` `MountStatus` and `ProbeSentinel` probes run **only** on rows where `purpose == "media"`; `transcode` and `transcode_bind` rows skip storage probes and report `probe: null` with an explicit `probe_skipped_reason`.
+  - **Transcode worker (`transcode_worker`)**: Shows worker configuration, enabled state, weight, `max_jobs`, FFmpeg version, encoders, render node, `parity_ok`/`parity_error`, and up to 10 recent transcode jobs.
+  - **Audit trail (`audit`)**: Includes up to 20 most recent redacted audit entries related to the peer link or its grants.
+
 ---
 
 ## Remaining Intentional Boundaries
@@ -202,4 +222,4 @@ af provision reset --confirm
 
 ## Isolated Linux Validation
 
-`cargo test -p af-cli` validates CLI parsing, runner IPC requests, incremental progress streaming, backup/staged-restore commands, maintenance commands (`tune`, `sentinel`, `clean-logs`, `showspace`), hosts reconciliation, and all 14 Rust-native provisioning steps in isolated roots.
+`cargo test -p af-cli` validates CLI parsing, runner IPC requests, incremental progress streaming, backup/staged-restore commands, maintenance commands (`tune`, `sentinel`, `clean-logs`, `showspace`), hosts reconciliation, read-only `af cluster diagnose` reporting, and all 14 Rust-native provisioning steps in isolated roots.

@@ -1,8 +1,10 @@
 use super::dispatch::dispatch_package_lifecycle_with_target;
-use crate::auth::{api_error, AuthUser};
+use crate::auth::{api_error, AuthUser, PeerPrincipal};
+use crate::peers::errors::PeerError;
+use crate::peers::scopes::is_jellyfin_update_package_id;
 use axum::extract::{Extension, Path, Query};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 #[derive(Debug, Default, Deserialize)]
@@ -178,9 +180,22 @@ pub(in crate::routes) async fn update_package(
     Path(id): Path<String>,
     Query(query): Query<PackageActionQuery>,
     Extension(auth_user): Extension<AuthUser>,
+    peer_principal: Option<Extension<PeerPrincipal>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    if let Some(Extension(peer)) = peer_principal {
+        if !peer.access.marketplace.allows_write() && !is_jellyfin_update_package_id(&id) {
+            let err = PeerError::peer_scope_denied(
+                &peer.local_server,
+                "package_update",
+                "Grant scope updates:write authorizes Jellyfin updates only; marketplace:write is required for other packages",
+            );
+            let mut resp = err.clone().into_response();
+            resp.extensions_mut().insert(err);
+            return resp;
+        }
+    }
     let target = match extract_expected_target_version(&body) {
         Ok(t) => t
             .or_else(|| query.expected_target_version.or(query.target_version))
@@ -198,4 +213,120 @@ pub(in crate::routes) async fn update_package(
         id, "update", "updating", false, target, auth_user, headers,
     )
     .await
+}
+
+#[cfg(test)]
+mod peer_update_scope_tests {
+    use super::*;
+    use af_db::peers::{AccessLevel, AccessMap};
+    use axum::body::to_bytes;
+
+    fn test_admin() -> AuthUser {
+        AuthUser {
+            user_id: 7,
+            username: "peer-manager".to_string(),
+            role: "admin".to_string(),
+            jti: "peer-grant:test".to_string(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        }
+    }
+
+    fn test_peer(access: AccessMap) -> PeerPrincipal {
+        PeerPrincipal {
+            link_id: "link-1".to_string(),
+            link_name: "manager-a".to_string(),
+            local_server: "managed-b".to_string(),
+            grant_id: "grant-1".to_string(),
+            run_as_user_id: 7,
+            run_as_username: "peer-manager".to_string(),
+            access,
+            origin_operator: Some("alice".to_string()),
+            request_id: "req-pkg-scope-1".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn updates_write_only_allows_jellyfin_and_ffmpeg_and_rejects_other_packages() {
+        let mut updates_only = AccessMap::none();
+        updates_only.updates = AccessLevel::Write;
+
+        // Non-Jellyfin packages must be rejected with 403 PEER_SCOPE_DENIED and attached PeerError.
+        for pkg in ["sonarr", "plex", "radarr", "jellyfin-plugin"] {
+            let resp = update_package(
+                Path(pkg.to_string()),
+                Query(PackageActionQuery::default()),
+                Extension(test_admin()),
+                Some(Extension(test_peer(updates_only.clone()))),
+                HeaderMap::new(),
+                axum::body::Bytes::from_static(b"not-json"),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "pkg={pkg}");
+            assert!(
+                matches!(
+                    resp.extensions().get::<PeerError>(),
+                    Some(PeerError::PeerScopeDenied(_))
+                ),
+                "response must attach PeerError::PeerScopeDenied for audit attribution: pkg={pkg}"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(resp.into_body(), 8192).await.unwrap()).unwrap();
+            assert_eq!(body["code"], "PEER_SCOPE_DENIED", "pkg={pkg}: {body}");
+            assert_eq!(body["step"], "package_update", "pkg={pkg}: {body}");
+        }
+
+        // Jellyfin & jellyfin-ffmpeg* pass the PeerPrincipal scope check (reaching JSON validation -> 400).
+        for pkg in [
+            "jellyfin",
+            "Jellyfin",
+            "jellyfin-ffmpeg",
+            "jellyfin-ffmpeg8",
+        ] {
+            let resp = update_package(
+                Path(pkg.to_string()),
+                Query(PackageActionQuery::default()),
+                Extension(test_admin()),
+                Some(Extension(test_peer(updates_only.clone()))),
+                HeaderMap::new(),
+                axum::body::Bytes::from_static(b"not-json"),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "updates:write must allow {pkg} past peer scope guard"
+            );
+        }
+
+        // marketplace:write allows non-Jellyfin packages past the PeerPrincipal scope guard.
+        let mut marketplace_write = AccessMap::none();
+        marketplace_write.marketplace = AccessLevel::Write;
+        let mp_resp = update_package(
+            Path("sonarr".to_string()),
+            Query(PackageActionQuery::default()),
+            Extension(test_admin()),
+            Some(Extension(test_peer(marketplace_write))),
+            HeaderMap::new(),
+            axum::body::Bytes::from_static(b"not-json"),
+        )
+        .await;
+        assert_eq!(
+            mp_resp.status(),
+            StatusCode::BAD_REQUEST,
+            "marketplace:write must allow non-Jellyfin packages past peer scope guard"
+        );
+
+        // Local human admin (no PeerPrincipal) is unaffected for any package.
+        let local_resp = update_package(
+            Path("sonarr".to_string()),
+            Query(PackageActionQuery::default()),
+            Extension(test_admin()),
+            None,
+            HeaderMap::new(),
+            axum::body::Bytes::from_static(b"not-json"),
+        )
+        .await;
+        assert_eq!(local_resp.status(), StatusCode::BAD_REQUEST);
+    }
 }

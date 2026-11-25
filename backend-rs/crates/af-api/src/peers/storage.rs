@@ -30,7 +30,10 @@
 //!   unmounted peer paths, and disable Plex automatic trash emptying (`autoEmptyTrash=0`) when a
 //!   configured Plex server uses a peer-mounted library.
 
-use super::errors::{redact_sensitive_text, PeerError, PeerErrorBody, PeerErrorDetail};
+use super::errors::{
+    bytes_rejection_to_peer_error, parse_required_json_bytes, redact_sensitive_text, PeerError,
+    PeerErrorBody, PeerErrorDetail,
+};
 use super::health::{evaluate_compatibility, CompatibilityStatus, WG_HANDSHAKE_STALE_SECS};
 use super::listener::authenticate_active_link;
 use super::pairing::{is_valid_credential_id, map_runner_error};
@@ -51,6 +54,7 @@ use af_runner::{
 };
 use axum::body::Bytes;
 use axum::extract::connect_info::ConnectInfo;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{Extension, Path, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
@@ -303,7 +307,8 @@ struct PeerMountListPayload {
     exports_error: Option<PeerErrorBody>,
 }
 
-fn parse_bounded_json<T: for<'de> Deserialize<'de>>(
+fn parse_bounded_json<T: serde::de::DeserializeOwned>(
+    headers: &HeaderMap,
     raw_body: &[u8],
     server: &str,
     step: &str,
@@ -317,14 +322,7 @@ fn parse_bounded_json<T: for<'de> Deserialize<'de>>(
             usage_hint,
         ));
     }
-    serde_json::from_slice(raw_body).map_err(|err| {
-        PeerError::invalid_request(
-            server,
-            step,
-            format!("Invalid peer storage request payload: {err}"),
-            usage_hint,
-        )
-    })
+    parse_required_json_bytes(headers, raw_body, server, step)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -640,6 +638,15 @@ fn sanitize_mount_segment(raw: &str, fallback_prefix: &str, id_hint: &str) -> St
     }
 }
 
+/// Derives the canonical `/mnt/af-peers/<segment>/` link directory segment for `link`.
+pub(crate) fn derive_link_mount_segment(link: &PeerLink) -> String {
+    if validate_peer_mount_segment(&link.name).is_ok() {
+        link.name.clone()
+    } else {
+        sanitize_mount_segment(&link.id, "peer", &link.id)
+    }
+}
+
 fn derive_unique_mount_path_for_export(
     conn: &rusqlite::Connection,
     link: &PeerLink,
@@ -648,11 +655,7 @@ fn derive_unique_mount_path_for_export(
     server: &str,
     step: &str,
 ) -> Result<String, PeerError> {
-    let link_seg = if validate_peer_mount_segment(&link.name).is_ok() {
-        link.name.clone()
-    } else {
-        sanitize_mount_segment(&link.id, "peer", &link.id)
-    };
+    let link_seg = derive_link_mount_segment(link);
 
     let base_name = StdPath::new(remote_path)
         .file_name()
@@ -1028,8 +1031,19 @@ pub async fn create_peer_export(
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     Path(link_id): Path<String>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return bytes_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "create_peer_export",
+            )
+            .into_response();
+        }
+    };
     match create_peer_export_inner(&runtime, &auth_user, peer_ip, &headers, &link_id, &body).await {
         Ok(export) => (
             StatusCode::CREATED,
@@ -1062,6 +1076,7 @@ async fn create_peer_export_inner(
     }
 
     let req: CreatePeerExportReq = parse_bounded_json(
+        headers,
         raw_body,
         &server,
         step,
@@ -1313,6 +1328,9 @@ async fn create_peer_export_inner(
 
     drop(_link_guard);
 
+    // Best-effort transcode mount resync when this link is an active enabled transcode worker.
+    super::transcode::resync_worker_transcode_mounts_if_active_best_effort(runtime, &link.id).await;
+
     let client_ip = extract_client_ip_for_peer(headers, peer_ip);
     runtime
         .db
@@ -1340,8 +1358,19 @@ pub async fn delete_peer_export(
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     Path(link_id): Path<String>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return bytes_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "delete_peer_export",
+            )
+            .into_response();
+        }
+    };
     match delete_peer_export_inner(&runtime, &auth_user, peer_ip, &headers, &link_id, &body).await {
         Ok(()) => (
             StatusCode::NO_CONTENT,
@@ -1372,8 +1401,13 @@ async fn delete_peer_export_inner(
         ));
     }
 
-    let req: DeletePeerExportReq =
-        parse_bounded_json(raw_body, &server, step, "Send JSON {\"export_id\":\"...\"}")?;
+    let req: DeletePeerExportReq = parse_bounded_json(
+        headers,
+        raw_body,
+        &server,
+        step,
+        "Send JSON {\"export_id\":\"...\"}",
+    )?;
 
     let _link_guard = runtime.lock_link(link_id, step).await?;
 
@@ -1468,6 +1502,9 @@ async fn delete_peer_export_inner(
     }
 
     drop(_link_guard);
+
+    // Best-effort transcode mount resync when this link is an active enabled transcode worker.
+    super::transcode::resync_worker_transcode_mounts_if_active_best_effort(runtime, &link.id).await;
 
     let client_ip = extract_client_ip_for_peer(headers, peer_ip);
     runtime
@@ -1568,8 +1605,19 @@ pub async fn create_peer_mount(
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     Path(link_id): Path<String>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return bytes_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "create_peer_mount",
+            )
+            .into_response();
+        }
+    };
     match create_peer_mount_inner(&runtime, &auth_user, peer_ip, &headers, &link_id, &body).await {
         Ok(mount) => (
             StatusCode::CREATED,
@@ -1681,6 +1729,7 @@ async fn create_peer_mount_inner(
     }
 
     let req: CreatePeerMountReq = parse_bounded_json(
+        headers,
         raw_body,
         &server,
         step,
@@ -1977,6 +2026,13 @@ async fn create_peer_mount_inner(
     // Best-effort Plex media-app safety hook (dormant unless Plex is configured & enabled).
     apply_plex_peer_mount_safety_best_effort(runtime).await;
 
+    // Best-effort transcode mount resync when this link is an active enabled transcode worker.
+    super::transcode::resync_worker_transcode_mounts_if_active_best_effort(
+        runtime,
+        &current_link.id,
+    )
+    .await;
+
     let client_ip = extract_client_ip_for_peer(headers, peer_ip);
     runtime
         .db
@@ -2009,8 +2065,19 @@ pub async fn delete_peer_mount(
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     Path(link_id): Path<String>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return bytes_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "delete_peer_mount",
+            )
+            .into_response();
+        }
+    };
     match delete_peer_mount_inner(&runtime, &auth_user, peer_ip, &headers, &link_id, &body).await {
         Ok(()) => (
             StatusCode::NO_CONTENT,
@@ -2041,8 +2108,13 @@ async fn delete_peer_mount_inner(
         ));
     }
 
-    let req: DeletePeerMountReq =
-        parse_bounded_json(raw_body, &server, step, "Send JSON {\"mount_id\":\"...\"}")?;
+    let req: DeletePeerMountReq = parse_bounded_json(
+        headers,
+        raw_body,
+        &server,
+        step,
+        "Send JSON {\"mount_id\":\"...\"}",
+    )?;
 
     let _link_guard = runtime.lock_link(link_id, step).await?;
 
@@ -2148,6 +2220,9 @@ async fn delete_peer_mount_inner(
 
     runtime.mount_health.clear(&mount.id);
     drop(_link_guard);
+
+    // Best-effort transcode mount resync when this link is an active enabled transcode worker.
+    super::transcode::resync_worker_transcode_mounts_if_active_best_effort(runtime, &link.id).await;
 
     let client_ip = extract_client_ip_for_peer(headers, peer_ip);
     runtime

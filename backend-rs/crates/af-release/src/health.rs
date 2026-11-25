@@ -37,7 +37,10 @@ pub fn is_healthy_status(status: &str) -> bool {
     matches!(status, "ready" | "ok")
 }
 
-pub(crate) fn packaged_systemd_directory(config: &ReleaseConfig) -> ReleaseResult<PathBuf> {
+const TRANSCODE_SHIM_RELATIVE_PATH: &str = "usr/lib/aetherflow/transcode/ffmpeg";
+pub const TRANSCODE_WORKER_UNIT: &str = "af-transcode-worker.service";
+
+fn active_release_directory(config: &ReleaseConfig) -> ReleaseResult<Option<PathBuf>> {
     let parent = config
         .current_link
         .parent()
@@ -48,9 +51,7 @@ pub(crate) fn packaged_systemd_directory(config: &ReleaseConfig) -> ReleaseResul
     crate::fs_security::ensure_no_symlink_ancestors(parent)?;
     let target = match fs::read_link(&config.current_link) {
         Ok(target) => target,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(config.current_link.join("deploy/systemd"));
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(ReleaseError::io("reading current release link", error)),
     };
     let release_dir = if target.is_absolute() {
@@ -65,7 +66,220 @@ pub(crate) fn packaged_systemd_directory(config: &ReleaseConfig) -> ReleaseResul
         });
     }
     crate::fs_security::ensure_no_symlink_ancestors(&release_dir)?;
-    Ok(release_dir.join("deploy/systemd"))
+    Ok(Some(release_dir))
+}
+
+pub(crate) fn packaged_systemd_directory(config: &ReleaseConfig) -> ReleaseResult<PathBuf> {
+    match active_release_directory(config)? {
+        Some(release_dir) => Ok(release_dir.join("deploy/systemd")),
+        None => Ok(config.current_link.join("deploy/systemd")),
+    }
+}
+
+/// Resolves the installed transcode shim path (`/usr/lib/aetherflow/transcode/ffmpeg`),
+/// rebased under `config.isolated_root` when isolated so tests never touch host `/usr/lib`.
+pub fn resolve_transcode_shim_path(config: &ReleaseConfig) -> PathBuf {
+    match config.isolated_root {
+        Some(ref root) => root.join(TRANSCODE_SHIM_RELATIVE_PATH),
+        None => PathBuf::from("/").join(TRANSCODE_SHIM_RELATIVE_PATH),
+    }
+}
+
+/// Atomically refreshes an already-installed transcode shim (`.../usr/lib/aetherflow/transcode/ffmpeg`)
+/// from the active release's `bin/af-transcode` binary.
+///
+/// - Stays dormant (`Ok(false)`) when the shim file does not exist or when the active release
+///   does not include `bin/af-transcode` (legacy bundle compatibility).
+/// - Fails closed (`Err(ReleaseError::PathValidation)`) if the shim path, any existing ancestor,
+///   or the source `bin/af-transcode` path is a symlink or non-regular file.
+/// - Copies via an exclusive sibling temp file (`0755`, `O_NOFOLLOW`), fsyncs, closes the write
+///   descriptor, and atomically `rename`s over `ffmpeg` to prevent `ETXTBSY` and partial binaries.
+pub fn refresh_installed_transcode_shim(config: &ReleaseConfig) -> ReleaseResult<bool> {
+    let shim_path = resolve_transcode_shim_path(config);
+    crate::fs_security::ensure_no_symlink_ancestors(&shim_path)?;
+
+    match fs::symlink_metadata(&shim_path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(ReleaseError::PathValidation {
+                    path: shim_path,
+                    reason: "refusing symlinked transcode shim path".to_string(),
+                });
+            }
+            if !meta.file_type().is_file() {
+                return Err(ReleaseError::PathValidation {
+                    path: shim_path,
+                    reason: "refusing non-regular transcode shim path".to_string(),
+                });
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(ReleaseError::io(
+                format!("inspecting transcode shim {}", shim_path.display()),
+                err,
+            ));
+        }
+    }
+
+    let Some(release_dir) = active_release_directory(config)? else {
+        return Ok(false);
+    };
+    let src_bin = release_dir.join("bin/af-transcode");
+    crate::fs_security::ensure_no_symlink_ancestors(&src_bin)?;
+
+    let mut src_opts = fs::OpenOptions::new();
+    src_opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        src_opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut src_file = match src_opts.open(&src_bin) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(ReleaseError::io(
+                format!("opening release transcode binary {}", src_bin.display()),
+                err,
+            ));
+        }
+    };
+    let src_meta = src_file.metadata().map_err(|err| {
+        ReleaseError::io(
+            format!("inspecting release transcode binary {}", src_bin.display()),
+            err,
+        )
+    })?;
+    if !src_meta.is_file() {
+        return Err(ReleaseError::PathValidation {
+            path: src_bin,
+            reason: "release bin/af-transcode must be a regular non-symlink file".to_string(),
+        });
+    }
+
+    let shim_dir = shim_path
+        .parent()
+        .ok_or_else(|| ReleaseError::PathValidation {
+            path: shim_path.clone(),
+            reason: "transcode shim path has no parent directory".to_string(),
+        })?;
+    let tmp_path = shim_dir.join(format!(
+        ".ffmpeg.tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+
+    let mut tmp_opts = fs::OpenOptions::new();
+    tmp_opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        tmp_opts
+            .mode(0o755)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut tmp_file = tmp_opts.open(&tmp_path).map_err(|err| {
+        ReleaseError::io(
+            format!(
+                "creating temporary transcode shim file {}",
+                tmp_path.display()
+            ),
+            err,
+        )
+    })?;
+
+    let write_res: ReleaseResult<()> = (|| {
+        std::io::copy(&mut src_file, &mut tmp_file).map_err(|err| {
+            ReleaseError::io(
+                format!(
+                    "copying transcode binary {} -> {}",
+                    src_bin.display(),
+                    tmp_path.display()
+                ),
+                err,
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::io::AsRawFd;
+            tmp_file
+                .set_permissions(fs::Permissions::from_mode(0o755))
+                .map_err(|err| {
+                    ReleaseError::io(
+                        format!(
+                            "setting mode 0755 on temporary transcode shim {}",
+                            tmp_path.display()
+                        ),
+                        err,
+                    )
+                })?;
+            if unsafe { libc::geteuid() } == 0 {
+                let rc = unsafe { libc::fchown(tmp_file.as_raw_fd(), 0, 0) };
+                if rc != 0 {
+                    return Err(ReleaseError::io(
+                        format!(
+                            "setting root:root ownership on temporary transcode shim {}",
+                            tmp_path.display()
+                        ),
+                        std::io::Error::last_os_error(),
+                    ));
+                }
+            }
+        }
+        tmp_file.sync_all().map_err(|err| {
+            ReleaseError::io(
+                format!("fsync temporary transcode shim {}", tmp_path.display()),
+                err,
+            )
+        })?;
+        Ok(())
+    })();
+
+    // Close write descriptor before rename so concurrent execve never observes ETXTBSY.
+    drop(tmp_file);
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    if let Err(err) = crate::fs_security::ensure_no_symlink_ancestors(&shim_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    match fs::symlink_metadata(&shim_path) {
+        Ok(meta) if !meta.file_type().is_symlink() && meta.file_type().is_file() => {}
+        Ok(_) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(ReleaseError::PathValidation {
+                path: shim_path,
+                reason: "transcode shim changed to symlink or non-regular file before rename"
+                    .to_string(),
+            });
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(ReleaseError::io(
+                format!("re-verifying transcode shim {}", shim_path.display()),
+                err,
+            ));
+        }
+    }
+
+    fs::rename(&tmp_path, &shim_path).map_err(|err| {
+        let _ = fs::remove_file(&tmp_path);
+        ReleaseError::io(
+            format!(
+                "atomically renaming {} -> {}",
+                tmp_path.display(),
+                shim_path.display()
+            ),
+            err,
+        )
+    })?;
+    crate::fs_security::sync_parent_dir_best_effort(shim_dir);
+    Ok(true)
 }
 
 /// Installs a packaged systemd unit file (`aetherflow-runner.service` or `aetherflow-api.service`)
@@ -623,6 +837,8 @@ impl LifecycleController for SystemdLifecycleController {
             ))?;
         }
 
+        let _ = refresh_installed_transcode_shim(config)?;
+
         run_systemctl(&["daemon-reload"], true)?;
 
         if has_log_retention {
@@ -646,6 +862,7 @@ impl LifecycleController for SystemdLifecycleController {
         )?;
         run_systemctl(&["restart", "aetherflow-runner.service"], true)?;
         run_systemctl(&["restart", "aetherflow-api.service"], true)?;
+        let _ = restart_transcode_worker_if_active_with_bin(Path::new("systemctl"))?;
         Ok(())
     }
 
@@ -713,8 +930,16 @@ fn run_systemctl_if_present(args: &[&str]) -> ReleaseResult<()> {
 }
 
 fn run_systemctl(args: &[&str], required: bool) -> ReleaseResult<()> {
+    run_systemctl_with_bin(Path::new("systemctl"), args, required)
+}
+
+fn run_systemctl_with_bin(
+    systemctl_bin: &Path,
+    args: &[&str],
+    required: bool,
+) -> ReleaseResult<()> {
     let action_desc = format!("systemctl {}", args.join(" "));
-    match Command::new("systemctl").args(args).output() {
+    match Command::new(systemctl_bin).args(args).output() {
         Ok(out) => {
             if out.status.success() || !required {
                 Ok(())
@@ -738,6 +963,32 @@ fn run_systemctl(args: &[&str], required: bool) -> ReleaseResult<()> {
                 })
             }
         }
+    }
+}
+
+fn systemctl_unit_is_active(systemctl_bin: &Path, unit: &str) -> ReleaseResult<bool> {
+    let action_desc = format!("systemctl is-active --quiet {unit}");
+    match Command::new(systemctl_bin)
+        .args(["is-active", "--quiet", unit])
+        .output()
+    {
+        Ok(out) => Ok(out.status.success()),
+        Err(e) => Err(ReleaseError::Systemd {
+            action: action_desc,
+            reason: e.to_string(),
+        }),
+    }
+}
+
+/// Restarts `af-transcode-worker.service` ONLY if `systemctl is-active --quiet` reports it active.
+pub(crate) fn restart_transcode_worker_if_active_with_bin(
+    systemctl_bin: &Path,
+) -> ReleaseResult<bool> {
+    if systemctl_unit_is_active(systemctl_bin, TRANSCODE_WORKER_UNIT)? {
+        run_systemctl_with_bin(systemctl_bin, &["restart", TRANSCODE_WORKER_UNIT], true)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -929,6 +1180,7 @@ impl LifecycleController for NoopLifecycleController {
             }
             install_systemd_hardening_dropins(&config.systemd_units_dst, has_log_retention)?;
         }
+        let _ = refresh_installed_transcode_shim(config)?;
         Ok(())
     }
 

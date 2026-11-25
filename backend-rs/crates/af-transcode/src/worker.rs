@@ -10,6 +10,9 @@
 //!   64-frame channel backpressure.
 //! - Strict validation of `Start` (`args`, `cwd`, narrow `env_subset` allowlist); child environment
 //!   is cleared (`env_clear`) and populated only from safe worker-local baseline + validated subset.
+//! - Defense-in-depth SSRF & confinement: rejects network/socket FFmpeg protocols and caller
+//!   attempts to widen `-protocol_whitelist`, enforces `-protocol_whitelist file,pipe,fd,crypto,data,subfile`
+//!   on every input, and clamps child `current_dir` to a validated safe restricted directory.
 //! - Vendor-aware render-node selection via `af_hardware::detect_render_nodes()` and exact
 //!   token-boundary rewriting.
 //! - Every child runs in its own process group (`process_group(0)`), receiving forwarded signals
@@ -20,10 +23,11 @@ use crate::argv;
 use crate::capabilities;
 use crate::config::{
     configured_real_ffmpeg_path, configured_worker_max_jobs, configured_worker_socket_mode,
-    configured_worker_socket_path, validate_absolute_clean_path, validate_real_ffmpeg_path,
-    validate_socket_mode, validate_start_request, ConfigError, DEFAULT_FRAME_WRITE_TIMEOUT,
-    DEFAULT_WORKER_MAX_JOBS, DEFAULT_WORKER_SOCKET_MODE, DEFAULT_WORKER_START_FRAME_TIMEOUT,
-    MAX_UNIX_SOCKET_PATH_BYTES, MAX_WORKER_MAX_JOBS, WORKER_BASELINE_ENV_KEYS,
+    configured_worker_socket_path, resolve_worker_child_cwd, validate_absolute_clean_path,
+    validate_real_ffmpeg_path, validate_socket_mode, validate_start_request, ConfigError,
+    DEFAULT_FRAME_WRITE_TIMEOUT, DEFAULT_JELLYFIN_CACHE_DIR, DEFAULT_WORKER_MAX_JOBS,
+    DEFAULT_WORKER_SOCKET_MODE, DEFAULT_WORKER_START_FRAME_TIMEOUT, MAX_UNIX_SOCKET_PATH_BYTES,
+    MAX_WORKER_MAX_JOBS, WORKER_BASELINE_ENV_KEYS,
 };
 use crate::protocol::{
     bounded_frame_channel, encode_framed, read_frame, write_frame, ErrorKind, Frame, ProtocolError,
@@ -64,6 +68,13 @@ pub struct WorkerConfig {
     pub frame_write_timeout: Duration,
     pub render_nodes_override: Option<Vec<RenderNode>>,
     pub allowed_peer_uids: Option<Vec<u32>>,
+    /// Explicit restricted directory used as the fallback `current_dir` for spawned `ffmpeg`
+    /// children when a caller's `Start.cwd` lies outside `allowed_cwd_roots`.
+    /// Defaults to the validated parent directory of `socket_path`.
+    pub safe_cwd: Option<PathBuf>,
+    /// Optional explicit allowlist of canonicalized directory roots permitted for child `cwd`.
+    /// Defaults to `[safe_cwd, /var/cache/jellyfin]`.
+    pub allowed_cwd_roots: Option<Vec<PathBuf>>,
 }
 
 impl WorkerConfig {
@@ -77,6 +88,8 @@ impl WorkerConfig {
             frame_write_timeout: DEFAULT_FRAME_WRITE_TIMEOUT,
             render_nodes_override: None,
             allowed_peer_uids: None,
+            safe_cwd: None,
+            allowed_cwd_roots: None,
         })
     }
 
@@ -91,6 +104,8 @@ impl WorkerConfig {
             frame_write_timeout: DEFAULT_FRAME_WRITE_TIMEOUT,
             render_nodes_override: None,
             allowed_peer_uids: None,
+            safe_cwd: None,
+            allowed_cwd_roots: None,
         }
     }
 }
@@ -568,9 +583,70 @@ async fn handle_connection(
         }
     };
 
+    // Defense-in-depth SSRF & local-only protocol check: refuse network/socket inputs or
+    // caller attempts to widen `-protocol_whitelist` even if worker is invoked directly.
+    if let Err(reason) = argv::validate_worker_args(&start_req.args) {
+        send_error_and_close(
+            &mut writer,
+            ErrorKind::InvalidRequest,
+            reason,
+            config.frame_write_timeout,
+        )
+        .await;
+        return;
+    }
+
+    // Clamp child `current_dir` to a validated safe restricted directory (never inheriting
+    // arbitrary process cwd or letting caller-supplied / symlinked `cwd` escape allowed roots).
+    let fallback_safe_cwd = match config
+        .safe_cwd
+        .as_deref()
+        .or_else(|| config.socket_path.parent())
+    {
+        Some(dir) => dir.to_path_buf(),
+        None => {
+            send_error_and_close(
+                &mut writer,
+                ErrorKind::Internal,
+                "worker has no safe working directory configured".to_string(),
+                config.frame_write_timeout,
+            )
+            .await;
+            return;
+        }
+    };
+    let allowed_cwd_roots = match &config.allowed_cwd_roots {
+        Some(roots) => roots.clone(),
+        None => vec![
+            fallback_safe_cwd.clone(),
+            PathBuf::from(DEFAULT_JELLYFIN_CACHE_DIR),
+        ],
+    };
+    let child_cwd =
+        match resolve_worker_child_cwd(&validated_cwd, &fallback_safe_cwd, &allowed_cwd_roots) {
+            Ok(dir) => dir,
+            Err(err) => {
+                send_error_and_close(
+                    &mut writer,
+                    ErrorKind::Internal,
+                    format!("worker safe working directory unavailable: {err}"),
+                    config.frame_write_timeout,
+                )
+                .await;
+                return;
+            }
+        };
+    if fs::canonicalize(&validated_cwd).ok().as_deref() != Some(child_cwd.as_path()) {
+        tracing::debug!(
+            requested_cwd = %validated_cwd.display(),
+            clamped_cwd = %child_cwd.display(),
+            "clamped worker child cwd to restricted safe directory"
+        );
+    }
+
     // Infer required hardware capability and rewrite DRM render node if args reference one.
     let capability = argv::required_capability(&start_req.args);
-    let final_args = if !capability.render_nodes.is_empty() {
+    let rewritten_args = if !capability.render_nodes.is_empty() {
         let detected_nodes = match &config.render_nodes_override {
             Some(nodes) => nodes.clone(),
             None => af_hardware::detect_render_nodes(),
@@ -604,10 +680,13 @@ async fn handle_connection(
         start_req.args.clone()
     };
 
+    // Enforce local-only `-protocol_whitelist` on every input before spawning real `ffmpeg`.
+    let final_args = argv::inject_local_protocol_whitelist(&rewritten_args);
+
     // Construct real ffmpeg process with clean environment (worker baseline + validated subset).
     let mut cmd = Command::new(real_ffmpeg.as_ref());
     cmd.args(&final_args)
-        .current_dir(&validated_cwd)
+        .current_dir(&child_cwd)
         .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

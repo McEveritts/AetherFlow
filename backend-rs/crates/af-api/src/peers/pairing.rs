@@ -1,7 +1,10 @@
 //! Peer pairing protocol: windows, single-use codes, public HTTPS bootstrap,
 //! attempt-bound WireGuard hello/acknowledge handshake, retries, and pending cleanup.
 
-use super::errors::PeerError;
+use super::errors::{
+    bytes_rejection_to_peer_error, is_json_content_type, json_rejection_to_peer_error,
+    parse_optional_json_bytes, PeerError,
+};
 use super::listener::{audit_listener_denial, TUNNEL_INTERNAL_BODY_LIMIT_BYTES};
 use super::{
     capabilities, detect_local_endpoints, is_live_link_state, is_pending_link_state,
@@ -15,7 +18,9 @@ use crate::ws::{extract_client_ip_for_peer, PeerIp};
 use af_db::peers::{self as db_peers, PairingAttempt, PairingWindow, PeerIdentity, PeerLink};
 use af_models::constant_time_eq;
 use af_runner::{PeerCredentialSecret, PeerCredentialSlot, PeerNetworkError, PeerNetworkRequest};
+use axum::body::Bytes;
 use axum::extract::connect_info::ConnectInfo;
+use axum::extract::rejection::{BytesRejection, JsonRejection};
 use axum::extract::{Extension, Path, Request, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
@@ -309,23 +314,6 @@ pub(crate) fn pending_issuer_credential_id(link_id: &str) -> String {
     }
 }
 
-fn is_json_content_type(headers: &HeaderMap) -> bool {
-    let Some(raw) = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-    else {
-        return false;
-    };
-    let essence = raw
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    essence == "application/json"
-        || (essence.starts_with("application/") && essence.ends_with("+json"))
-}
-
 /// Enforces a strict byte cap, JSON media type, and sanitized typed JSON decoding without leaking
 /// serde internals or request body fragments.
 async fn extract_bounded_json<T: DeserializeOwned>(
@@ -545,9 +533,161 @@ pub(crate) fn split_endpoint_host_port(raw: &str, default_port: u16) -> (String,
     (trimmed.to_string(), default_port)
 }
 
+pub(crate) fn allow_private_pairing_urls() -> bool {
+    std::env::var("AF_PEER_ALLOW_PRIVATE_PAIRING_URLS").is_ok_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn configured_peer_tunnel_cidr() -> String {
+    std::env::var("AF_PEER_TUNNEL_CIDR")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| af_runner::peer_network::DEFAULT_PEER_TUNNEL_CIDR.to_string())
+}
+
+fn ip_in_cidr(ip: IpAddr, cidr: &str) -> bool {
+    let Some((net_str, prefix_str)) = cidr.trim().split_once('/') else {
+        return false;
+    };
+    let Ok(net_ip) = net_str.trim().parse::<IpAddr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix_str.trim().parse::<u8>() else {
+        return false;
+    };
+    match (ip.to_canonical(), net_ip.to_canonical()) {
+        (IpAddr::V4(addr), IpAddr::V4(net)) if prefix <= 32 => {
+            if prefix == 0 {
+                return true;
+            }
+            let mask = u32::MAX << (32 - prefix);
+            (u32::from(addr) & mask) == (u32::from(net) & mask)
+        }
+        (IpAddr::V6(addr), IpAddr::V6(net)) if prefix <= 128 => {
+            if prefix == 0 {
+                return true;
+            }
+            let mask = u128::MAX << (128 - prefix);
+            (u128::from(addr) & mask) == (u128::from(net) & mask)
+        }
+        _ => false,
+    }
+}
+
+/// Validates a target IP address for outbound public pairing HTTPS requests against SSRF ranges.
+///
+/// Always blocks loopback, link-local / cloud metadata (`169.254.0.0/16`, `fe80::/10`),
+/// unspecified, multicast, broadcast/reserved, and the peer WireGuard tunnel CIDR
+/// (`AF_PEER_TUNNEL_CIDR`, default `10.231.0.0/16`). RFC 1918 private, CGNAT (`100.64.0.0/10`),
+/// and IPv6 unique-local (`fc00::/7`) addresses are blocked by default unless
+/// `allow_private` (`AF_PEER_ALLOW_PRIVATE_PAIRING_URLS=true`) is explicitly enabled.
+pub(crate) fn validate_pairing_ip(ip: IpAddr, allow_private: bool) -> Result<(), String> {
+    let ip = ip.to_canonical();
+    if ip.is_loopback() {
+        return Err("Pairing HTTPS URL cannot target a loopback address".to_string());
+    }
+    if ip.is_unspecified() {
+        return Err("Pairing HTTPS URL cannot target an unspecified address".to_string());
+    }
+    if ip.is_multicast() {
+        return Err("Pairing HTTPS URL cannot target a multicast address".to_string());
+    }
+
+    let tunnel_cidr = configured_peer_tunnel_cidr();
+    if ip_in_cidr(ip, &tunnel_cidr)
+        || ip_in_cidr(ip, af_runner::peer_network::DEFAULT_PEER_TUNNEL_CIDR)
+    {
+        return Err(format!(
+            "Pairing HTTPS URL cannot target the peer tunnel network ({tunnel_cidr})"
+        ));
+    }
+
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            if octets[0] == 0 {
+                return Err(
+                    "Pairing HTTPS URL cannot target a reserved 0.0.0.0/8 address".to_string(),
+                );
+            }
+            if v4.is_link_local() {
+                return Err(
+                    "Pairing HTTPS URL cannot target a link-local or cloud metadata address"
+                        .to_string(),
+                );
+            }
+            if v4.is_broadcast() || octets[0] >= 240 {
+                return Err(
+                    "Pairing HTTPS URL cannot target a reserved or broadcast address".to_string(),
+                );
+            }
+            if !allow_private {
+                if v4.is_private() {
+                    return Err(
+                        "Pairing HTTPS URL cannot target an RFC1918 private address unless AF_PEER_ALLOW_PRIVATE_PAIRING_URLS=true"
+                            .to_string(),
+                    );
+                }
+                if octets[0] == 100 && (octets[1] & 0xc0) == 64 {
+                    return Err(
+                        "Pairing HTTPS URL cannot target a CGNAT (100.64.0.0/10) address unless AF_PEER_ALLOW_PRIVATE_PAIRING_URLS=true"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            if (seg0 & 0xffc0) == 0xfe80 {
+                return Err(
+                    "Pairing HTTPS URL cannot target an IPv6 link-local address".to_string()
+                );
+            }
+            if !allow_private && (seg0 & 0xfe00) == 0xfc00 {
+                return Err(
+                    "Pairing HTTPS URL cannot target a unique-local IPv6 address (fc00::/7) unless AF_PEER_ALLOW_PRIVATE_PAIRING_URLS=true"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_pairing_url_host(parsed: &Url, allow_private: bool) -> Result<(), String> {
+    match parsed.host() {
+        None => Err("Pairing HTTPS URL is missing a hostname".to_string()),
+        Some(url::Host::Ipv4(v4)) => validate_pairing_ip(IpAddr::V4(v4), allow_private),
+        Some(url::Host::Ipv6(v6)) => validate_pairing_ip(IpAddr::V6(v6), allow_private),
+        Some(url::Host::Domain(domain)) => {
+            let normalized = domain.trim_end_matches('.').to_ascii_lowercase();
+            if normalized.is_empty()
+                || normalized == "localhost"
+                || normalized.ends_with(".localhost")
+                || normalized == "metadata.google.internal"
+            {
+                return Err(
+                    "Pairing HTTPS URL cannot target localhost or internal metadata hostnames"
+                        .to_string(),
+                );
+            }
+            if let Ok(ip) = normalized.parse::<IpAddr>() {
+                return validate_pairing_ip(ip, allow_private);
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Validates and normalizes the public HTTPS base URL carried in a pairing string.
 ///
-/// Enforces `https://`, forbids credentials, query strings, fragments, and non-root paths.
+/// Enforces `https://`, forbids credentials, query strings, fragments, non-root paths,
+/// and SSRF-blocked hostnames/IP ranges.
 pub fn validate_public_https_url(raw: &str, server: &str, step: &str) -> Result<String, PeerError> {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() || trimmed.len() > 512 || trimmed.chars().any(char::is_control) {
@@ -587,6 +727,14 @@ pub fn validate_public_https_url(raw: &str, server: &str, step: &str) -> Result<
             "Use the server's root https:// origin URL",
         ));
     }
+    validate_pairing_url_host(&parsed, allow_private_pairing_urls()).map_err(|msg| {
+        PeerError::invalid_request(
+            server,
+            step,
+            msg,
+            "Use a publicly routable https:// origin URL (or set AF_PEER_ALLOW_PRIVATE_PAIRING_URLS=true for private LAN pairing)",
+        )
+    })?;
     let Some(host) = parsed.host_str() else {
         return Err(PeerError::invalid_request(
             server,
@@ -1020,6 +1168,15 @@ pub(crate) async fn ensure_local_identity(
                 .map_err(|err| PeerError::internal("local", "ensure_identity", err.to_string()))
         })
         .await?;
+
+    // Ensure `wireguard-tools` is installed on fresh hosts (and restored hosts) before
+    // `EnsureIdentity` invokes `wg` / `wg-quick`. Fast and idempotent when already installed.
+    runtime
+        .runner
+        .dispatch(&PeerNetworkRequest::EnsurePackages)
+        .await
+        .and_then(|resp| resp.into_packages())
+        .map_err(|err| map_runner_error(err, &server, step))?;
 
     let req = PeerNetworkRequest::EnsureIdentity {
         tunnel_ip: existing.as_ref().map(|id| id.tunnel_ip.clone()),
@@ -2024,9 +2181,19 @@ pub async fn open_pairing_window(
     Extension(auth_user): Extension<AuthUser>,
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
-    payload: Option<Json<OpenPairingWindowReq>>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let req = payload.map(|Json(v)| v).unwrap_or_default();
+    let server = runtime.local_server_name();
+    let step = "open_pairing_window";
+    let raw_body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => return bytes_rejection_to_peer_error(err, &server, step).into_response(),
+    };
+    let req: OpenPairingWindowReq =
+        match parse_optional_json_bytes(&headers, &raw_body, &server, step) {
+            Ok(req) => req,
+            Err(err) => return err.into_response(),
+        };
     match open_pairing_window_inner(&runtime, &auth_user, peer_ip, &headers, req).await {
         Ok(val) => (
             StatusCode::CREATED,
@@ -2660,8 +2827,19 @@ pub async fn start_pairing(
     Extension(auth_user): Extension<AuthUser>,
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
-    Json(req): Json<StartPairingReq>,
+    payload: Result<Json<StartPairingReq>, JsonRejection>,
 ) -> Response {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(err) => {
+            return json_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "start_pairing",
+            )
+            .into_response();
+        }
+    };
     match start_pairing_inner(&runtime, &auth_user, peer_ip, &headers, req).await {
         Ok(val) => (
             StatusCode::CREATED,
@@ -3910,9 +4088,19 @@ pub async fn confirm_pairing(
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     Path(attempt_id): Path<String>,
-    payload: Option<Json<ConfirmPairingReq>>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let req = payload.map(|Json(v)| v).unwrap_or_default();
+    let server = runtime.local_server_name();
+    let step = "confirm_pairing";
+    let raw_body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => return bytes_rejection_to_peer_error(err, &server, step).into_response(),
+    };
+    let req: ConfirmPairingReq = match parse_optional_json_bytes(&headers, &raw_body, &server, step)
+    {
+        Ok(req) => req,
+        Err(err) => return err.into_response(),
+    };
     match confirm_pairing_inner(&runtime, &auth_user, peer_ip, &headers, &attempt_id, req).await {
         Ok(val) => (
             StatusCode::OK,

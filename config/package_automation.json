@@ -32,7 +32,7 @@
       "-/srv",
       "-/downloads",
       "-/mnt/unionfs",
-      "-/run/aetherflow-transcode/transcode.sock"
+      "-/run/aetherflow-transcode"
     ],
     "sandbox_service_units": [
       "jellyfin.service"

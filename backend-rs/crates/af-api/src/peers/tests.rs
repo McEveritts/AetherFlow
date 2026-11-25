@@ -269,6 +269,7 @@ pub(super) struct FakeRunnerState {
     next_add_error: Option<PeerNetworkError>,
     next_remove_error: Option<PeerNetworkError>,
     next_identity_error: Option<PeerNetworkError>,
+    next_ensure_packages_error: Option<PeerNetworkError>,
     next_delete_cred_error: Option<PeerNetworkError>,
     next_delete_link_creds_error: Option<PeerNetworkError>,
 }
@@ -576,6 +577,9 @@ impl PeerRunner for FakePeerRunner {
                 }
                 PeerNetworkRequest::EnsurePackages => {
                     st.calls.push("ensure_packages".to_string());
+                    if let Some(err) = st.next_ensure_packages_error.take() {
+                        return Err(err);
+                    }
                     Ok(PeerNetworkResponse::Packages(PeerEnsurePackagesResponse {
                         installed: true,
                         already_installed: true,
@@ -785,6 +789,7 @@ fn build_test_runtime_with_db_and_timeout(
         bind_listener_in_handlers: bind_listener,
         management_router_override: None,
         allowed_fs_roots_override: None,
+        interface_index_override: RwLock::new(None),
     })
 }
 
@@ -9191,6 +9196,7 @@ async fn p5_scoped_tunnel_dispatch_real_router_headers_host_csrf_backup_and_peer
         bind_listener_in_handlers: true,
         management_router_override: None,
         allowed_fs_roots_override: None,
+        interface_index_override: RwLock::new(None),
     });
     let (rt_a, _db_a) = build_test_runtime(
         "manager-a",
@@ -9877,4 +9883,688 @@ async fn p5_scoped_tunnel_dispatch_real_router_headers_host_csrf_backup_and_peer
     rt_a.shutdown_all().await;
     rt_b.shutdown_all().await;
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wave 2 Bundles A–D: EnsurePackages, ifindex recycling, SSRF guard, request_id
+// & extractor PeerError parity, and link revocation cleanup order
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ensure_local_identity_calls_ensure_packages_before_ensure_identity_and_maps_errors() {
+    let (ip_a, _) = next_loopback_pair();
+    let pk_a = fixture_wg_pubkey(241);
+    let clock = FakeClock::new(1_805_000_000);
+    let runner = FakePeerRunner::new(pk_a, ip_a, 51821);
+    let (rt, _) = build_test_runtime(
+        "fresh-host",
+        Arc::clone(&runner) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        false,
+    );
+
+    // 1. Transient EnsurePackages error maps to PEER_BUSY and aborts before EnsureIdentity.
+    runner.state.lock().unwrap().next_ensure_packages_error =
+        Some(PeerNetworkError::Busy("apt lock busy".to_string()));
+    let (busy_st, busy_body) = call_admin(
+        &rt,
+        Method::POST,
+        "/pairing-window",
+        Some(json!({ "https_url": "https://fresh-host.example.test", "endpoint": "10.90.0.1" })),
+    )
+    .await;
+    assert_eq!(busy_st, StatusCode::SERVICE_UNAVAILABLE, "busy={busy_body}");
+    assert_eq!(busy_body["code"], "PEER_BUSY");
+    {
+        let calls = &runner.state.lock().unwrap().calls;
+        assert_eq!(calls.as_slice(), &["ensure_packages"]);
+    }
+
+    // 2. Subsequent call succeeds with EnsurePackages strictly preceding EnsureIdentity.
+    runner.state.lock().unwrap().calls.clear();
+    let (ok_st, ok_body) = call_admin(
+        &rt,
+        Method::POST,
+        "/pairing-window",
+        Some(json!({ "https_url": "https://fresh-host.example.test", "endpoint": "10.90.0.1" })),
+    )
+    .await;
+    assert_eq!(ok_st, StatusCode::CREATED, "ok={ok_body}");
+    let calls = runner.state.lock().unwrap().calls.clone();
+    let pkg_idx = calls
+        .iter()
+        .position(|c| c == "ensure_packages")
+        .expect("ensure_packages must be dispatched");
+    let id_idx = calls
+        .iter()
+        .position(|c| c == "ensure_identity")
+        .expect("ensure_identity must be dispatched");
+    assert!(
+        pkg_idx < id_idx,
+        "ensure_packages must run before ensure_identity: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn ifindex_change_recycles_tunnel_listener_and_clears_pooled_outbound_clients() {
+    let (ip_a, ip_b) = next_loopback_pair();
+    let pk_a = fixture_wg_pubkey(242);
+    let clock = FakeClock::new(1_805_001_000);
+    let runner = FakePeerRunner::new(pk_a.clone(), ip_a, 51821);
+    let (rt, db) = build_test_runtime(
+        "ifindex-host",
+        Arc::clone(&runner) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        true,
+    );
+
+    // Sanity-check kernel if_nametoindex helper.
+    assert_eq!(super::resolve_interface_index(None), None);
+    assert_eq!(
+        super::resolve_interface_index(Some("af_nonexistent_if99")),
+        None
+    );
+    #[cfg(unix)]
+    assert!(super::resolve_interface_index(Some("lo")).is_some());
+
+    db_peers::upsert_peer_identity(
+        &db.lock().unwrap(),
+        &PeerIdentity {
+            wg_pubkey: pk_a,
+            tunnel_ip: ip_a.to_string(),
+            wg_port: 51821,
+            created_at: clock.as_fn()().to_rfc3339(),
+        },
+    )
+    .unwrap();
+
+    // Start listener under initial ifindex=41 and populate both outbound client caches.
+    rt.set_interface_index_override(Some(41));
+    let addr_1 = rt.ensure_listener_started().await.unwrap().unwrap();
+    {
+        let guard = rt.listener_state.lock().await;
+        assert_eq!(guard.as_ref().unwrap().interface_index, Some(41));
+    }
+
+    let binding_41 = rt.resolve_outbound_tunnel_binding(ip_b).await.unwrap();
+    assert_eq!(binding_41.interface_index, Some(41));
+    let _ = rt.get_or_build_tunnel_client(&binding_41).unwrap();
+    let _ = rt.get_or_build_proxy_tunnel_client(&binding_41).unwrap();
+    assert_eq!(rt.tunnel_clients.lock().unwrap().len(), 1);
+    assert_eq!(rt.proxy_tunnel_clients.lock().unwrap().len(), 1);
+
+    // Same ifindex reuses the existing listener and cached clients without recycling.
+    let addr_same = rt.ensure_listener_started().await.unwrap().unwrap();
+    assert_eq!(addr_same, addr_1);
+    assert_eq!(rt.tunnel_clients.lock().unwrap().len(), 1);
+    assert_eq!(rt.proxy_tunnel_clients.lock().unwrap().len(), 1);
+
+    // Simulate wg-quick@afpeer0.service restart (new kernel ifindex=42): listener recycles and
+    // both outbound HTTP client pools are cleared.
+    rt.set_interface_index_override(Some(42));
+    let addr_2 = rt.ensure_listener_started().await.unwrap().unwrap();
+    assert_ne!(
+        addr_2, addr_1,
+        "expected listener to rebind on ifindex change"
+    );
+    {
+        let guard = rt.listener_state.lock().await;
+        assert_eq!(guard.as_ref().unwrap().interface_index, Some(42));
+    }
+    assert!(
+        rt.tunnel_clients.lock().unwrap().is_empty(),
+        "tunnel_clients must be cleared on listener recycle"
+    );
+    assert!(
+        rt.proxy_tunnel_clients.lock().unwrap().is_empty(),
+        "proxy_tunnel_clients must be cleared on listener recycle"
+    );
+
+    // Direct outbound binding change evicts stale ifindex=42 entries when building ifindex=43.
+    let binding_42 = rt.resolve_outbound_tunnel_binding(ip_b).await.unwrap();
+    let _ = rt.get_or_build_tunnel_client(&binding_42).unwrap();
+    let _ = rt.get_or_build_proxy_tunnel_client(&binding_42).unwrap();
+    rt.set_interface_index_override(Some(43));
+    let binding_43 = rt.resolve_outbound_tunnel_binding(ip_b).await.unwrap();
+    assert_eq!(binding_43.interface_index, Some(43));
+    let _ = rt.get_or_build_tunnel_client(&binding_43).unwrap();
+    let _ = rt.get_or_build_proxy_tunnel_client(&binding_43).unwrap();
+    {
+        let map = rt.tunnel_clients.lock().unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&binding_43));
+    }
+    {
+        let map = rt.proxy_tunnel_clients.lock().unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&binding_43));
+    }
+
+    rt.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn pairing_https_url_ssrf_guard_blocks_loopback_metadata_private_and_tunnel_cidr() {
+    for blocked in [
+        "https://127.0.0.1",
+        "https://127.1.2.3:8443",
+        "https://[::1]",
+        "https://[::ffff:127.0.0.1]",
+        "https://localhost",
+        "https://api.localhost:8443",
+        "https://localhost.",
+        "https://169.254.169.254",
+        "https://169.254.1.2",
+        "https://[fe80::1]",
+        "https://metadata.google.internal",
+        "https://0.0.0.0",
+        "https://[::]",
+        "https://224.0.0.1",
+        "https://[ff02::1]",
+        "https://240.0.0.1",
+        "https://10.0.0.5",
+        "https://172.16.5.10",
+        "https://192.168.1.50",
+        "https://[fd12:3456:789a::1]",
+        "https://100.64.0.10",
+        "https://10.231.0.2",
+    ] {
+        let err = validate_public_https_url(blocked, "local", "test")
+            .expect_err(&format!("expected SSRF rejection for {blocked}"));
+        assert_eq!(err.code(), "INVALID_REQUEST", "url={blocked}, err={err}");
+    }
+
+    // Valid public domains and routable public IPs pass.
+    for allowed in [
+        "https://peer-b.example.test",
+        "https://peer-b.example.test:8443",
+        "https://198.51.100.10",
+        "https://[2001:db8::10]:8443",
+    ] {
+        assert!(
+            validate_public_https_url(allowed, "local", "test").is_ok(),
+            "expected valid public URL {allowed} to pass"
+        );
+    }
+
+    // Explicit `allow_private = true` allows RFC1918 / ULA / CGNAT, but STILL blocks loopback,
+    // link-local/metadata, unspecified, multicast, and the WireGuard tunnel CIDR (10.231.0.0/16).
+    for priv_ok in [
+        "10.0.0.5",
+        "172.16.0.5",
+        "192.168.1.5",
+        "100.64.0.5",
+        "fd00::5",
+    ] {
+        let ip: IpAddr = priv_ok.parse().unwrap();
+        assert!(
+            super::pairing::validate_pairing_ip(ip, false).is_err(),
+            "private IP {priv_ok} must be blocked by default"
+        );
+        assert!(
+            super::pairing::validate_pairing_ip(ip, true).is_ok(),
+            "private IP {priv_ok} should be allowed when allow_private=true"
+        );
+    }
+    for always_blocked in [
+        "127.0.0.1",
+        "::1",
+        "::ffff:127.0.0.1",
+        "169.254.169.254",
+        "fe80::1",
+        "0.0.0.0",
+        "224.0.0.1",
+        "10.231.0.2",
+    ] {
+        let ip: IpAddr = always_blocked.parse().unwrap();
+        assert!(
+            super::pairing::validate_pairing_ip(ip, true).is_err(),
+            "IP {always_blocked} must remain blocked even when allow_private=true"
+        );
+    }
+
+    // ProductionPublicPairingTransport also blocks SSRF targets before connecting.
+    let transport = ProductionPublicPairingTransport::new();
+    for url in [
+        "https://localhost/api/v1/peer-pairing/request",
+        "https://169.254.169.254/api/v1/peer-pairing/request",
+        "https://10.231.0.2/api/v1/peer-pairing/request",
+    ] {
+        let err = transport
+            .post_pairing_request(Url::parse(url).unwrap(), b"{}".to_vec())
+            .await
+            .expect_err(&format!("transport must reject {url}"));
+        assert!(!err.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn peer_error_request_id_and_extractor_parity() {
+    // 1. Outside a request-id task scope, `request_id` is omitted from serialized JSON.
+    let plain_body = PeerError::invalid_request("local", "step", "bad", "fix").body();
+    assert_eq!(plain_body.request_id, None);
+    let plain_json = serde_json::to_string(&plain_body).unwrap();
+    assert!(!plain_json.contains("request_id"));
+
+    // 2. Inside `af_runner::with_runner_request_id`, `PeerError::body()` populates `request_id`.
+    let scoped_body = af_runner::with_runner_request_id("req-direct-77".to_string(), async {
+        PeerError::not_found("local", "step", "missing").body()
+    })
+    .await;
+    assert_eq!(scoped_body.request_id.as_deref(), Some("req-direct-77"));
+
+    // 3. Through `security_headers_middleware`, X-Request-ID propagates into PeerError responses
+    //    AND malformed JSON / wrong Content-Type on admin peer routes returns structured PeerError.
+    let (ip_a, _) = next_loopback_pair();
+    let clock = FakeClock::new(1_805_002_000);
+    let runner = FakePeerRunner::new(fixture_wg_pubkey(243), ip_a, 51821);
+    let (rt, _) = build_test_runtime(
+        "parity-host",
+        Arc::clone(&runner) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        false,
+    );
+    let app = admin_routes_with_runtime(Arc::clone(&rt)).layer(axum::middleware::from_fn(
+        crate::routes::security_headers_middleware,
+    ));
+
+    let send_raw = |method: Method,
+                    uri: &'static str,
+                    content_type: Option<&'static str>,
+                    body: &'static str,
+                    req_id: &'static str| {
+        let app = app.clone();
+        async move {
+            let mut b = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("X-Request-ID", req_id);
+            if let Some(ct) = content_type {
+                b = b.header(header::CONTENT_TYPE, ct);
+            }
+            let mut req = b.body(Body::from(body)).unwrap();
+            req.extensions_mut().insert(admin_user());
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40123))));
+            let resp = app.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let resp_req_id = resp
+                .headers()
+                .get("X-Request-ID")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+            let val: Value = serde_json::from_slice(&bytes).expect("expected structured JSON");
+            (status, resp_req_id, val)
+        }
+    };
+
+    // Option<Json<T>> parity: malformed JSON on open_pairing_window -> 400 INVALID_REQUEST (never silently defaults).
+    let (st, hdr_id, val) = send_raw(
+        Method::POST,
+        "/pairing-window",
+        Some("application/json"),
+        "{not-json",
+        "req-parity-1",
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(hdr_id, "req-parity-1");
+    assert_eq!(val["code"], "INVALID_REQUEST");
+    assert_eq!(val["request_id"], "req-parity-1");
+
+    // Non-empty body with text/plain on open_pairing_window -> 415 UNSUPPORTED_MEDIA_TYPE.
+    let (st, _, val) = send_raw(
+        Method::POST,
+        "/pairing-window",
+        Some("text/plain"),
+        "{}",
+        "req-parity-2",
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(val["code"], "UNSUPPORTED_MEDIA_TYPE");
+    assert_eq!(val["request_id"], "req-parity-2");
+
+    // Json<T> parity: start_pairing with wrong Content-Type -> 415 UNSUPPORTED_MEDIA_TYPE.
+    let (st, _, val) = send_raw(
+        Method::POST,
+        "/pair",
+        Some("text/plain"),
+        "{}",
+        "req-parity-3",
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(val["code"], "UNSUPPORTED_MEDIA_TYPE");
+    assert_eq!(val["request_id"], "req-parity-3");
+
+    // Json<T> parity: start_pairing with invalid JSON -> 400 INVALID_REQUEST.
+    let (st, _, val) = send_raw(
+        Method::POST,
+        "/pair",
+        Some("application/json"),
+        "{bad",
+        "req-parity-4",
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(val["code"], "INVALID_REQUEST");
+    assert_eq!(val["request_id"], "req-parity-4");
+
+    // Json<T> parity: update_peer_endpoint with missing Content-Type -> 415 UNSUPPORTED_MEDIA_TYPE.
+    let (st, _, val) = send_raw(
+        Method::PUT,
+        "/link-1/endpoint",
+        None,
+        "{\"endpoint\":\"10.0.0.2\"}",
+        "req-parity-5",
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(val["code"], "UNSUPPORTED_MEDIA_TYPE");
+    assert_eq!(val["request_id"], "req-parity-5");
+
+    // Option<Json<T>> parity: confirm_pairing with malformed JSON -> 400 INVALID_REQUEST.
+    let (st, _, val) = send_raw(
+        Method::POST,
+        "/pairing/att-1/confirm",
+        Some("application/json"),
+        "{broken",
+        "req-parity-6",
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(val["code"], "INVALID_REQUEST");
+    assert_eq!(val["request_id"], "req-parity-6");
+
+    // Bytes parity: put_peer_grant with text/plain -> 415 UNSUPPORTED_MEDIA_TYPE.
+    let (st, _, val) = send_raw(
+        Method::PUT,
+        "/link-1/grant",
+        Some("text/plain"),
+        "{\"access\":{}}",
+        "req-parity-7",
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(val["code"], "UNSUPPORTED_MEDIA_TYPE");
+    assert_eq!(val["request_id"], "req-parity-7");
+
+    // Bytes parity: send_grant_offer with unexpected JSON field -> 400 INVALID_REQUEST.
+    let (st, _, val) = send_raw(
+        Method::POST,
+        "/link-1/grant-offer",
+        Some("application/json"),
+        "{\"unexpected\":true}",
+        "req-parity-8",
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(val["code"], "INVALID_REQUEST");
+    assert_eq!(val["request_id"], "req-parity-8");
+}
+
+#[tokio::test]
+async fn link_revocation_runs_transcode_cleanup_before_storage_and_propagates_errors() {
+    struct RecordingStorageRunner {
+        inner: Arc<super::storage_tests::FakePeerStorageRunner>,
+        events: Arc<StdMutex<Vec<&'static str>>>,
+    }
+
+    impl super::storage::PeerStorageRunner for RecordingStorageRunner {
+        fn dispatch<'a>(
+            &'a self,
+            req: &'a af_runner::PeerStorageRequest,
+        ) -> BoxFuture<'a, Result<af_runner::PeerStorageResponse, af_runner::PeerStorageError>>
+        {
+            self.events.lock().unwrap().push("storage");
+            self.inner.dispatch(req)
+        }
+    }
+
+    struct RecordingTranscodeRunner {
+        inner: Arc<super::transcode_tests::FakePeerTranscodeRunner>,
+        events: Arc<StdMutex<Vec<&'static str>>>,
+        next_error: Arc<StdMutex<Option<af_runner::PeerTranscodeError>>>,
+    }
+
+    impl super::transcode::PeerTranscodeRunner for RecordingTranscodeRunner {
+        fn dispatch<'a>(
+            &'a self,
+            req: &'a af_runner::PeerTranscodeRequest,
+        ) -> BoxFuture<'a, Result<af_runner::PeerTranscodeResponse, af_runner::PeerTranscodeError>>
+        {
+            self.events.lock().unwrap().push("transcode");
+            if let Some(err) = self.next_error.lock().unwrap().take() {
+                return Box::pin(async move { Err(err) });
+            }
+            self.inner.dispatch(req)
+        }
+    }
+
+    let (ip_a, ip_b) = next_loopback_pair();
+    let pk_a = fixture_wg_pubkey(244);
+    let pk_b = fixture_wg_pubkey(245);
+    let clock = FakeClock::new(1_805_003_000);
+    let now_rfc = clock.as_fn()().to_rfc3339();
+    let events: Arc<StdMutex<Vec<&'static str>>> = Arc::new(StdMutex::new(Vec::new()));
+    let next_tc_err: Arc<StdMutex<Option<af_runner::PeerTranscodeError>>> =
+        Arc::new(StdMutex::new(None));
+
+    let runner = FakePeerRunner::new(pk_a.clone(), ip_a, 51821);
+    runner.insert_preexisting_peer(&pk_b, &ip_b.to_string(), "10.90.0.2:51821");
+    let db_conn = open_isolated_peer_db();
+    let (revocation_tx, _) = broadcast::channel(64);
+    let rt = Arc::new(PeerRuntime {
+        db: PeerDb::Isolated(Arc::clone(&db_conn)),
+        runner: Arc::clone(&runner) as Arc<dyn PeerRunner>,
+        storage_runner: Arc::new(RecordingStorageRunner {
+            inner: Arc::new(super::storage_tests::FakePeerStorageRunner::new()),
+            events: Arc::clone(&events),
+        }),
+        mount_health: super::storage::MountHealthTracker::new(),
+        transcode_runner: Arc::new(RecordingTranscodeRunner {
+            inner: Arc::new(super::transcode_tests::FakePeerTranscodeRunner::new()),
+            events: Arc::clone(&events),
+            next_error: Arc::clone(&next_tc_err),
+        }),
+        transcode_state: Arc::new(super::transcode::TranscodeRuntimeState::new()),
+        public_transport: Arc::new(UnreachablePublicTransport),
+        revocation_tx,
+        pairing_rate_limiter: super::pairing::PairingRateLimiter::new(
+            super::pairing::PAIRING_RATE_LIMIT_PER_MIN,
+            Duration::from_secs(60),
+        ),
+        attempt_locks: KeyedAsyncLockPool::new(),
+        link_locks: KeyedAsyncLockPool::new(),
+        link_semaphores: StdMutex::new(HashMap::new()),
+        link_ws_semaphores: StdMutex::new(HashMap::new()),
+        tunnel_clients: StdMutex::new(HashMap::new()),
+        proxy_tunnel_clients: StdMutex::new(HashMap::new()),
+        listener_state: TokioMutex::new(None),
+        health_shutdown: TokioMutex::new(None),
+        clock: clock.as_fn(),
+        monotonic_clock: clock.as_monotonic_fn(),
+        lock_wait_timeout: PEER_LOCK_WAIT_TIMEOUT,
+        listen_port: 0,
+        max_conn_per_link: 64,
+        max_ws_per_link: 16,
+        proxy_header_timeout: Duration::from_secs(30),
+        rtt_warn_ms: 25.0,
+        server_name_override: Some("revoke-order-a".to_string()),
+        version_override: Some("4.0.0-test".to_string()),
+        tunnel_binding: TunnelTransportBinding::LoopbackFixture,
+        tunnel_request_timeout: Duration::from_secs(1),
+        tunnel_port_overrides: RwLock::new(HashMap::new()),
+        bind_listener_in_handlers: false,
+        management_router_override: None,
+        allowed_fs_roots_override: None,
+        interface_index_override: RwLock::new(None),
+    });
+
+    let link_id = "link-revoke-order";
+    {
+        let conn = db_conn.lock().unwrap();
+        db_peers::upsert_peer_identity(
+            &conn,
+            &PeerIdentity {
+                wg_pubkey: pk_a,
+                tunnel_ip: ip_a.to_string(),
+                wg_port: 51821,
+                created_at: now_rfc.clone(),
+            },
+        )
+        .unwrap();
+        db_peers::insert_peer_link(
+            &conn,
+            &PeerLink {
+                id: link_id.to_string(),
+                name: "worker-b".to_string(),
+                wg_pubkey: pk_b.clone(),
+                tunnel_ip: ip_b.to_string(),
+                endpoint: "10.90.0.2".to_string(),
+                wg_port: 51821,
+                state: super::STATE_ACTIVE.to_string(),
+                peer_version: Some("4.0.0".to_string()),
+                peer_protocol: Some(PEER_PROTOCOL_VERSION),
+                capabilities: Some(r#"["links","grants","storage","transcode"]"#.to_string()),
+                rtt_ms: Some(1.0),
+                last_ok_at: Some(now_rfc.clone()),
+                last_error: None,
+                consecutive_failures: 0,
+                inbound_token_hash: Some("sha256:dummy".to_string()),
+                pending_attempt_id: None,
+                pending_expires_at: None,
+                created_at: now_rfc.clone(),
+                updated_at: now_rfc.clone(),
+            },
+        )
+        .unwrap();
+        db_peers::upsert_transcode_worker(
+            &conn,
+            &db_peers::TranscodeWorker {
+                link_id: link_id.to_string(),
+                enabled: true,
+                weight: 1,
+                max_jobs: 2,
+                ffmpeg_version: None,
+                encoders: None,
+                render_node: None,
+                parity_ok: true,
+                parity_error: None,
+            },
+        )
+        .unwrap();
+        db_peers::insert_peer_mount(
+            &conn,
+            &db_peers::PeerMount {
+                id: "mnt-bind-1".to_string(),
+                link_id: link_id.to_string(),
+                remote_path: "/srv/media".to_string(),
+                mount_path: "/srv/media".to_string(),
+                unit_name: "srv-media.mount".to_string(),
+                writable: false,
+                purpose: "transcode_bind".to_string(),
+                state: "mounted".to_string(),
+                last_error: None,
+            },
+        )
+        .unwrap();
+        db_peers::insert_peer_mount(
+            &conn,
+            &db_peers::PeerMount {
+                id: "mnt-storage-1".to_string(),
+                link_id: link_id.to_string(),
+                remote_path: "/srv/media".to_string(),
+                mount_path: "/mnt/af-peers/worker-b/media".to_string(),
+                unit_name: "mnt-af\\x2dpeers-worker\\x2db-media.mount".to_string(),
+                writable: false,
+                purpose: "media".to_string(),
+                state: "mounted".to_string(),
+                last_error: None,
+            },
+        )
+        .unwrap();
+    }
+
+    // Inject transient transcode cleanup error: transcode MUST run BEFORE storage AND the error
+    // MUST propagate so the link remains in retryable `revoking*` state.
+    *next_tc_err.lock().unwrap() = Some(af_runner::PeerTranscodeError::Busy(
+        "transcode runner busy".to_string(),
+    ));
+    let (st, err_body) = call_admin(&rt, Method::DELETE, &format!("/{link_id}"), None).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "err={err_body}");
+    assert_eq!(err_body["code"], "PEER_BUSY");
+
+    let recorded = events.lock().unwrap().clone();
+    let tc_pos = recorded
+        .iter()
+        .position(|e| *e == "transcode")
+        .expect("transcode cleanup must run");
+    let st_pos = recorded
+        .iter()
+        .position(|e| *e == "storage")
+        .expect("storage cleanup must run");
+    assert!(
+        tc_pos < st_pos,
+        "transcode cleanup must run BEFORE storage cleanup: {recorded:?}"
+    );
+    let remaining = db_peers::get_peer_link(&db_conn.lock().unwrap(), link_id)
+        .unwrap()
+        .expect("link row must stay in retryable revoking* state after transcode cleanup error");
+    assert!(
+        super::is_revoking_state(&remaining.state),
+        "expected revoking* state, got {}",
+        remaining.state
+    );
+    assert!(remaining.inbound_token_hash.is_none());
+
+    // Once transient error clears, sweep retries and finalizes deletion cleanly.
+    cleanup_expired_pending(&rt).await;
+    assert!(
+        db_peers::get_peer_link(&db_conn.lock().unwrap(), link_id)
+            .unwrap()
+            .is_none(),
+        "retry sweep must finalize revoking link after transcode cleanup succeeds"
+    );
+}
+
+#[test]
+fn invalid_peer_env_vars_fall_back_to_defaults_with_warning() {
+    assert_eq!(
+        super::parse_peer_env_value_or_warn("AF_PEER_LISTEN_PORT", Some("9444"), 9443u16, |p| p
+            > 0),
+        9444
+    );
+    assert_eq!(
+        super::parse_peer_env_value_or_warn("AF_PEER_LISTEN_PORT", Some("0"), 9443u16, |p| p > 0),
+        9443
+    );
+    assert_eq!(
+        super::parse_peer_env_value_or_warn("AF_PEER_MAX_CONN", Some("not-a-num"), 64usize, |n| {
+            n > 0
+        }),
+        64
+    );
+    assert_eq!(
+        super::parse_peer_env_value_or_warn("AF_PEER_MAX_WS", Some("  "), 16usize, |n| n > 0),
+        16
+    );
+    assert_eq!(
+        super::parse_peer_env_value_or_warn("AF_PEER_RTT_WARN_MS", Some("NaN"), 25.0f64, |v| {
+            v.is_finite() && v > 0.0
+        }),
+        25.0
+    );
+    assert_eq!(
+        super::parse_peer_env_value_or_warn("AF_PEER_RTT_WARN_MS", Some("-5"), 25.0f64, |v| {
+            v.is_finite() && v > 0.0
+        }),
+        25.0
+    );
 }

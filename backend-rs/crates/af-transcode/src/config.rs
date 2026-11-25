@@ -4,16 +4,29 @@ use crate::protocol::{
     StartRequest, MAX_FRAME_BYTES, MAX_START_ARGS, MAX_START_ARG_BYTES, MAX_START_CWD_BYTES,
     MAX_START_ENV_ENTRIES, MAX_START_ENV_VALUE_BYTES,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::io::{self, Read};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
 /// Default real `jellyfin-ffmpeg` binary path on Debian 13.
 pub const DEFAULT_REAL_FFMPEG_PATH: &str = "/usr/lib/jellyfin-ffmpeg/ffmpeg";
+
+/// Dedicated secret-free transcode environment file read as fallback by `af-transcode`.
+///
+/// Transcode workers run as `User=jellyfin` and must NEVER read `/etc/aetherflow/aetherflow.env`.
+pub const DEFAULT_TRANSCODE_ENV_FILE: &str = "/etc/aetherflow/transcode.env";
+
+/// Default Jellyfin cache root permitted as a worker child working-directory subtree.
+pub const DEFAULT_JELLYFIN_CACHE_DIR: &str = "/var/cache/jellyfin";
+
+/// Maximum size in bytes accepted when reading `DEFAULT_TRANSCODE_ENV_FILE`.
+pub const MAX_TRANSCODE_ENV_FILE_BYTES: usize = 16 * 1024;
 
 /// Default Unix socket where the Jellyfin-side `af-api` dispatcher listens (P9).
 pub const DEFAULT_DISPATCHER_SOCKET_PATH: &str = "/run/aetherflow-transcode/transcode.sock";
@@ -121,12 +134,203 @@ pub enum ConfigError {
     },
 }
 
-/// Resolves the configured real `ffmpeg` path from `AF_TRANSCODE_REAL_FFMPEG` or the default.
+/// Validates a `KEY` identifier in a `transcode.env` file (`[A-Za-z_][A-Za-z0-9_]*`).
+fn is_valid_env_file_key(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Parses one `VALUE` from a `KEY=VALUE` line, stripping comments and matching quotes.
+fn parse_env_file_value(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let parsed = if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                match chars.next() {
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    } else {
+        // Strip inline comments preceded by ASCII whitespace (so unquoted `#` inside paths is kept).
+        let bytes = trimmed.as_bytes();
+        let mut end = bytes.len();
+        for idx in 1..bytes.len() {
+            if bytes[idx] == b'#' && bytes[idx - 1].is_ascii_whitespace() {
+                end = idx;
+                break;
+            }
+        }
+        if trimmed.starts_with('#') {
+            String::new()
+        } else {
+            trimmed[..end].trim_end().to_string()
+        }
+    };
+
+    if parsed.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn parse_transcode_env_contents(contents: &str) -> BTreeMap<String, String> {
+    let mut entries = BTreeMap::new();
+    for raw_line in contents.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        let body = trimmed
+            .strip_prefix("export")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .map(str::trim_start)
+            .unwrap_or(trimmed);
+        let Some((raw_key, raw_val)) = body.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        if !is_valid_env_file_key(key) {
+            continue;
+        }
+        if let Some(val) = parse_env_file_value(raw_val) {
+            entries.insert(key.to_string(), val);
+        }
+    }
+    entries
+}
+
+/// Safely reads a dedicated transcode `KEY=VALUE` environment file (e.g. `/etc/aetherflow/transcode.env`).
+///
+/// Security invariants:
+/// - Explicitly refuses any file named `aetherflow.env` (workers must NEVER read main API secrets).
+/// - Opens with `O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK` to prevent symlink races and FIFO blocking.
+/// - Verifies on the open descriptor (`fstat`) that the target is a regular file, not world-writable,
+///   and bounded to `MAX_TRANSCODE_ENV_FILE_BYTES`.
+pub fn read_transcode_env_file(path: &Path) -> Result<BTreeMap<String, String>, ConfigError> {
+    validate_absolute_clean_path(path)?;
+    if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("aetherflow.env"))
+    {
+        return Err(ConfigError::InvalidPath {
+            path: path.display().to_string(),
+            reason: "refusing to read main aetherflow.env from transcode config".to_string(),
+        });
+    }
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|source| ConfigError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+
+    let meta = file.metadata().map_err(|source| ConfigError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    if !meta.is_file() {
+        return Err(ConfigError::InvalidPath {
+            path: path.display().to_string(),
+            reason: "transcode env path must be a regular file".to_string(),
+        });
+    }
+    if meta.permissions().mode() & 0o002 != 0 {
+        return Err(ConfigError::InvalidPath {
+            path: path.display().to_string(),
+            reason: "transcode env file must not be world-writable".to_string(),
+        });
+    }
+    if meta.len() > MAX_TRANSCODE_ENV_FILE_BYTES as u64 {
+        return Err(ConfigError::InvalidPath {
+            path: path.display().to_string(),
+            reason: format!("transcode env file exceeds {MAX_TRANSCODE_ENV_FILE_BYTES} byte limit"),
+        });
+    }
+
+    let mut raw = Vec::new();
+    file.take((MAX_TRANSCODE_ENV_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut raw)
+        .map_err(|source| ConfigError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+    if raw.len() > MAX_TRANSCODE_ENV_FILE_BYTES {
+        return Err(ConfigError::InvalidPath {
+            path: path.display().to_string(),
+            reason: format!("transcode env file exceeds {MAX_TRANSCODE_ENV_FILE_BYTES} byte limit"),
+        });
+    }
+
+    let contents = String::from_utf8(raw).map_err(|_| ConfigError::InvalidPath {
+        path: path.display().to_string(),
+        reason: "transcode env file must be valid UTF-8".to_string(),
+    })?;
+    Ok(parse_transcode_env_contents(&contents))
+}
+
+fn read_transcode_env_var_from_path(path: &Path, key: &str) -> Option<String> {
+    match read_transcode_env_file(path) {
+        Ok(entries) => entries.get(key).cloned(),
+        Err(ConfigError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "ignoring unreadable or unsafe transcode env file"
+            );
+            None
+        }
+    }
+}
+
+fn resolve_real_ffmpeg_path(env_override: Option<&OsStr>, env_file: &Path) -> PathBuf {
+    if let Some(val) = env_override.filter(|v| !v.is_empty()) {
+        return PathBuf::from(val);
+    }
+    if let Some(val) =
+        read_transcode_env_var_from_path(env_file, ENV_REAL_FFMPEG).filter(|v| !v.is_empty())
+    {
+        return PathBuf::from(val);
+    }
+    PathBuf::from(DEFAULT_REAL_FFMPEG_PATH)
+}
+
+/// Resolves the configured real `ffmpeg` path from `AF_TRANSCODE_REAL_FFMPEG`, falling back
+/// to the given dedicated transcode env file and finally `DEFAULT_REAL_FFMPEG_PATH`.
+pub fn configured_real_ffmpeg_path_with_env_file(env_file: &Path) -> PathBuf {
+    let env_val: Option<OsString> = env::var_os(ENV_REAL_FFMPEG);
+    resolve_real_ffmpeg_path(env_val.as_deref(), env_file)
+}
+
+/// Resolves the configured real `ffmpeg` path from `AF_TRANSCODE_REAL_FFMPEG`, falling back
+/// to `/etc/aetherflow/transcode.env` and finally `DEFAULT_REAL_FFMPEG_PATH`.
 pub fn configured_real_ffmpeg_path() -> PathBuf {
-    env::var_os(ENV_REAL_FFMPEG)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_REAL_FFMPEG_PATH))
+    configured_real_ffmpeg_path_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
 }
 
 /// Resolves the configured dispatcher Unix socket path from `AF_TRANSCODE_DISPATCHER_SOCK` or the default.
@@ -155,13 +359,34 @@ pub fn configured_handshake_timeout() -> Duration {
         .unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT)
 }
 
-/// Resolves the configured worker max concurrent jobs (default 8, clamped `1..=64`).
-pub fn configured_worker_max_jobs() -> usize {
-    env::var(ENV_WORKER_MAX_JOBS)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
+fn resolve_worker_max_jobs(env_override: Option<&str>, env_file: &Path) -> usize {
+    let raw = env_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            read_transcode_env_var_from_path(env_file, ENV_WORKER_MAX_JOBS)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    raw.and_then(|value| value.parse::<usize>().ok())
         .map(|n| n.clamp(1, MAX_WORKER_MAX_JOBS))
         .unwrap_or(DEFAULT_WORKER_MAX_JOBS)
+}
+
+/// Resolves the configured worker max concurrent jobs from `AF_TRANSCODE_WORKER_MAX_JOBS`,
+/// falling back to the given dedicated transcode env file and finally `DEFAULT_WORKER_MAX_JOBS`
+/// (clamped `1..=64`).
+pub fn configured_worker_max_jobs_with_env_file(env_file: &Path) -> usize {
+    let env_val = env::var(ENV_WORKER_MAX_JOBS).ok();
+    resolve_worker_max_jobs(env_val.as_deref(), env_file)
+}
+
+/// Resolves the configured worker max concurrent jobs from `AF_TRANSCODE_WORKER_MAX_JOBS`,
+/// falling back to `/etc/aetherflow/transcode.env` and finally `DEFAULT_WORKER_MAX_JOBS`
+/// (clamped `1..=64`).
+pub fn configured_worker_max_jobs() -> usize {
+    configured_worker_max_jobs_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
 }
 
 /// Resolves the configured worker socket mode (octal, default `0o660`).
@@ -405,6 +630,61 @@ pub fn validate_cwd(cwd: &str) -> Result<PathBuf, ConfigError> {
     Ok(path.to_path_buf())
 }
 
+/// Validates that `path` is an absolute, clean, non-symlink existing directory and returns its
+/// canonical path.
+pub fn validate_safe_dir(path: &Path) -> Result<PathBuf, ConfigError> {
+    validate_absolute_clean_path(path)?;
+    let _dir = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|source| ConfigError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+    fs::canonicalize(path).map_err(|source| ConfigError::Io {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+/// Resolves and clamps the worker child `ffmpeg` working directory to a safe restricted root.
+///
+/// - Validates `fallback_safe_cwd` as a clean non-symlink existing directory.
+/// - Canonicalizes `requested_cwd` (resolving any intermediate symlinks so symlink escapes
+///   such as `<allowed>/escape -> /etc` are detected).
+/// - Keeps `canonical_requested` only when it is inside one of the canonicalized `allowed_roots`
+///   (which always includes `fallback_safe_cwd`); otherwise clamps to `fallback_safe_cwd`.
+pub fn resolve_worker_child_cwd(
+    requested_cwd: &Path,
+    fallback_safe_cwd: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<PathBuf, ConfigError> {
+    let canonical_fallback = validate_safe_dir(fallback_safe_cwd)?;
+
+    let canonical_requested = match fs::canonicalize(requested_cwd) {
+        Ok(dir) if dir.is_dir() => dir,
+        _ => return Ok(canonical_fallback),
+    };
+
+    if canonical_requested.starts_with(&canonical_fallback) {
+        return Ok(canonical_requested);
+    }
+
+    for root in allowed_roots {
+        if validate_absolute_clean_path(root).is_err() {
+            continue;
+        }
+        if let Ok(canonical_root) = fs::canonicalize(root) {
+            if canonical_root.is_dir() && canonical_requested.starts_with(&canonical_root) {
+                return Ok(canonical_requested);
+            }
+        }
+    }
+
+    Ok(canonical_fallback)
+}
+
 /// Validates an incoming `StartRequest` (`args`, `cwd`, and narrow `env_subset` allowlist).
 pub fn validate_start_request(req: &StartRequest) -> Result<PathBuf, ConfigError> {
     if req.args.is_empty() {
@@ -511,5 +791,177 @@ mod tests {
         let exe = env::current_exe().expect("current_exe");
         let err = validate_real_ffmpeg_path(&exe).expect_err("must reject self");
         assert!(matches!(err, ConfigError::RecursiveFfmpegPath(_)));
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from(format!("/tmp/af-cfg-{tag}-{}-{id}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
+
+    #[test]
+    fn transcode_env_file_parses_quotes_comments_and_precedence() {
+        let dir = unique_temp_dir("envparse");
+        let env_path = dir.join("transcode.env");
+        fs::write(
+            &env_path,
+            r#"
+# Full-line comment
+; Systemd semicolon comment
+AF_TRANSCODE_REAL_FFMPEG="/opt/custom/bin/ffmpeg"
+export AF_TRANSCODE_WORKER_MAX_JOBS=12 # inline comment
+SINGLE_QUOTED='hello # not a comment'
+UNQUOTED_HASH=/opt/dir#1/ffmpeg
+"#,
+        )
+        .expect("write env file");
+        fs::set_permissions(&env_path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let parsed = read_transcode_env_file(&env_path).expect("parse transcode.env");
+        assert_eq!(
+            parsed.get(ENV_REAL_FFMPEG).map(String::as_str),
+            Some("/opt/custom/bin/ffmpeg")
+        );
+        assert_eq!(
+            parsed.get(ENV_WORKER_MAX_JOBS).map(String::as_str),
+            Some("12")
+        );
+        assert_eq!(
+            parsed.get("SINGLE_QUOTED").map(String::as_str),
+            Some("hello # not a comment")
+        );
+        assert_eq!(
+            parsed.get("UNQUOTED_HASH").map(String::as_str),
+            Some("/opt/dir#1/ffmpeg")
+        );
+
+        // Fallback reads transcode.env when process env is unset; process env wins when set.
+        assert_eq!(
+            resolve_real_ffmpeg_path(None, &env_path),
+            PathBuf::from("/opt/custom/bin/ffmpeg")
+        );
+        assert_eq!(
+            resolve_real_ffmpeg_path(Some(OsStr::new("/usr/bin/override-ffmpeg")), &env_path),
+            PathBuf::from("/usr/bin/override-ffmpeg")
+        );
+        assert_eq!(resolve_worker_max_jobs(None, &env_path), 12);
+        assert_eq!(resolve_worker_max_jobs(Some("24"), &env_path), 24);
+        assert_eq!(
+            resolve_worker_max_jobs(Some("999"), &env_path),
+            MAX_WORKER_MAX_JOBS
+        );
+        assert_eq!(resolve_worker_max_jobs(Some("0"), &env_path), 1);
+
+        // Missing env file falls back cleanly to built-in defaults.
+        let missing = dir.join("absent.env");
+        assert_eq!(
+            resolve_real_ffmpeg_path(None, &missing),
+            PathBuf::from(DEFAULT_REAL_FFMPEG_PATH)
+        );
+        assert_eq!(
+            resolve_worker_max_jobs(None, &missing),
+            DEFAULT_WORKER_MAX_JOBS
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transcode_env_file_rejects_symlinks_aetherflow_env_world_writable_and_oversized() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_temp_dir("envsec");
+
+        // 1. Refuse main aetherflow.env by filename guard.
+        let main_env = dir.join("aetherflow.env");
+        fs::write(&main_env, "AF_TRANSCODE_WORKER_MAX_JOBS=32\n").unwrap();
+        assert!(read_transcode_env_file(&main_env).is_err());
+
+        // 2. Refuse symlink (O_NOFOLLOW).
+        let real_file = dir.join("real.env");
+        fs::write(&real_file, "AF_TRANSCODE_WORKER_MAX_JOBS=16\n").unwrap();
+        let sym_file = dir.join("transcode.env");
+        symlink(&real_file, &sym_file).unwrap();
+        assert!(read_transcode_env_file(&sym_file).is_err());
+        // Fallback helper safely ignores unsafe symlink and uses default.
+        assert_eq!(
+            resolve_worker_max_jobs(None, &sym_file),
+            DEFAULT_WORKER_MAX_JOBS
+        );
+
+        // 3. Refuse directory (non-regular file).
+        assert!(read_transcode_env_file(&dir).is_err());
+
+        // 4. Refuse world-writable file.
+        let ww_file = dir.join("ww.env");
+        fs::write(&ww_file, "AF_TRANSCODE_WORKER_MAX_JOBS=16\n").unwrap();
+        fs::set_permissions(&ww_file, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(read_transcode_env_file(&ww_file).is_err());
+
+        // 5. Refuse oversized file (> MAX_TRANSCODE_ENV_FILE_BYTES).
+        let big_file = dir.join("big.env");
+        fs::write(&big_file, "A".repeat(MAX_TRANSCODE_ENV_FILE_BYTES + 1)).unwrap();
+        assert!(read_transcode_env_file(&big_file).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_worker_child_cwd_clamps_out_of_root_and_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_temp_dir("safecwd");
+        let safe_root = dir.join("safe");
+        let allowed_sub = safe_root.join("sub");
+        let extra_root = dir.join("extra");
+        let outside = dir.join("outside");
+        fs::create_dir_all(&allowed_sub).unwrap();
+        fs::create_dir_all(&extra_root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let escape_link = safe_root.join("escape");
+        symlink(&outside, &escape_link).unwrap();
+
+        let canonical_safe = fs::canonicalize(&safe_root).unwrap();
+        let canonical_sub = fs::canonicalize(&allowed_sub).unwrap();
+        let canonical_extra = fs::canonicalize(&extra_root).unwrap();
+
+        // Inside safe_root -> preserved.
+        assert_eq!(
+            resolve_worker_child_cwd(&allowed_sub, &safe_root, &[]).unwrap(),
+            canonical_sub
+        );
+
+        // Inside explicit allowed_roots -> preserved.
+        assert_eq!(
+            resolve_worker_child_cwd(&extra_root, &safe_root, std::slice::from_ref(&extra_root))
+                .unwrap(),
+            canonical_extra
+        );
+
+        // Outside allowed_roots (e.g. /etc or sibling dir) -> clamped to safe_root.
+        assert_eq!(
+            resolve_worker_child_cwd(&outside, &safe_root, &[]).unwrap(),
+            canonical_safe
+        );
+        assert_eq!(
+            resolve_worker_child_cwd(Path::new("/"), &safe_root, &[]).unwrap(),
+            canonical_safe
+        );
+
+        // Symlink inside safe_root pointing outside -> canonicalized and clamped to safe_root!
+        assert_eq!(
+            resolve_worker_child_cwd(&escape_link, &safe_root, &[]).unwrap(),
+            canonical_safe
+        );
+
+        // Symlinked fallback safe_cwd itself is rejected.
+        assert!(resolve_worker_child_cwd(&allowed_sub, &escape_link, &[]).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

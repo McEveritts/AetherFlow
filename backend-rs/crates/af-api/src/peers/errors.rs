@@ -1,9 +1,11 @@
 //! Typed peer clustering errors with actionable server/step guidance and secret redaction.
 
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::extract::rejection::{BytesRejection, JsonRejection};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -77,6 +79,8 @@ pub struct PeerErrorBody {
     pub step: String,
     pub message: String,
     pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// Typed peer clustering errors covering pairing, tunnel authorization, health, and lifecycle.
@@ -193,6 +197,7 @@ impl PeerError {
             step: d.step.clone(),
             message: d.message.clone(),
             action: d.action.clone(),
+            request_id: af_runner::current_runner_request_id(),
         }
     }
 
@@ -598,4 +603,105 @@ impl IntoResponse for PeerError {
         }
         resp
     }
+}
+
+pub(crate) fn is_json_content_type(headers: &HeaderMap) -> bool {
+    let Some(raw) = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let essence = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    essence == "application/json"
+        || (essence.starts_with("application/") && essence.ends_with("+json"))
+}
+
+pub(crate) fn bytes_rejection_to_peer_error(
+    err: BytesRejection,
+    server: &str,
+    step: &str,
+) -> PeerError {
+    if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        PeerError::payload_too_large(
+            server,
+            step,
+            "Request body exceeds the maximum allowed size",
+            "Reduce the request payload size and retry",
+        )
+    } else {
+        PeerError::invalid_request(
+            server,
+            step,
+            "Request body could not be read",
+            "Retry sending a valid request body",
+        )
+    }
+}
+
+pub(crate) fn json_rejection_to_peer_error(
+    err: JsonRejection,
+    server: &str,
+    step: &str,
+) -> PeerError {
+    match err {
+        JsonRejection::MissingJsonContentType(_) => PeerError::unsupported_media_type(
+            server,
+            step,
+            "Request Content-Type must be application/json",
+            "Set Content-Type: application/json and retry",
+        ),
+        JsonRejection::BytesRejection(bytes_err) => {
+            bytes_rejection_to_peer_error(bytes_err, server, step)
+        }
+        JsonRejection::JsonDataError(_) | JsonRejection::JsonSyntaxError(_) | _ => {
+            PeerError::invalid_request(
+                server,
+                step,
+                "Request body must be valid JSON matching the expected schema",
+                "Verify the JSON payload format and retry",
+            )
+        }
+    }
+}
+
+pub(crate) fn parse_optional_json_bytes<T: DeserializeOwned + Default>(
+    headers: &HeaderMap,
+    body: &[u8],
+    server: &str,
+    step: &str,
+) -> Result<T, PeerError> {
+    if body.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(T::default());
+    }
+    parse_required_json_bytes(headers, body, server, step)
+}
+
+pub(crate) fn parse_required_json_bytes<T: DeserializeOwned>(
+    headers: &HeaderMap,
+    body: &[u8],
+    server: &str,
+    step: &str,
+) -> Result<T, PeerError> {
+    if !is_json_content_type(headers) {
+        return Err(PeerError::unsupported_media_type(
+            server,
+            step,
+            "Request Content-Type must be application/json",
+            "Set Content-Type: application/json and retry",
+        ));
+    }
+    serde_json::from_slice::<T>(body).map_err(|_| {
+        PeerError::invalid_request(
+            server,
+            step,
+            "Request body must be valid JSON matching the expected schema",
+            "Verify the JSON payload format and retry",
+        )
+    })
 }

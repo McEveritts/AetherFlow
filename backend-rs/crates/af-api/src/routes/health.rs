@@ -21,9 +21,8 @@ pub(super) async fn health_check() -> Json<serde_json::Value> {
         ),
         _ => ("degraded", "unreachable", 0),
     };
-    let transcode_caps = crate::peers::transcode::cached_local_capabilities_snapshot_only(
-        &crate::peers::PeerRuntime::global(),
-    );
+    // Keep host GPU/FFmpeg transcoding hardware details off unauthenticated public /health;
+    // authenticated tunnel /health serves cached local transcode capabilities to paired peers.
     Json(serde_json::json!({
         "status": status,
         "uptime": format!("{:.1}s", START_TIME.elapsed().as_secs_f64()),
@@ -32,7 +31,7 @@ pub(super) async fn health_check() -> Json<serde_json::Value> {
         "db_latency_ms": latency_ms,
         "peer_protocol": crate::peers::PEER_PROTOCOL_VERSION,
         "capabilities": crate::peers::capabilities(),
-        "transcode": transcode_caps,
+        "transcode": serde_json::Value::Null,
     }))
 }
 

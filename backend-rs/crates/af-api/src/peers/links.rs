@@ -1,6 +1,6 @@
 //! Admin link listing, endpoint editing, link revocation, and tunnel revoke-notice handling.
 
-use super::errors::PeerError;
+use super::errors::{json_rejection_to_peer_error, PeerError};
 use super::health::evaluate_compatibility;
 use super::listener::authenticate_active_link;
 use super::pairing::{
@@ -18,6 +18,7 @@ use crate::ws::{extract_client_ip_for_peer, PeerIp};
 use af_db::peers::{self as db_peers, AccessMap, PeerExport, PeerLink, PeerMount, TranscodeWorker};
 use af_runner::{PeerCredentialSlot, PeerNetworkError, PeerNetworkRequest};
 use axum::extract::connect_info::ConnectInfo;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
@@ -256,8 +257,19 @@ pub async fn update_peer_endpoint(
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     Path(link_id): Path<String>,
-    Json(req): Json<UpdateEndpointReq>,
+    payload: Result<Json<UpdateEndpointReq>, JsonRejection>,
 ) -> Response {
+    let req = match payload {
+        Ok(Json(req)) => req,
+        Err(err) => {
+            return json_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "update_peer_endpoint",
+            )
+            .into_response();
+        }
+    };
     match update_peer_endpoint_inner(&runtime, &auth_user, peer_ip, &headers, &link_id, req).await {
         Ok(val) => (
             StatusCode::OK,
@@ -637,6 +649,12 @@ async fn cleanup_revoked_link_resources_locked(
         return Ok(false);
     };
 
+    // Tear down transcode bind/cache mounts BEFORE storage mounts because `transcode_bind`
+    // mounts bind on top of `/mnt/af-peers/*` storage mounts. Credential and WireGuard cleanup
+    // still run before returning transient mount/export errors so authentication and tunnel
+    // access are severed immediately while preserving retryable `revoking*` state.
+    let transcode_res =
+        super::transcode::cleanup_revoked_link_transcode_locked(runtime, link_id, step).await;
     let storage_res = super::storage::cleanup_revoked_link_storage_locked(
         runtime,
         link_id,
@@ -645,7 +663,6 @@ async fn cleanup_revoked_link_resources_locked(
         step,
     )
     .await;
-    super::transcode::cleanup_revoked_link_transcode_best_effort(runtime, link_id).await;
     super::grants::delete_revoked_link_staged_grant_credentials_locked(
         runtime, link_id, peer_name, step,
     )
@@ -653,6 +670,7 @@ async fn cleanup_revoked_link_resources_locked(
     delete_link_credentials_verified(runtime, link_id, peer_name, step).await?;
     delete_pending_issuer_credential_verified(runtime, link_id, peer_name, step).await?;
     remove_owned_wg_peer_locked(runtime, &link, step).await?;
+    transcode_res?;
     storage_res?;
     Ok(true)
 }

@@ -9,9 +9,10 @@ use super::proxy_helpers::{
     is_spoofable_identity_header, is_strict_loopback_https_url, is_trusted_proxy_ip,
     is_websocket_upgrade_request, librespeed_tls_client, local_domain_client_allowed,
     managed_app_route_unavailable, resolve_optional_authenticated_user,
-    strip_gateway_session_cookies, upstream_uses_tls, verify_proxy_basic_credentials, GuardedBody,
-    StreamProxyErrorKind, StreamProxyOptions, StreamProxyUpgradePolicy, PROXY_HTTP_CLIENT,
-    PROXY_LOOPBACK_TLS_CLIENT, PROXY_LOOPBACK_TLS_WS_CLIENT,
+    strip_gateway_session_cookies, upstream_uses_tls, verify_proxy_basic_credentials,
+    wait_for_cancel_watch, CancelWaiter, GuardedBody, StreamProxyErrorKind, StreamProxyOptions,
+    StreamProxyUpgradePolicy, PROXY_HTTP_CLIENT, PROXY_LOOPBACK_TLS_CLIENT,
+    PROXY_LOOPBACK_TLS_WS_CLIENT,
 };
 use super::rate_limit::{rate_limited_response, PROXY_BASIC_AUTH_LIMITER};
 use crate::auth::api_error;
@@ -44,6 +45,8 @@ struct SignalingStream<S> {
     inner: S,
     progress: Option<watch::Sender<Option<Instant>>>,
     track_progress: bool,
+    cancel: Option<CancelWaiter>,
+    cancelled: bool,
 }
 
 impl<S> SignalingStream<S> {
@@ -64,21 +67,54 @@ impl<S, T, E> futures::Stream for SignalingStream<S>
 where
     S: futures::Stream<Item = Result<T, E>> + Unpin,
     T: AsRef<[u8]>,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    type Item = Result<T, E>;
+    type Item = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let poll = Pin::new(&mut self.inner).poll_next(cx);
-        match &poll {
-            Poll::Ready(None | Some(Err(_))) => self.finish(),
-            Poll::Ready(Some(Ok(chunk))) if self.track_progress && !chunk.as_ref().is_empty() => {
-                if let Some(progress) = &self.progress {
-                    progress.send_replace(Some(Instant::now()));
-                }
-            }
-            _ => {}
+        if self.cancelled {
+            return Poll::Ready(None);
         }
-        poll
+        if let Some(cancel) = self.cancel.as_mut() {
+            if cancel.poll_cancelled(cx) {
+                self.cancelled = true;
+                self.cancel = None;
+                self.finish();
+                return Poll::Ready(Some(Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "Request stream cancelled due to peer revocation",
+                )))));
+            }
+        }
+        let poll = Pin::new(&mut self.inner).poll_next(cx);
+        match poll {
+            Poll::Ready(None) => {
+                self.finish();
+                self.cancel = None;
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(err))) => {
+                self.finish();
+                self.cancel = None;
+                Poll::Ready(Some(Err(err.into())))
+            }
+            Poll::Ready(Some(Ok(chunk))) => {
+                if self.track_progress && !chunk.as_ref().is_empty() {
+                    if let Some(progress) = &self.progress {
+                        progress.send_replace(Some(Instant::now()));
+                    }
+                }
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+async fn wait_optional_cancel(cancel: &mut Option<watch::Receiver<bool>>) {
+    match cancel.as_mut() {
+        Some(rx) => wait_for_cancel_watch(rx).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -131,6 +167,14 @@ fn build_stream_proxy_error(
             StatusCode::GATEWAY_TIMEOUT,
             Json(serde_json::json!({
                 "error": "gateway_timeout",
+                "message": detail,
+            })),
+        )
+            .into_response(),
+        StreamProxyErrorKind::Cancelled => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
                 "message": detail,
             })),
         )
@@ -316,7 +360,7 @@ fn spawn_bidirectional_tunnel<C, U, FutC, FutU, E1, E2>(
     upstream_upgrade: FutU,
     upgrade_timeout: Duration,
     guard: Option<Box<dyn std::any::Any + Send + Sync>>,
-    ws_cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+    stream_cancel: Option<watch::Receiver<bool>>,
     log_context: String,
 ) where
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -328,7 +372,7 @@ fn spawn_bidirectional_tunnel<C, U, FutC, FutU, E1, E2>(
 {
     tokio::spawn(async move {
         let _guard = guard;
-        let mut cancel_rx = ws_cancel;
+        let mut cancel_rx = stream_cancel;
 
         let upgraded = async {
             let join = async move {
@@ -339,7 +383,8 @@ fn spawn_bidirectional_tunnel<C, U, FutC, FutU, E1, E2>(
             };
             if let Some(rx) = cancel_rx.as_mut() {
                 tokio::select! {
-                    _ = rx => Err("cancelled".to_string()),
+                    biased;
+                    _ = wait_for_cancel_watch(rx) => Err("cancelled".to_string()),
                     res = tokio::time::timeout(upgrade_timeout, join) => match res {
                         Ok(pair) => pair,
                         Err(_) => Err("upgrade handshake timed out".to_string()),
@@ -380,9 +425,10 @@ fn spawn_bidirectional_tunnel<C, U, FutC, FutU, E1, E2>(
         });
         let half_close_drain = Duration::from_millis(250);
 
-        if let Some(rx) = cancel_rx {
+        if let Some(mut rx) = cancel_rx {
             tokio::select! {
-                _ = rx => {
+                biased;
+                _ = wait_for_cancel_watch(&mut rx) => {
                     tracing::debug!(context = %log_context, "proxy websocket tunnel torn down by cancellation");
                 }
                 res = &mut u2c => {
@@ -425,6 +471,14 @@ pub(crate) async fn stream_proxy(
     client: &reqwest::Client,
     mut opts: StreamProxyOptions,
 ) -> Response {
+    if opts.stream_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+        return build_stream_proxy_error(
+            opts.on_error.take(),
+            StreamProxyErrorKind::Cancelled,
+            format!("Upstream {} access revoked.", opts.log_context),
+        );
+    }
+
     let upgrade_header_opt = is_upgrade_request_for_policy(&req, opts.upgrade_policy);
     let use_tls = target.scheme().eq_ignore_ascii_case("https");
     let method = req.method().clone();
@@ -443,10 +497,21 @@ pub(crate) async fn stream_proxy(
                 Some((&incoming_headers, &upgrade_header)),
             );
 
-            let upstream_resp = match tokio::time::timeout(opts.header_timeout, ws_req.send()).await
-            {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(err)) => {
+            let ws_send = tokio::select! {
+                biased;
+                _ = wait_optional_cancel(&mut opts.stream_cancel) => None,
+                res = tokio::time::timeout(opts.header_timeout, ws_req.send()) => Some(res),
+            };
+            let upstream_resp = match ws_send {
+                None => {
+                    return build_stream_proxy_error(
+                        opts.on_error.take(),
+                        StreamProxyErrorKind::Cancelled,
+                        format!("Upstream {} access revoked.", opts.log_context),
+                    );
+                }
+                Some(Ok(Ok(resp))) => resp,
+                Some(Ok(Err(err))) => {
                     tracing::warn!(context = %opts.log_context, error = %err, "TLS websocket upstream error");
                     let kind = if err.is_timeout() {
                         StreamProxyErrorKind::GatewayTimeout
@@ -459,7 +524,7 @@ pub(crate) async fn stream_proxy(
                         format!("Upstream {} is unavailable.", opts.log_context),
                     );
                 }
-                Err(_) => {
+                Some(Err(_)) => {
                     return build_stream_proxy_error(
                         opts.on_error.take(),
                         StreamProxyErrorKind::GatewayTimeout,
@@ -482,7 +547,7 @@ pub(crate) async fn stream_proxy(
                     async move { upstream_upgrade.await.map_err(|e| e.to_string()) },
                     opts.header_timeout,
                     opts.guard.take(),
-                    opts.ws_cancel.take(),
+                    opts.stream_cancel.take(),
                     opts.log_context.clone(),
                 );
 
@@ -512,9 +577,10 @@ pub(crate) async fn stream_proxy(
                     .unwrap_or(StatusCode::BAD_GATEWAY);
                 let resp_headers_clone = upstream_resp.headers().clone();
                 let stream = upstream_resp.bytes_stream();
-                let mut response = Response::new(GuardedBody::wrap(
+                let mut response = Response::new(GuardedBody::wrap_with_cancel(
                     Body::from_stream(stream),
                     opts.guard.take(),
+                    opts.stream_cancel.take(),
                 ));
                 *response.status_mut() = status;
                 copy_filtered_reqwest_response_headers(
@@ -534,11 +600,21 @@ pub(crate) async fn stream_proxy(
         let connect_budget = opts
             .ws_connect_timeout
             .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
-        let tcp_stream = match connect_upstream_tcp(&target, opts.tcp_bind.as_ref(), connect_budget)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(kind) => {
+        let tcp_res = tokio::select! {
+            biased;
+            _ = wait_optional_cancel(&mut opts.stream_cancel) => None,
+            res = connect_upstream_tcp(&target, opts.tcp_bind.as_ref(), connect_budget) => Some(res),
+        };
+        let tcp_stream = match tcp_res {
+            None => {
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    StreamProxyErrorKind::Cancelled,
+                    format!("Upstream {} access revoked.", opts.log_context),
+                );
+            }
+            Some(Ok(stream)) => stream,
+            Some(Err(kind)) => {
                 tracing::warn!(context = %opts.log_context, ?kind, "websocket upstream connect error");
                 return build_stream_proxy_error(
                     opts.on_error.take(),
@@ -550,6 +626,9 @@ pub(crate) async fn stream_proxy(
                         StreamProxyErrorKind::GatewayTimeout => {
                             format!("Upstream {} timed out connecting.", opts.log_context)
                         }
+                        StreamProxyErrorKind::Cancelled => {
+                            format!("Upstream {} access revoked.", opts.log_context)
+                        }
                     },
                 );
             }
@@ -557,14 +636,21 @@ pub(crate) async fn stream_proxy(
 
         let io = hyper_util::rt::TokioIo::new(tcp_stream);
         let handshake_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let (mut sender, conn) = match tokio::time::timeout(
-            handshake_budget,
-            hyper::client::conn::http1::handshake(io),
-        )
-        .await
-        {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(err)) => {
+        let hs_res = tokio::select! {
+            biased;
+            _ = wait_optional_cancel(&mut opts.stream_cancel) => None,
+            res = tokio::time::timeout(handshake_budget, hyper::client::conn::http1::handshake(io)) => Some(res),
+        };
+        let (mut sender, conn) = match hs_res {
+            None => {
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    StreamProxyErrorKind::Cancelled,
+                    format!("Upstream {} access revoked.", opts.log_context),
+                );
+            }
+            Some(Ok(Ok(pair))) => pair,
+            Some(Ok(Err(err))) => {
                 tracing::warn!(context = %opts.log_context, error = %err, "websocket upstream HTTP/1 handshake error");
                 return build_stream_proxy_error(
                     opts.on_error.take(),
@@ -572,7 +658,7 @@ pub(crate) async fn stream_proxy(
                     format!("Upstream {} is unavailable.", opts.log_context),
                 );
             }
-            Err(_) => {
+            Some(Err(_)) => {
                 return build_stream_proxy_error(
                     opts.on_error.take(),
                     StreamProxyErrorKind::GatewayTimeout,
@@ -613,14 +699,21 @@ pub(crate) async fn stream_proxy(
         };
 
         let send_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let mut upstream_resp = match tokio::time::timeout(
-            send_budget,
-            sender.send_request(upstream_ws_req),
-        )
-        .await
-        {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(err)) => {
+        let ws_resp_res = tokio::select! {
+            biased;
+            _ = wait_optional_cancel(&mut opts.stream_cancel) => None,
+            res = tokio::time::timeout(send_budget, sender.send_request(upstream_ws_req)) => Some(res),
+        };
+        let mut upstream_resp = match ws_resp_res {
+            None => {
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    StreamProxyErrorKind::Cancelled,
+                    format!("Upstream {} access revoked.", opts.log_context),
+                );
+            }
+            Some(Ok(Ok(resp))) => resp,
+            Some(Ok(Err(err))) => {
                 tracing::warn!(context = %opts.log_context, error = %err, "websocket upstream response error");
                 return build_stream_proxy_error(
                     opts.on_error.take(),
@@ -628,7 +721,7 @@ pub(crate) async fn stream_proxy(
                     format!("Upstream {} is unavailable.", opts.log_context),
                 );
             }
-            Err(_) => {
+            Some(Err(_)) => {
                 return build_stream_proxy_error(
                     opts.on_error.take(),
                     StreamProxyErrorKind::GatewayTimeout,
@@ -656,7 +749,7 @@ pub(crate) async fn stream_proxy(
                 },
                 opts.header_timeout,
                 opts.guard.take(),
-                opts.ws_cancel.take(),
+                opts.stream_cancel.take(),
                 opts.log_context.clone(),
             );
 
@@ -679,7 +772,11 @@ pub(crate) async fn stream_proxy(
             return response;
         } else {
             let (upstream, body) = upstream_resp.into_parts();
-            let mut response = Response::new(GuardedBody::wrap(Body::new(body), opts.guard.take()));
+            let mut response = Response::new(GuardedBody::wrap_with_cancel(
+                Body::new(body),
+                opts.guard.take(),
+                opts.stream_cancel.take(),
+            ));
             *response.status_mut() = upstream.status;
             copy_filtered_response_headers(response.headers_mut(), &upstream.headers, false);
             if let Some(transform) = opts.response_transform.take() {
@@ -712,33 +809,57 @@ pub(crate) async fn stream_proxy(
         None,
     );
 
+    enum SendOutcome {
+        Response(Result<reqwest::Response, reqwest::Error>),
+        Timeout(&'static str),
+        Cancelled,
+    }
+
     let send_res = if has_body {
         let (progress_tx, progress_rx) = watch::channel(Some(Instant::now()));
+        let req_body_cancel = opts.stream_cancel.clone().map(CancelWaiter::new);
         let stream = SignalingStream {
             inner: req.into_body().into_data_stream(),
             progress: Some(progress_tx),
             track_progress: opts.upload_idle_timeout.is_some(),
+            cancel: req_body_cancel,
+            cancelled: false,
         };
         upstream_req = upstream_req.body(reqwest::Body::wrap_stream(stream));
         tokio::select! {
-            res = upstream_req.send() => Ok(res),
-            stage = wait_for_http_proxy_timeout(progress_rx, opts.upload_idle_timeout, opts.header_timeout) => Err(stage),
+            biased;
+            _ = wait_optional_cancel(&mut opts.stream_cancel) => SendOutcome::Cancelled,
+            res = upstream_req.send() => SendOutcome::Response(res),
+            stage = wait_for_http_proxy_timeout(progress_rx, opts.upload_idle_timeout, opts.header_timeout) => SendOutcome::Timeout(stage),
         }
     } else {
-        tokio::time::timeout(opts.header_timeout, upstream_req.send())
-            .await
-            .map_err(|_| "response headers")
+        tokio::select! {
+            biased;
+            _ = wait_optional_cancel(&mut opts.stream_cancel) => SendOutcome::Cancelled,
+            res = tokio::time::timeout(opts.header_timeout, upstream_req.send()) => match res {
+                Ok(resp_res) => SendOutcome::Response(resp_res),
+                Err(_) => SendOutcome::Timeout("response headers"),
+            },
+        }
     };
 
     match send_res {
-        Ok(Ok(upstream_resp)) => {
+        SendOutcome::Response(Ok(upstream_resp)) => {
+            if opts.stream_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    StreamProxyErrorKind::Cancelled,
+                    format!("Upstream {} access revoked.", opts.log_context),
+                );
+            }
             let status = StatusCode::from_u16(upstream_resp.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
             let upstream_headers = upstream_resp.headers().clone();
             let stream = upstream_resp.bytes_stream();
-            let mut response = Response::new(GuardedBody::wrap(
+            let mut response = Response::new(GuardedBody::wrap_with_cancel(
                 Body::from_stream(stream),
                 opts.guard.take(),
+                opts.stream_cancel.take(),
             ));
             *response.status_mut() = status;
             copy_filtered_reqwest_response_headers(
@@ -751,7 +872,14 @@ pub(crate) async fn stream_proxy(
             }
             response
         }
-        Ok(Err(err)) => {
+        SendOutcome::Response(Err(err)) => {
+            if opts.stream_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+                return build_stream_proxy_error(
+                    opts.on_error.take(),
+                    StreamProxyErrorKind::Cancelled,
+                    format!("Upstream {} access revoked.", opts.log_context),
+                );
+            }
             tracing::warn!(context = %opts.log_context, error = %err, "stream proxy upstream error");
             let kind = if err.is_timeout() {
                 StreamProxyErrorKind::GatewayTimeout
@@ -764,12 +892,20 @@ pub(crate) async fn stream_proxy(
                 format!("Upstream {} is unavailable.", opts.log_context),
             )
         }
-        Err(stage) => {
+        SendOutcome::Timeout(stage) => {
             tracing::warn!(context = %opts.log_context, stage, "stream proxy timeout");
             build_stream_proxy_error(
                 opts.on_error.take(),
                 StreamProxyErrorKind::GatewayTimeout,
                 format!("Upstream {} timed out.", opts.log_context),
+            )
+        }
+        SendOutcome::Cancelled => {
+            tracing::debug!(context = %opts.log_context, "stream proxy request aborted by cancellation");
+            build_stream_proxy_error(
+                opts.on_error.take(),
+                StreamProxyErrorKind::Cancelled,
+                format!("Upstream {} access revoked.", opts.log_context),
             )
         }
     }
@@ -1034,7 +1170,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         ws_connect_timeout: Duration::from_secs(10),
         upgrade_policy: StreamProxyUpgradePolicy::AnyUpgrade,
         guard: None,
-        ws_cancel: None,
+        stream_cancel: None,
         response_transform: None,
         on_error: Some(Box::new(move |kind, _| {
             match kind {
@@ -1051,6 +1187,14 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                 Json(serde_json::json!({
                     "error": "gateway_timeout",
                     "message": format!("Upstream service {} on port {} timed out.", app_err_name, err_port),
+                })),
+            )
+                .into_response(),
+            StreamProxyErrorKind::Cancelled => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "message": format!("Upstream service {} on port {} request was cancelled.", app_err_name, err_port),
                 })),
             )
                 .into_response(),
@@ -1080,6 +1224,8 @@ mod upload_progress_tests {
             inner: chunks,
             progress: Some(progress_tx),
             track_progress: true,
+            cancel: None,
+            cancelled: false,
         };
 
         assert!(stream.next().await.unwrap().unwrap().is_empty());

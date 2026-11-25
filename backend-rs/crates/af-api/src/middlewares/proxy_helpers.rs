@@ -9,11 +9,13 @@ use rusqlite::OptionalExtension;
 use std::any::Any;
 use std::collections::HashSet;
 use std::env;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::sync::watch;
 use url::Url;
 
 pub(super) static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
@@ -488,6 +490,7 @@ pub(crate) struct StreamProxySocketBind {
 pub(crate) enum StreamProxyErrorKind {
     BadGateway,
     GatewayTimeout,
+    Cancelled,
 }
 
 pub(crate) type StreamProxyErrorFn =
@@ -519,9 +522,9 @@ pub(crate) struct StreamProxyOptions {
     /// Resource/permit guard held for the entire streaming response body or upgraded WebSocket
     /// tunnel lifetime, automatically released on completion, stream error, cancellation, or drop.
     pub(crate) guard: Option<Box<dyn Any + Send + Sync>>,
-    /// Optional cancellation signal that tears down an active upgraded WebSocket tunnel and
-    /// releases `guard` immediately.
-    pub(crate) ws_cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Optional cancellation signal that tears down an active HTTP stream (request upload, header
+    /// wait, or response body) or upgraded WebSocket tunnel and releases `guard` immediately.
+    pub(crate) stream_cancel: Option<watch::Receiver<bool>>,
     /// Optional response transform hook called with `(&mut response, is_switching_protocols)`.
     pub(crate) response_transform: Option<StreamProxyResponseTransform>,
     /// Optional custom error response mapper.
@@ -533,22 +536,66 @@ pub(crate) struct StreamProxyOptions {
     pub(crate) discard_request_body: bool,
 }
 
-/// Zero-copy `Body` wrapper that holds an arbitrary resource/permit guard until the stream reaches
-/// EOF, yields an error, or is dropped (client disconnect / cancellation).
+/// Resolves once `rx` observes `true` (cancelled) or its sender closes.
+pub(super) async fn wait_for_cancel_watch(rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow_and_update() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+pub(super) struct CancelWaiter {
+    fut: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+}
+
+impl CancelWaiter {
+    pub(super) fn new(mut rx: watch::Receiver<bool>) -> Self {
+        Self {
+            fut: Box::pin(async move {
+                wait_for_cancel_watch(&mut rx).await;
+            }),
+        }
+    }
+
+    pub(super) fn poll_cancelled(&mut self, cx: &mut Context<'_>) -> bool {
+        self.fut.as_mut().poll(cx).is_ready()
+    }
+}
+
+/// Zero-copy `Body` wrapper that holds an arbitrary resource/permit guard and optional
+/// cancellation signal until the stream reaches EOF, yields an error, is cancelled, or is
+/// dropped (client disconnect / revocation).
 pub(crate) struct GuardedBody<G = Box<dyn Any + Send + Sync>> {
     inner: Body,
     guard: Option<G>,
+    cancel: Option<CancelWaiter>,
+    cancelled: bool,
 }
 
 impl<G: Send + Sync + Unpin + 'static> GuardedBody<G> {
+    #[allow(dead_code)]
     pub(crate) fn wrap(inner: Body, guard: Option<G>) -> Body {
-        match guard {
-            Some(g) => Body::new(Self {
-                inner,
-                guard: Some(g),
-            }),
-            None => inner,
+        Self::wrap_with_cancel(inner, guard, None)
+    }
+
+    pub(crate) fn wrap_with_cancel(
+        inner: Body,
+        guard: Option<G>,
+        cancel: Option<watch::Receiver<bool>>,
+    ) -> Body {
+        if guard.is_none() && cancel.is_none() {
+            return inner;
         }
+        Body::new(Self {
+            inner,
+            guard,
+            cancel: cancel.map(CancelWaiter::new),
+            cancelled: false,
+        })
     }
 }
 
@@ -560,19 +607,39 @@ impl<G: Unpin> HttpBody for GuardedBody<G> {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.cancelled {
+            return Poll::Ready(None);
+        }
+        if let Some(cancel) = self.cancel.as_mut() {
+            if cancel.poll_cancelled(cx) {
+                self.cancelled = true;
+                self.cancel = None;
+                self.inner = Body::empty();
+                self.guard.take();
+                return Poll::Ready(Some(Err(axum::Error::new(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "Stream cancelled due to peer revocation",
+                )))));
+            }
+        }
         let poll = Pin::new(&mut self.inner).poll_frame(cx);
         if matches!(poll, Poll::Ready(None) | Poll::Ready(Some(Err(_)))) {
             self.guard.take();
+            self.cancel = None;
         }
         poll
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.cancelled || self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
+        if self.cancelled {
+            SizeHint::with_exact(0)
+        } else {
+            self.inner.size_hint()
+        }
     }
 }
 

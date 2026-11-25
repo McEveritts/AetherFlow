@@ -51,11 +51,14 @@ Optional external OAuth2 login and built-in OIDC provider settings for downstrea
 | `OIDC_ISSUER` | Issuer URL for the built-in AetherFlow OIDC provider. | `(Auto-detected)` |
 | `OIDC_KEY_PATH` | Path to the persisted RSA 2048-bit PEM key used for OIDC JWKS signing. | `/var/lib/aetherflow/oidc_rsa.pem` |
 
-### Cookie, Host & CSRF Hardening
+### Cookie, Host, Proxy & CSRF Hardening
 | Variable | Description | Default |
 | :--- | :--- | :--- |
+| `PUBLIC_URL` | Optional public HTTPS origin (for example `https://node.example.com`) used for peer pairing strings, OIDC issuer/redirect URLs, and automatic `ALLOWED_HOSTS` allowlisting. | `(Auto-detected)` |
 | `ALLOWED_HOSTS` | Comma-separated list of permitted `Host` header values (prevents Host header poisoning). | `(Auto-populated by Setup)` |
 | `ALLOWED_CORS_ORIGIN` | Comma-separated list of explicit frontend origin URLs for CORS and WebSocket `Origin` checks. | `(Auto-detected)` |
+| `TRUSTED_PROXIES` | Comma-separated list of trusted reverse-proxy IPs or CIDRs whose forwarded client IP and protocol headers (`X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`) are honored for rate limiting (including `/api/v1/peer-pairing/request`) and subdomain proxying. Takes precedence over `TRUST_PROXY_HEADERS` when non-empty. | Loopback (`127.0.0.1`, `::1`) |
+| `TRUST_PROXY_HEADERS` | Controls whether forwarded headers from loopback proxies are trusted when `TRUSTED_PROXIES` is unset (set `false` or `0` to ignore loopback forwarded headers; set `true` behind a reverse proxy for OIDC origin detection). | Loopback trusted (`false` for OIDC unless set) |
 | `COOKIE_SECURE` | Enforces `Secure` flag on `aetherflow_session` cookies. Set `false` only for local HTTP testing. | `true` |
 | `CSRF_DISABLED` | Disables CSRF validation when `true` (never enable in production). | `false` |
 
@@ -121,16 +124,32 @@ Backup uploads accept between 1 and 4,096 chunks per upload. Invalid chunk count
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
+| `AF_SERVER_NAME` | Optional operator peer display-name override for this server. Resolution falls back through `AF_SERVER_NAME` → `HOSTNAME` → `/etc/hostname` → `"aetherflow"`. | `(Hostname / "aetherflow")` |
+| `PUBLIC_URL` | Optional public `https://` origin embedded in single-use pairing strings (also used by OIDC and `ALLOWED_HOSTS`). | `(Auto-detected)` |
 | `AF_PEER_TUNNEL_CIDR` | Subnet for peer tunnel addresses on `afpeer0`. Configure a subnet that avoids existing routes. | `10.231.0.0/16` |
 | `AF_PEER_WG_PORT` | UDP listen port for the dedicated WireGuard interface. | `51821` |
 | `AF_PEER_LISTEN_PORT` | TCP port for the API peer listener on the local tunnel address. | `9443` |
 | `AF_PEER_MAX_CONN` | Concurrent requests admitted per peer link at the listener and outbound management proxy. | `64` |
-| `AF_PEER_RTT_WARN_MS` | Link RTT threshold in milliseconds for the Cluster warning. | `25` |
-| `AF_LOG_FORMAT` | Set to `json` for structured API logs. The API continues to honor `RUST_LOG`. | Text |
 | `AF_PEER_MAX_WS` | Concurrent proxied WebSockets per peer link. | `16` |
-| `AF_TRANSCODE_REAL_FFMPEG` | Planned P8–P9 path to the real FFmpeg binary used by the Jellyfin shim and worker. | `/usr/lib/jellyfin-ffmpeg/ffmpeg` |
+| `AF_PEER_RTT_WARN_MS` | Link RTT threshold in milliseconds for the Cluster warning. | `25` |
+| `AF_PEER_ALLOW_PRIVATE_PAIRING_URLS` | Opt-in flag (`1` / `true` / `yes` / `on`) permitting RFC 1918 private, CGNAT (`100.64.0.0/10`), and IPv6 unique-local (`fc00::/7`) targets in public pairing HTTPS URLs on private LANs. Loopback, link-local/cloud metadata, unspecified, multicast, broadcast/reserved, and the peer tunnel CIDR remain unconditionally blocked. | `false` |
+| `AF_LOG_FORMAT` | Set to `json` for structured API logs. The API continues to honor `RUST_LOG`. | Text |
 
-The Cluster tab guides pairing and endpoint selection. [Peer clustering operator guide](peer-clustering.md)
+Malformed or out-of-range values for `AF_PEER_LISTEN_PORT`, `AF_PEER_MAX_CONN`, `AF_PEER_MAX_WS`, and `AF_PEER_RTT_WARN_MS` emit a `tracing::warn!` log entry and fall back to their defaults.
+
+### Distributed Transcoding Environment File (`/etc/aetherflow/transcode.env`)
+
+Distributed Jellyfin transcoding overrides live in a dedicated, secret-free environment file at `/etc/aetherflow/transcode.env` (mode `0640`, owned by `root:jellyfin`). It is loaded via `EnvironmentFile=-/etc/aetherflow/transcode.env` by all four consuming units: `aetherflow-api.service`, `aetherflow-runner.service`, `jellyfin.service`, and `af-transcode-worker.service`.
+
+> [!CAUTION]
+> Never place API keys, tokens, or secrets in `/etc/aetherflow/transcode.env`, and never load `/etc/aetherflow/aetherflow.env` in `af-transcode-worker.service` or `jellyfin.service`. `af-transcode` explicitly refuses to read any file named `aetherflow.env`.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `AF_TRANSCODE_REAL_FFMPEG` | Absolute path to the real FFmpeg binary executed by the Jellyfin shim and worker. | `/usr/lib/jellyfin-ffmpeg/ffmpeg` |
+| `AF_TRANSCODE_WORKER_MAX_JOBS` | Maximum concurrent transcode jobs permitted on a worker (`1..=64`, clamped automatically). Advertised over link-authenticated tunnel `GET /health` as `worker_max_jobs` so controllers auto-clamp per-worker concurrency (`effective_max_jobs = min(max_jobs, worker_max_jobs)`). | `8` |
+
+The Cluster tab guides pairing, endpoint selection, media storage, and distributed Jellyfin transcoding. [Peer clustering operator guide](peer-clustering.md)
 
 ---
 

@@ -78,8 +78,9 @@ pub use peer_storage::{
     PeerStorageExportSpec, PeerStorageManager, PeerStoragePackagesResponse, PeerStorageRequest,
     PeerStorageResponse, DEFAULT_PEER_EXPORTS_DIR, DEFAULT_PEER_MOUNTS_ROOT,
     DEFAULT_PEER_NFS_CONF_DIR, DEFAULT_PEER_SYSTEMD_DIR, DEFAULT_SENTINEL_PROBE_TIMEOUT_MS,
-    PEER_MANAGED_HEADER, PEER_NFSD_CONF_NAME, PEER_NFSD_SERVICE_UNIT, PEER_SENTINEL_FILE_NAME,
-    PEER_STORAGE_PACKAGES,
+    MAX_CONCURRENT_SENTINEL_PROBES, PEER_MANAGED_HEADER, PEER_NFSD_CONF_NAME,
+    PEER_NFSD_DROPIN_DIR_NAME, PEER_NFSD_DROPIN_NAME, PEER_NFSD_SERVICE_UNIT,
+    PEER_SENTINEL_FILE_NAME, PEER_STORAGE_PACKAGES,
 };
 pub mod peer_transcode;
 pub use peer_transcode::{
@@ -107,9 +108,45 @@ pub use plugins::PluginRunnerError;
 pub mod probe_metadata;
 pub mod quota;
 
+pub const RUNNER_REQUEST_ID_HEADER: &str = "x-request-id";
+const MAX_RUNNER_REQUEST_ID_LEN: usize = 128;
+
+/// Validates and trims a correlation request ID (1..=128 ASCII chars in `[A-Za-z0-9._:-]`).
+pub fn sanitize_runner_request_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > MAX_RUNNER_REQUEST_ID_LEN
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 tokio::task_local! {
     pub static PACKAGE_JOB_ID: String;
     static PACKAGE_MAINTENANCE_LEASE: std::sync::Arc<af_release::ReleaseLockGuard>;
+    static RUNNER_REQUEST_ID: String;
+}
+
+/// Executes `fut` with `request_id` bound to the runner client task-local correlation slot so
+/// outbound Unix-socket requests attach `x-request-id` automatically.
+pub async fn with_runner_request_id<F: std::future::Future>(
+    request_id: String,
+    fut: F,
+) -> F::Output {
+    let sanitized = sanitize_runner_request_id(&request_id).unwrap_or_default();
+    RUNNER_REQUEST_ID.scope(sanitized, fut).await
+}
+
+/// Returns the active sanitized runner correlation request ID for the current task, if any.
+pub fn current_runner_request_id() -> Option<String> {
+    RUNNER_REQUEST_ID
+        .try_with(|id| sanitize_runner_request_id(id))
+        .ok()
+        .flatten()
 }
 
 pub fn current_package_job_id() -> String {
@@ -401,6 +438,55 @@ pub fn resolve_af_transcode_binary() -> Option<PathBuf> {
         .find(|cand| peer_transcode::is_valid_transcode_binary(cand))
 }
 
+async fn runner_request_id_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    use tracing::Instrument;
+
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    let valid_rid = req
+        .headers()
+        .get(RUNNER_REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(sanitize_runner_request_id);
+    let span_rid = valid_rid.as_deref().unwrap_or("none");
+    let span = tracing::info_span!(
+        "runner_request",
+        request_id = %span_rid,
+        path = %path,
+    );
+    let scope_rid = valid_rid.clone();
+
+    let run = async move {
+        let mut resp = next.run(req).await;
+        let status = resp.status();
+        if let Some(ref rid) = valid_rid {
+            if let Ok(val) = HeaderValue::from_str(rid) {
+                resp.headers_mut().insert(
+                    axum::http::header::HeaderName::from_static(RUNNER_REQUEST_ID_HEADER),
+                    val,
+                );
+            }
+        }
+        tracing::info!(
+            request_id = %valid_rid.as_deref().unwrap_or("none"),
+            method = %method,
+            path = %path,
+            status = status.as_u16(),
+            "Runner request completed"
+        );
+        resp
+    };
+
+    if let Some(rid) = scope_rid {
+        with_runner_request_id(rid, run).instrument(span).await
+    } else {
+        run.instrument(span).await
+    }
+}
+
 /// Builds the Axum router for the Privileged Root Socket Daemon (`aetherflow-api runner`).
 pub fn build_runner_router() -> Router {
     Router::new()
@@ -445,6 +531,7 @@ pub fn build_runner_router() -> Router {
             "/v1/plugins/token",
             post(plugins::handle_plugin_token_rotate),
         )
+        .layer(axum::middleware::from_fn(runner_request_id_middleware))
 }
 
 async fn handle_health() -> Json<RunnerResponse> {
@@ -795,3 +882,223 @@ pub(crate) static ENV_TEST_MUTEX: Lazy<tokio::sync::Mutex<()>> =
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod request_id_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tower::ServiceExt;
+    use tracing::field::{Field, Visit};
+    use tracing::instrument::WithSubscriber;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    #[derive(Default)]
+    struct RecordedTelemetry {
+        spans: Vec<(String, HashMap<String, String>)>,
+        events: Vec<(tracing::Level, HashMap<String, String>)>,
+    }
+
+    struct MapVisitor(HashMap<String, String>);
+
+    impl Visit for MapVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingSubscriber {
+        recorded: Arc<StdMutex<RecordedTelemetry>>,
+        next_id: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, span: &Attributes<'_>) -> Id {
+            let mut visitor = MapVisitor(HashMap::new());
+            span.record(&mut visitor);
+            let mut rec = self.recorded.lock().unwrap_or_else(|e| e.into_inner());
+            rec.spans
+                .push((span.metadata().name().to_string(), visitor.0));
+            let id = self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            Id::from_u64(id)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = MapVisitor(HashMap::new());
+            event.record(&mut visitor);
+            let mut rec = self.recorded.lock().unwrap_or_else(|e| e.into_inner());
+            rec.events.push((*event.metadata().level(), visitor.0));
+        }
+
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
+
+    #[test]
+    fn sanitize_runner_request_id_validates_charset_and_length() {
+        assert_eq!(
+            sanitize_runner_request_id("req-123_4.5:ABC"),
+            Some("req-123_4.5:ABC".to_string())
+        );
+        assert_eq!(
+            sanitize_runner_request_id("  trimmed-id  "),
+            Some("trimmed-id".to_string())
+        );
+        let max_len = "a".repeat(128);
+        assert_eq!(sanitize_runner_request_id(&max_len), Some(max_len));
+
+        for invalid in [
+            "",
+            "   ",
+            &"a".repeat(129),
+            "bad space",
+            "bad\r\ninject",
+            "bad/slash",
+            "bad;semi",
+            "bad\x00nul",
+        ] {
+            assert_eq!(
+                sanitize_runner_request_id(invalid),
+                None,
+                "expected {invalid:?} to be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn with_runner_request_id_scopes_and_sanitizes_task_local() {
+        assert_eq!(current_runner_request_id(), None);
+        let seen = with_runner_request_id("  peer-req:42_a.b  ".to_string(), async {
+            current_runner_request_id()
+        })
+        .await;
+        assert_eq!(seen.as_deref(), Some("peer-req:42_a.b"));
+
+        let invalid = with_runner_request_id("bad\r\nid".to_string(), async {
+            current_runner_request_id()
+        })
+        .await;
+        assert_eq!(invalid, None);
+        assert_eq!(current_runner_request_id(), None);
+    }
+
+    #[tokio::test]
+    async fn runner_router_middleware_correlates_echoes_and_logs_request_id() {
+        let subscriber = CapturingSubscriber::default();
+        let recorded = Arc::clone(&subscriber.recorded);
+
+        let app = build_runner_router();
+
+        // 1. Valid x-request-id is echoed and attached to the runner_request span and log event.
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/v1/health")
+            .header(RUNNER_REQUEST_ID_HEADER, "api-corr-777")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .with_subscriber(subscriber.clone())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(RUNNER_REQUEST_ID_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("api-corr-777")
+        );
+
+        {
+            let rec = recorded.lock().unwrap();
+            assert!(
+                rec.spans.iter().any(|(name, fields)| {
+                    name == "runner_request"
+                        && fields.get("request_id").map(String::as_str) == Some("api-corr-777")
+                        && fields.get("path").map(String::as_str) == Some("/v1/health")
+                }),
+                "expected runner_request span with request_id=api-corr-777, got {:?}",
+                rec.spans
+            );
+            assert!(
+                rec.events.iter().any(|(_, fields)| {
+                    fields.get("request_id").map(String::as_str) == Some("api-corr-777")
+                        && fields.get("status").map(String::as_str) == Some("200")
+                }),
+                "expected completion log event with request_id=api-corr-777, got {:?}",
+                rec.events
+            );
+        }
+
+        // 2. Missing x-request-id defaults span/log request_id to "none" and omits response header.
+        recorded.lock().unwrap().spans.clear();
+        recorded.lock().unwrap().events.clear();
+        let missing_req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/v1/health")
+            .body(Body::empty())
+            .unwrap();
+        let missing_resp = app
+            .clone()
+            .oneshot(missing_req)
+            .with_subscriber(subscriber.clone())
+            .await
+            .unwrap();
+        assert_eq!(missing_resp.status(), StatusCode::OK);
+        assert!(missing_resp
+            .headers()
+            .get(RUNNER_REQUEST_ID_HEADER)
+            .is_none());
+        {
+            let rec = recorded.lock().unwrap();
+            assert!(rec.spans.iter().any(|(name, fields)| {
+                name == "runner_request"
+                    && fields.get("request_id").map(String::as_str) == Some("none")
+            }));
+        }
+
+        // 3. Malformed x-request-id is rejected (falls back to "none", never echoed).
+        recorded.lock().unwrap().spans.clear();
+        let bad_req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/v1/health")
+            .header(RUNNER_REQUEST_ID_HEADER, "bad header/value")
+            .body(Body::empty())
+            .unwrap();
+        let bad_resp = app
+            .oneshot(bad_req)
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        assert_eq!(bad_resp.status(), StatusCode::OK);
+        assert!(bad_resp.headers().get(RUNNER_REQUEST_ID_HEADER).is_none());
+        {
+            let rec = recorded.lock().unwrap();
+            assert!(rec.spans.iter().any(|(name, fields)| {
+                name == "runner_request"
+                    && fields.get("request_id").map(String::as_str) == Some("none")
+            }));
+        }
+    }
+}

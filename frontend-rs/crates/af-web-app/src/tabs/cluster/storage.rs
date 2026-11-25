@@ -6,8 +6,8 @@
 use super::peers::{compatibility_guidance, format_rtt, supports_storage_catalog, PeerLinkView};
 use super::{
     copy_text_to_clipboard, local_fs_browse_path, local_same_origin_get, peer_api_request,
-    peer_exports_path, peer_mounts_path, CompletionScope, DialogGate, MutationToken, PeerApiError,
-    PeerErrorAlert,
+    peer_api_request_with_request_id, peer_exports_path, peer_mounts_path, sanitize_request_id,
+    CompletionScope, DialogGate, MutationToken, PeerApiError, PeerErrorAlert,
 };
 use crate::state::app;
 use crate::tabs::l10n::{tt, tt_with, Badge, Modal};
@@ -53,15 +53,28 @@ pub struct PeerErrorEnvelope {
     pub step: String,
     pub message: String,
     pub action: String,
+    pub request_id: Option<String>,
 }
 
 impl PeerErrorEnvelope {
     pub fn to_peer_api_error(&self) -> PeerApiError {
+        self.to_peer_api_error_with_fallback(None)
+    }
+
+    pub fn to_peer_api_error_with_fallback(
+        &self,
+        fallback_request_id: Option<&str>,
+    ) -> PeerApiError {
         let non_empty = |text: &str| {
             let trimmed = text.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
         };
         let message = non_empty(&self.message).unwrap_or_else(|| "Peer request failed".to_string());
+        let request_id = self
+            .request_id
+            .as_deref()
+            .and_then(sanitize_request_id)
+            .or_else(|| fallback_request_id.and_then(sanitize_request_id));
         PeerApiError::from_envelope(
             0,
             non_empty(&self.code),
@@ -69,6 +82,7 @@ impl PeerErrorEnvelope {
             non_empty(&self.step),
             message,
             non_empty(&self.action),
+            request_id,
         )
     }
 }
@@ -420,12 +434,20 @@ impl StorageModalState {
     }
 
     pub fn apply_mounts_loaded(&mut self, resp: PeerMountListResponse) {
+        self.apply_mounts_loaded_with_request_id(resp, None);
+    }
+
+    pub fn apply_mounts_loaded_with_request_id(
+        &mut self,
+        resp: PeerMountListResponse,
+        header_request_id: Option<&str>,
+    ) {
         self.mounts = resp.mounts;
         self.available_exports = resp.available_exports;
         self.catalog_error = resp
             .exports_error
             .as_ref()
-            .map(PeerErrorEnvelope::to_peer_api_error);
+            .map(|env| env.to_peer_api_error_with_fallback(header_request_id));
         if let Some(pending) = self.confirm_remove_mount_id.as_deref() {
             if !self.mounts.iter().any(|mount| mount.id == pending) {
                 self.confirm_remove_mount_id = None;
@@ -956,7 +978,8 @@ pub fn StorageManagerModal(
         mounts_load_state.set(SectionLoadState::Loading);
         let path = peer_mounts_path(&peer_id);
         spawn_local(async move {
-            let result = peer_api_request::<PeerMountListResponse>(&path, "GET", None).await;
+            let result =
+                peer_api_request_with_request_id::<PeerMountListResponse>(&path, "GET", None).await;
             match gate.classify(context.session_epoch, open, token, || {
                 target
                     .try_with_untracked(|cur| cur.as_ref().is_some_and(|p| p.id == peer_id))
@@ -969,8 +992,10 @@ pub fn StorageManagerModal(
                 return;
             }
             match result {
-                Ok(resp) => {
-                    state.update(|s| s.apply_mounts_loaded(resp));
+                Ok((resp, header_request_id)) => {
+                    state.update(|s| {
+                        s.apply_mounts_loaded_with_request_id(resp, header_request_id.as_deref())
+                    });
                     mounts_load_error.set(None);
                     mounts_load_state.set(SectionLoadState::Ready);
                 }
@@ -2804,7 +2829,7 @@ mod tests {
                 "action": "Confirm UDP 51821 connectivity and retry"
             }
         });
-        let resp: PeerMountListResponse = serde_json::from_value(payload).unwrap();
+        let resp: PeerMountListResponse = serde_json::from_value(payload.clone()).unwrap();
         let mut modal = StorageModalState::default();
         modal.apply_mounts_loaded(resp);
 
@@ -2819,6 +2844,44 @@ mod tests {
         assert_eq!(
             err.action(),
             Some("Confirm UDP 51821 connectivity and retry")
+        );
+        assert_eq!(err.request_id(), None);
+
+        // Header fallback populates catalog_error.request_id when exports_error omits it.
+        let resp_no_rid: PeerMountListResponse = serde_json::from_value(payload.clone()).unwrap();
+        modal.apply_mounts_loaded_with_request_id(resp_no_rid, Some("req-hdr-mounts-1"));
+        assert_eq!(
+            modal
+                .catalog_error
+                .as_ref()
+                .and_then(PeerApiError::request_id),
+            Some("req-hdr-mounts-1")
+        );
+
+        // Control-only envelope request_id falls back cleanly to the sanitized header ID.
+        let mut control_only = payload.clone();
+        control_only["exports_error"]["request_id"] = json!("\u{0000}\u{0007}");
+        let resp_control: PeerMountListResponse = serde_json::from_value(control_only).unwrap();
+        modal.apply_mounts_loaded_with_request_id(resp_control, Some("  req-hdr-clean-3  "));
+        assert_eq!(
+            modal
+                .catalog_error
+                .as_ref()
+                .and_then(PeerApiError::request_id),
+            Some("req-hdr-clean-3")
+        );
+
+        // Envelope request_id takes precedence over header fallback.
+        let mut with_body_rid = payload;
+        with_body_rid["exports_error"]["request_id"] = json!("req-env-mounts-2");
+        let resp_with_rid: PeerMountListResponse = serde_json::from_value(with_body_rid).unwrap();
+        modal.apply_mounts_loaded_with_request_id(resp_with_rid, Some("req-hdr-ignored"));
+        assert_eq!(
+            modal
+                .catalog_error
+                .as_ref()
+                .and_then(PeerApiError::request_id),
+            Some("req-env-mounts-2")
         );
 
         // Local mount removal works even while remote catalog listing failed.

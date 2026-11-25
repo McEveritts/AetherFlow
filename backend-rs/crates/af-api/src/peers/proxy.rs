@@ -56,10 +56,15 @@ use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, watch};
 use url::Url;
 use uuid::Uuid;
+
+const PROXY_REVOCATION_NONE: u8 = 0;
+const PROXY_REVOCATION_LINK: u8 = 1;
+const PROXY_REVOCATION_GRANT: u8 = 2;
 
 fn is_valid_request_id(raw: &str) -> bool {
     let bytes = raw.as_bytes();
@@ -413,37 +418,47 @@ async fn read_held_link_token_for_proxy(
     })
 }
 
-fn spawn_proxy_ws_revocation_watcher(
+fn spawn_proxy_revocation_watcher(
     runtime: Arc<PeerRuntime>,
     link_id: String,
+    active_grant_id: String,
     mut revocation_rx: broadcast::Receiver<RevocationEvent>,
-) -> oneshot::Receiver<()> {
-    let (mut cancel_tx, cancel_rx) = oneshot::channel::<()>();
+) -> (watch::Receiver<bool>, Arc<AtomicU8>) {
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let reason = Arc::new(AtomicU8::new(PROXY_REVOCATION_NONE));
+    let reason_c = Arc::clone(&reason);
     tokio::spawn(async move {
-        let recheck_active = |rt: &Arc<PeerRuntime>, id: &str| {
+        let recheck_revocation = |rt: &Arc<PeerRuntime>, id: &str| {
             let rt = Arc::clone(rt);
             let check_id = id.to_string();
             async move {
                 rt.db
-                    .read("local", "proxy_ws_revocation_recheck", move |conn| {
+                    .read("local", "proxy_revocation_recheck", move |conn| {
                         let link_ok = db_peers::get_peer_link(conn, &check_id)
                             .ok()
                             .flatten()
                             .is_some_and(|l| is_active_link_state(&l.state));
+                        if !link_ok {
+                            return Ok(Some(PROXY_REVOCATION_LINK));
+                        }
                         let grant_ok =
                             db_peers::get_active_peer_received_grant_for_link(conn, &check_id)
                                 .ok()
                                 .flatten()
                                 .is_some_and(|g| g.access.has_any_access());
-                        Ok(link_ok && grant_ok)
+                        if !grant_ok {
+                            return Ok(Some(PROXY_REVOCATION_GRANT));
+                        }
+                        Ok(None)
                     })
                     .await
-                    .unwrap_or(false)
+                    .unwrap_or(Some(PROXY_REVOCATION_GRANT))
             }
         };
 
-        if !recheck_active(&runtime, &link_id).await {
-            let _ = cancel_tx.send(());
+        if let Some(code) = recheck_revocation(&runtime, &link_id).await {
+            reason_c.store(code, Ordering::Release);
+            let _ = cancel_tx.send(true);
             return;
         }
 
@@ -454,24 +469,39 @@ fn spawn_proxy_ws_revocation_watcher(
                     match recv {
                         Ok(RevocationEvent::LinkRevoked { link_id: revoked_id, .. }) => {
                             if revoked_id == link_id {
-                                let _ = cancel_tx.send(());
+                                reason_c.store(PROXY_REVOCATION_LINK, Ordering::Release);
+                                let _ = cancel_tx.send(true);
                                 break;
                             }
                         }
-                        Ok(RevocationEvent::GrantRevoked { link_id: revoked_id, .. }) => {
-                            if revoked_id == link_id && !recheck_active(&runtime, &link_id).await {
-                                let _ = cancel_tx.send(());
-                                break;
+                        Ok(RevocationEvent::GrantRevoked {
+                            link_id: revoked_id,
+                            grant_id: revoked_grant_id,
+                            ..
+                        }) => {
+                            if revoked_id == link_id {
+                                if revoked_grant_id == active_grant_id {
+                                    reason_c.store(PROXY_REVOCATION_GRANT, Ordering::Release);
+                                    let _ = cancel_tx.send(true);
+                                    break;
+                                }
+                                if let Some(code) = recheck_revocation(&runtime, &link_id).await {
+                                    reason_c.store(code, Ordering::Release);
+                                    let _ = cancel_tx.send(true);
+                                    break;
+                                }
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            if !recheck_active(&runtime, &link_id).await {
-                                let _ = cancel_tx.send(());
+                            if let Some(code) = recheck_revocation(&runtime, &link_id).await {
+                                reason_c.store(code, Ordering::Release);
+                                let _ = cancel_tx.send(true);
                                 break;
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            let _ = cancel_tx.send(());
+                            reason_c.store(PROXY_REVOCATION_LINK, Ordering::Release);
+                            let _ = cancel_tx.send(true);
                             break;
                         }
                     }
@@ -479,7 +509,7 @@ fn spawn_proxy_ws_revocation_watcher(
             }
         }
     });
-    cancel_rx
+    (cancel_rx, reason)
 }
 
 fn target_authority_host(target: &Url) -> Option<String> {
@@ -617,7 +647,11 @@ pub(crate) async fn handle_peer_proxy(
         }
     }
 
-    // 4. Validate active, compatible peer link metadata from local SQLite.
+    // 4. Subscribe to revocation broadcasts BEFORE loading link/grant state so no concurrent
+    //    revocation between validation and stream start can be missed.
+    let revocation_rx = runtime.subscribe_revocations();
+
+    // Validate active, compatible peer link metadata from local SQLite.
     let id_lookup = link_id.clone();
     let local_server_c = local_server.clone();
     let link = match runtime
@@ -838,18 +872,15 @@ pub(crate) async fn handle_peer_proxy(
         }
     };
 
-    // Subscribe to managing-side link revocations BEFORE opening the upstream WS so revocations
-    // immediately tear down proxied tunnels even if the remote peer is unreachable.
-    let ws_cancel = if is_ws {
-        let rev_rx = runtime.subscribe_revocations();
-        Some(spawn_proxy_ws_revocation_watcher(
-            Arc::clone(&runtime),
-            link.id.clone(),
-            rev_rx,
-        ))
-    } else {
-        None
-    };
+    // Watch managing-side link & grant revocations for ALL proxied requests (both WebSocket
+    // tunnels and non-WS streaming HTTP requests/responses) so revocations abort in-flight streams
+    // and release concurrency permits immediately even if the remote peer is unreachable.
+    let (stream_cancel, revocation_kind) = spawn_proxy_revocation_watcher(
+        Arc::clone(&runtime),
+        link.id.clone(),
+        received_grant.grant_id.clone(),
+        revocation_rx,
+    );
 
     // 9. Resolve trusted request ID from `RequestId` extension (set by `security_headers_middleware`).
     let request_id = req
@@ -939,7 +970,7 @@ pub(crate) async fn handle_peer_proxy(
             StreamProxyUpgradePolicy::Disabled
         },
         guard: Some(permit),
-        ws_cancel,
+        stream_cancel: Some(stream_cancel),
         response_transform: Some(Box::new(move |resp, is_101| {
             sanitize_and_rewrite_peer_response(
                 resp,
@@ -956,6 +987,25 @@ pub(crate) async fn handle_peer_proxy(
             }
             StreamProxyErrorKind::GatewayTimeout => {
                 PeerError::handshake_timeout(&peer_name_err, "peer_proxy", detail).into_response()
+            }
+            StreamProxyErrorKind::Cancelled => {
+                if revocation_kind.load(Ordering::Acquire) == PROXY_REVOCATION_LINK {
+                    PeerError::link_revoked(
+                        &peer_name_err,
+                        "peer_proxy",
+                        format!(
+                            "Peer link '{peer_name_err}' was revoked while request was in flight"
+                        ),
+                    )
+                    .into_response()
+                } else {
+                    PeerError::peer_scope_denied(
+                        &peer_name_err,
+                        "peer_proxy",
+                        format!("Management grant for '{peer_name_err}' was revoked while request was in flight"),
+                    )
+                    .into_response()
+                }
             }
         })),
         log_context: format!("peer:{}", link.name),

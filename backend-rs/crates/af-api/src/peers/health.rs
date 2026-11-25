@@ -89,6 +89,13 @@ pub fn evaluate_compatibility(
     }
 }
 
+fn deserialize_double_option_i64<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 struct RemoteHealthPayload {
     #[serde(default)]
@@ -99,6 +106,10 @@ struct RemoteHealthPayload {
     capabilities: Vec<String>,
     #[serde(default)]
     transcode: Option<af_transcode::TranscodeCapabilities>,
+    /// Distinguishes an absent key (`None`, older peers) from explicit `null` (`Some(None)`,
+    /// remote has no active inbound grant) and an active generation (`Some(Some(g))`).
+    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
+    inbound_grant_generation: Option<Option<i64>>,
 }
 
 /// Spawns the 15-second peer health and pending-expiry background loop.
@@ -151,18 +162,19 @@ pub(crate) async fn run_health_tick(runtime: &Arc<PeerRuntime>) {
         return;
     }
 
-    // Ensure listener is running once an identity exists.
+    // Ensure listener is running and transcode dispatcher recovers from transient boot errors once
+    // an identity exists.
     if identity.is_some() {
         if let Err(error) = runtime.ensure_listener_started().await {
             tracing::warn!(%error, "Peer tunnel listener is not yet bound");
         }
+        super::transcode::reconcile_dispatcher_if_configured(runtime).await;
     }
 
-    // Always clean up expired pending attempts/links, retry any durable revoked-grant
-    // credential deletions, and prune transcode job history older than 7 days.
+    // Always clean up expired pending attempts/links and retry any durable revoked-grant
+    // credential deletions.
     pairing::cleanup_expired_pending(runtime).await;
     super::grants::cleanup_pending_received_grant_credentials(runtime).await;
-    let _ = super::transcode::prune_old_transcode_jobs(runtime).await;
 
     // Reload links after pending/revocation cleanup and filter to checkable active/down links.
     let checkable_links: Vec<PeerLink> = runtime
@@ -298,9 +310,13 @@ pub(crate) async fn check_single_link(
                 return;
             };
             let remote_transcode = parsed.transcode.clone();
+            let remote_inbound_grant_gen = parsed.inbound_grant_generation;
             let committed_healthy =
                 commit_link_healthy(runtime, &link, parsed, rtt_ms, &commit_now_rfc).await;
             if committed_healthy {
+                if remote_inbound_grant_gen == Some(None) {
+                    super::grants::reconcile_missing_remote_grant(runtime, &link).await;
+                }
                 if let Some(transcode_caps) = remote_transcode {
                     super::transcode::handle_remote_health_transcode_caps(
                         runtime,

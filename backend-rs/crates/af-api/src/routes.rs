@@ -291,14 +291,14 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         .map(str::to_string);
 
     tracing::Span::current().record("request_id", req_id_str.as_str());
-    req.extensions_mut().insert(RequestId(req_id_str));
+    req.extensions_mut().insert(RequestId(req_id_str.clone()));
     req.headers_mut()
         .insert("X-Request-ID", req_id_header.clone());
 
     let is_plugin_ui = !req_path.starts_with("/api/v1/peers/")
         && req_path.contains("/plugins/")
         && req_path.ends_with("/ui");
-    let mut resp = next.run(req).await;
+    let mut resp = af_runner::with_runner_request_id(req_id_str, next.run(req)).await;
     let is_plugin_proxy = resp.extensions().get::<ProxiedPluginResponse>().is_some();
     let is_openapi_viewer = (req_path.starts_with("/api/v1/public/swagger/")
         || req_path.starts_with("/api/public/swagger/"))

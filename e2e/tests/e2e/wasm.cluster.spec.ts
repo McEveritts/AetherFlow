@@ -88,13 +88,17 @@ test('pairing shows the typed recovery action and preserves the pairing string',
   await page.route(`**${peerApi}/pair`, async route => {
     expect(route.request().method()).toBe('POST');
     expect(route.request().postDataJSON()).toMatchObject({ pairing_string: pairingString });
-    await route.fulfill({ status: 410, json: {
-      code: 'CODE_EXPIRED',
-      server: 'peer.example.test',
-      step: 'public_pairing_request',
-      message: 'The pairing code has expired.',
-      action: 'Open a new pairing window on the peer and try again.',
-    } });
+    await route.fulfill({
+      status: 410,
+      headers: { 'X-Request-ID': 'req-pair-hdr-410' },
+      json: {
+        code: 'CODE_EXPIRED',
+        server: 'peer.example.test',
+        step: 'public_pairing_request',
+        message: 'The pairing code has expired.',
+        action: 'Open a new pairing window on the peer and try again.',
+      },
+    });
   });
 
   await page.goto('/?tab=cluster');
@@ -104,6 +108,7 @@ test('pairing shows the typed recovery action and preserves the pairing string',
   await pairingInput.fill(pairingString);
   await dialog.getByRole('button', { name: /^(pair|start pairing)$/i }).click();
   await expect(dialog.getByText('Open a new pairing window on the peer and try again.')).toBeVisible();
+  await expect(dialog.getByTestId('peer-error-request-id')).toHaveText('Request ID: req-pair-hdr-410');
   await expect(pairingInput).toHaveValue(pairingString);
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
@@ -111,6 +116,7 @@ test('pairing shows the typed recovery action and preserves the pairing string',
   await page.getByRole('button', { name: 'Pair with a server' }).click();
   await expect(pairingInput).toHaveValue('');
   await expect(dialog.getByText('Open a new pairing window on the peer and try again.')).toHaveCount(0);
+  await expect(dialog.getByTestId('peer-error-request-id')).toHaveCount(0);
 });
 
 test('shows the comparison code only while the initiated pairing is pending', async ({ page }) => {
@@ -1084,12 +1090,14 @@ test('grant editor retains form draft on typed PeerError and blocks all-none sav
       if (putCalls === 1) {
         await route.fulfill({
           status: 502,
+          headers: { 'X-Request-ID': 'req-grant-hdr-ignored' },
           json: {
             code: 'LINK_DOWN',
             server: 'Media server',
             step: 'deliver_grant_token',
             message: 'Could not deliver grant token to Media server.',
             action: 'Confirm UDP 51821 connectivity and retry saving.',
+            request_id: 'req-grant-body-502',
           },
         });
         return;
@@ -1120,6 +1128,7 @@ test('grant editor retains form draft on typed PeerError and blocks all-none sav
 
   await expect(dialog.getByText('Could not deliver grant token to Media server.')).toBeVisible();
   await expect(dialog.getByText('Confirm UDP 51821 connectivity and retry saving.')).toBeVisible();
+  await expect(dialog.getByTestId('peer-error-request-id')).toHaveText('Request ID: req-grant-body-502');
   await expect(dialog.locator('#cluster-grant-area-services')).toHaveValue('read');
   await expect(dialog.locator('#cluster-grant-area-files')).toHaveValue('write');
   await expect(dialog.locator('#cluster-grant-area-transcoding')).toHaveValue('write');
@@ -1849,6 +1858,7 @@ test('storage keeps stored exports and mounts manageable when remote catalog is 
             step: 'list_remote_exports',
             message: 'Remote export catalog is unreachable.',
             action: 'Verify WireGuard connectivity on UDP 51821 and retry.',
+            request_id: 'req-catalog-body-77',
           },
         },
       });
@@ -1898,6 +1908,7 @@ test('storage keeps stored exports and mounts manageable when remote catalog is 
   await expect(dialog.getByTestId('cluster-storage-latency-warning')).toContainText('68.5 ms');
   await expect(dialog.getByTestId('cluster-storage-catalog-error')).toContainText('Remote export catalog is unreachable.');
   await expect(dialog.getByTestId('cluster-storage-catalog-error')).toContainText('Verify WireGuard connectivity on UDP 51821 and retry.');
+  await expect(dialog.getByTestId('cluster-storage-catalog-error').getByTestId('peer-error-request-id')).toHaveText('Request ID: req-catalog-body-77');
 
   // Retrying remote catalog re-fetches /mounts without losing stored mounts.
   const retriesBefore = catalogRetryCount;

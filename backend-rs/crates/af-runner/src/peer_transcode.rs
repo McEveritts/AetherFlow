@@ -22,8 +22,9 @@ use crate::peer_network::{
     PEER_WG_SERVICE_UNIT,
 };
 use crate::peer_storage::{
-    systemd_escape_path, validate_peer_storage_link_id, DEFAULT_PEER_EXPORTS_DIR,
-    DEFAULT_PEER_MOUNTS_ROOT, DEFAULT_PEER_SYSTEMD_DIR, PEER_MANAGED_HEADER,
+    systemd_escape_path, validate_peer_mount_segment, validate_peer_storage_link_id,
+    DEFAULT_PEER_EXPORTS_DIR, DEFAULT_PEER_MOUNTS_ROOT, DEFAULT_PEER_SYSTEMD_DIR,
+    PEER_MANAGED_HEADER,
 };
 use af_models::RunnerResponse;
 use axum::body::Body;
@@ -34,7 +35,7 @@ use axum::{Extension, Json};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::ffi::{CString, OsStr, OsString};
 use std::fmt;
@@ -47,7 +48,9 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{
+    Mutex as TokioMutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
+};
 use tokio::time::Instant;
 
 #[cfg(test)]
@@ -65,14 +68,22 @@ pub const DEFAULT_JELLYFIN_TMP_DIR: &str = "/var/cache/jellyfin/af-tmp";
 pub const DEFAULT_JELLYFIN_CACHE_DIR: &str = "/var/cache/jellyfin";
 pub const DEFAULT_DISPATCHER_RUNTIME_DIR: &str = "/run/aetherflow-transcode";
 pub const DEFAULT_WORKER_RUNTIME_DIR: &str = "/run/aetherflow-transcode-worker";
+pub const DEFAULT_TRANSCODE_ENV_FILE: &str = "/etc/aetherflow/transcode.env";
 pub const PEER_TRANSCODE_WORKER_UNIT: &str = "af-transcode-worker.service";
 pub const JELLYFIN_TRANSCODE_DROPIN_NAME: &str = "20-aetherflow-transcode.conf";
 pub const API_TRANSCODE_DROPIN_NAME: &str = "20-aetherflow-transcode.conf";
+pub const RUNNER_TRANSCODE_DROPIN_NAME: &str = "20-aetherflow-transcode.conf";
+pub const WORKER_TRANSCODE_PATHS_DROPIN_NAME: &str = "30-aetherflow-transcode-paths.conf";
+pub const TRANSCODE_API_RESTART_UNIT: &str = "aetherflow-transcode-api-restart";
 
 pub const DEFAULT_TMPFILES_DIR: &str = "/etc/tmpfiles.d";
 pub const TRANSCODE_TMPFILES_CONF_NAME: &str = "aetherflow-transcode.conf";
 pub const JELLYFIN_SERVICE_UNIT: &str = "jellyfin.service";
 pub const API_SERVICE_UNIT: &str = "aetherflow-api.service";
+pub const RUNNER_SERVICE_UNIT: &str = "aetherflow-runner.service";
+
+const TRANSCODE_MOUNT_PURPOSE_HEADER: &str = "# AetherFlow-Peer-Purpose: transcode";
+const TRANSCODE_BIND_PURPOSE_HEADER: &str = "# AetherFlow-Peer-Purpose: transcode-bind";
 
 const DEFAULT_WORKER_SOCKET_PATH: &str = "/run/aetherflow-transcode-worker/worker.sock";
 const DEFAULT_WORKER_SOCKET_MODE_STR: &str = "0660";
@@ -107,8 +118,12 @@ pub fn client_timeout_for_request(req: &PeerTranscodeRequest) -> Duration {
 }
 
 type PeerTranscodeLockMap = HashMap<PathBuf, Arc<RwLock<()>>>;
+type PeerTranscodeUnitLockMap = HashMap<(PathBuf, String), Arc<TokioMutex<()>>>;
 
 static PEER_TRANSCODE_LOCKS: Lazy<StdMutex<PeerTranscodeLockMap>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+
+static PEER_TRANSCODE_UNIT_LOCKS: Lazy<StdMutex<PeerTranscodeUnitLockMap>> =
     Lazy::new(|| StdMutex::new(HashMap::new()));
 
 fn peer_transcode_lock_for(state_dir: &Path) -> Arc<RwLock<()>> {
@@ -117,6 +132,15 @@ fn peer_transcode_lock_for(state_dir: &Path) -> Arc<RwLock<()>> {
         .unwrap_or_else(|e| e.into_inner());
     map.entry(state_dir.to_path_buf())
         .or_insert_with(|| Arc::new(RwLock::new(())))
+        .clone()
+}
+
+fn peer_transcode_unit_lock_for(state_dir: &Path, unit_name: &str) -> Arc<TokioMutex<()>> {
+    let mut map = PEER_TRANSCODE_UNIT_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.entry((state_dir.to_path_buf(), unit_name.to_string()))
+        .or_insert_with(|| Arc::new(TokioMutex::new(())))
         .clone()
 }
 
@@ -159,6 +183,8 @@ pub enum PeerTranscodeRequest {
         to: String,
         #[serde(default)]
         writable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calling_link_segment: Option<String>,
     },
     RemoveBindMedia {
         to: String,
@@ -598,7 +624,17 @@ const FORBIDDEN_SYSTEM_PREFIXES: &[&str] = &[
     "/usr",
     "/var/lib/aetherflow",
     "/var/run",
+    "/var/spool",
     "/opt/AetherFlow",
+];
+
+const DEFAULT_BIND_MEDIA_ROOTS: &[&str] = &[
+    "/mnt",
+    "/media",
+    "/srv",
+    "/downloads",
+    "/data",
+    "/var/lib/jellyfin",
 ];
 
 const FORBIDDEN_EXACT_PATHS: &[&str] = &[
@@ -612,6 +648,118 @@ const FORBIDDEN_EXACT_PATHS: &[&str] = &[
     "/var/lib",
     "/var/cache",
 ];
+
+fn is_under_peer_mounts_root(path: &str) -> bool {
+    path == DEFAULT_PEER_MOUNTS_ROOT
+        || path
+            .strip_prefix(DEFAULT_PEER_MOUNTS_ROOT)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn is_strict_descendant_path(child: &str, ancestor: &str) -> bool {
+    if child == ancestor {
+        return false;
+    }
+    if ancestor == "/" {
+        return child.starts_with('/');
+    }
+    child
+        .strip_prefix(ancestor)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn has_sensitive_dot_segment(path: &str) -> bool {
+    path.split('/').skip(1).any(|seg| seg == ".ssh")
+}
+
+/// Extracts and validates `(link_segment, export_segment)` from a canonical path under
+/// `/mnt/af-peers/<link>/<export>(/...)`.
+fn extract_peer_mount_segments(path: &str) -> Result<(String, String), PeerTranscodeError> {
+    let Some(rest) = path.strip_prefix(&format!("{DEFAULT_PEER_MOUNTS_ROOT}/")) else {
+        return Err(PeerTranscodeError::InvalidInput(format!(
+            "Peer mount path '{path}' must lie under {DEFAULT_PEER_MOUNTS_ROOT}/<link>/<export>"
+        )));
+    };
+    let mut parts = rest.split('/');
+    let link_seg = parts.next().unwrap_or("");
+    let export_seg = parts.next().unwrap_or("");
+    if link_seg.is_empty() || export_seg.is_empty() {
+        return Err(PeerTranscodeError::InvalidInput(format!(
+            "Peer mount path '{path}' must specify <link>/<export>"
+        )));
+    }
+    validate_peer_mount_segment(link_seg)
+        .map_err(|err| PeerTranscodeError::InvalidInput(err.to_string()))?;
+    validate_peer_mount_segment(export_seg)
+        .map_err(|err| PeerTranscodeError::InvalidInput(err.to_string()))?;
+    Ok((link_seg.to_string(), export_seg.to_string()))
+}
+
+/// Derives the backing NFS `.mount` unit for a bind source under `/mnt/af-peers/<link>/<export>`
+/// using the first 4 path components (`/mnt/af-peers/<link>/<export>`). Returns `Ok(None)` for
+/// local-directory sources outside `/mnt/af-peers/`.
+fn derive_backing_peer_nfs_mount_unit(from: &str) -> Result<Option<String>, PeerTranscodeError> {
+    if !is_under_peer_mounts_root(from) {
+        return Ok(None);
+    }
+    let (link_seg, export_seg) = extract_peer_mount_segments(from)?;
+    let backing_path = format!("{DEFAULT_PEER_MOUNTS_ROOT}/{link_seg}/{export_seg}");
+    Ok(Some(derive_systemd_mount_unit(&backing_path)?))
+}
+
+/// Prunes child export paths ONLY when they are a strict descendant of another exported path in
+/// the same request AND share the exact same `st_dev` as their nearest kept ancestor.
+/// Separate-filesystem children (differing `st_dev`) are always preserved.
+fn prune_same_device_descendant_exports(paths_with_dev: &[(String, u64)]) -> Vec<String> {
+    let mut kept: Vec<(String, u64)> = Vec::with_capacity(paths_with_dev.len());
+    for (path, dev) in paths_with_dev {
+        let nearest_ancestor = kept
+            .iter()
+            .filter(|(ancestor, _)| is_strict_descendant_path(path, ancestor))
+            .max_by_key(|(ancestor, _)| ancestor.len());
+        let covered_by_same_fs_ancestor =
+            nearest_ancestor.is_some_and(|(_, anc_dev)| *anc_dev == *dev);
+        if !covered_by_same_fs_ancestor {
+            kept.push((path.clone(), *dev));
+        }
+    }
+    kept.into_iter().map(|(p, _)| p).collect()
+}
+
+fn normalize_allowed_root_entry(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('/') || trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    let normalized = if trimmed.len() > 1 {
+        trimmed.trim_end_matches('/')
+    } else {
+        trimmed
+    };
+    if normalized == "/" || normalized.contains("//") {
+        return None;
+    }
+    if normalized
+        .split('/')
+        .skip(1)
+        .any(|s| s.is_empty() || s == "." || s == "..")
+    {
+        return None;
+    }
+    Some(normalized.to_string())
+}
+
+fn parse_allowed_bind_media_roots_env(raw: Option<&str>) -> Option<Vec<String>> {
+    let env_val = raw?.trim();
+    if env_val.is_empty() {
+        return None;
+    }
+    let roots: Vec<String> = env_val
+        .split(',')
+        .filter_map(normalize_allowed_root_entry)
+        .collect();
+    Some(roots)
+}
 
 fn validate_canonical_path_syntax(
     path: &str,
@@ -739,6 +887,87 @@ fn escape_systemd_specifiers(value: &str) -> String {
     value.replace('%', "%%")
 }
 
+fn unescape_systemd_specifiers(value: &str) -> String {
+    value.replace("%%", "%")
+}
+
+fn format_systemd_rw_path_token(path: &str) -> String {
+    let escaped = escape_systemd_specifiers(path);
+    if escaped.contains(' ') || escaped.contains('\t') {
+        format!("\"-{escaped}\"")
+    } else {
+        format!("-{escaped}")
+    }
+}
+
+/// Parses a managed `.mount` unit file (with `PEER_MANAGED_HEADER`) and returns `Some(where_path)`
+/// if it contributes a writable path to `af-transcode-worker.service`'s `ReadWritePaths=`:
+/// - `# AetherFlow-Peer-Purpose: transcode` (always writable NFS transcode mount), or
+/// - `# AetherFlow-Peer-Purpose: transcode-bind` when `Options=` includes `rw`.
+fn extract_managed_worker_rw_path(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    if !text.starts_with(PEER_MANAGED_HEADER) {
+        return None;
+    }
+    let mut is_transcode_mount = false;
+    let mut is_transcode_bind = false;
+    let mut where_path: Option<String> = None;
+    let mut options_rw = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == TRANSCODE_MOUNT_PURPOSE_HEADER {
+            is_transcode_mount = true;
+        } else if trimmed == TRANSCODE_BIND_PURPOSE_HEADER {
+            is_transcode_bind = true;
+        } else if let Some(val) = trimmed.strip_prefix("Where=") {
+            let unescaped = unescape_systemd_specifiers(val.trim());
+            if !unescaped.is_empty() && !unescaped.chars().any(char::is_control) {
+                where_path = Some(unescaped);
+            }
+        } else if let Some(val) = trimmed.strip_prefix("Options=") {
+            options_rw = val.split(',').any(|opt| opt.trim() == "rw");
+        }
+    }
+
+    if is_transcode_mount || (is_transcode_bind && options_rw) {
+        where_path
+    } else {
+        None
+    }
+}
+
+fn is_managed_bind_unit_for_path(bytes: &[u8], expected_where: &str) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    if !text.starts_with(PEER_MANAGED_HEADER) {
+        return false;
+    }
+    let mut has_bind_purpose = false;
+    let mut where_matches = false;
+    let escaped_expected = escape_systemd_specifiers(expected_where);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == TRANSCODE_BIND_PURPOSE_HEADER {
+            has_bind_purpose = true;
+        } else if let Some(val) = trimmed.strip_prefix("Where=") {
+            if val.trim() == escaped_expected {
+                where_matches = true;
+            }
+        }
+    }
+    has_bind_purpose && where_matches
+}
+
+fn has_managed_purpose(bytes: &[u8], expected_purpose_header: &str) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    text.starts_with(PEER_MANAGED_HEADER)
+        && text.lines().any(|l| l.trim() == expected_purpose_header)
+}
+
 /// Validates a parity test output filename strictly matching `^\.af-parity-[0-9a-f]{32}\.ts$`.
 fn validate_parity_file_name(file_name: &str) -> Result<(), PeerTranscodeError> {
     const PREFIX: &str = ".af-parity-";
@@ -855,25 +1084,53 @@ fn render_tmpfiles_conf() -> String {
     )
 }
 
-fn render_api_transcode_dropin() -> String {
+fn render_default_transcode_env_file() -> &'static str {
+    "# AetherFlow distributed transcoding configuration (secret-free).\n\
+     # Loaded by af-transcode-worker.service, jellyfin.service, aetherflow-api.service,\n\
+     # and aetherflow-runner.service. Never place API keys, tokens, or secrets in this file.\n\
+     #\n\
+     # Override the real ffmpeg binary executed by the shim and worker:\n\
+     # AF_TRANSCODE_REAL_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg\n\
+     #\n\
+     # Override the maximum concurrent transcode jobs allowed on this worker (1..=64):\n\
+     # AF_TRANSCODE_WORKER_MAX_JOBS=8\n"
+}
+
+fn render_api_transcode_dropin(transcode_env_path: &str) -> String {
+    let escaped_env = escape_systemd_specifiers(transcode_env_path);
     format!(
         "{PEER_MANAGED_HEADER}\n\
          [Service]\n\
+         EnvironmentFile=-{escaped_env}\n\
          SupplementaryGroups=jellyfin\n\
          ReadWritePaths=-{DEFAULT_DISPATCHER_RUNTIME_DIR} -{DEFAULT_WORKER_RUNTIME_DIR}\n"
     )
 }
 
-fn render_jellyfin_transcode_dropin() -> String {
+fn render_runner_transcode_dropin(transcode_env_path: &str) -> String {
+    let escaped_env = escape_systemd_specifiers(transcode_env_path);
     format!(
         "{PEER_MANAGED_HEADER}\n\
          [Service]\n\
+         EnvironmentFile=-{escaped_env}\n"
+    )
+}
+
+fn render_jellyfin_transcode_dropin(transcode_env_path: &str) -> String {
+    let escaped_env = escape_systemd_specifiers(transcode_env_path);
+    format!(
+        "{PEER_MANAGED_HEADER}\n\
+         [Service]\n\
+         EnvironmentFile=-{escaped_env}\n\
          Environment=JELLYFIN_FFMPEG={DEFAULT_TRANSCODE_SHIM_PATH}\n\
          Environment=TMPDIR={DEFAULT_JELLYFIN_TMP_DIR}\n"
     )
 }
 
-fn render_worker_service_unit(binary_path: &Path) -> Result<String, PeerTranscodeError> {
+fn render_worker_service_unit(
+    binary_path: &Path,
+    transcode_env_path: &str,
+) -> Result<String, PeerTranscodeError> {
     let bin_str = binary_path.to_string_lossy();
     if bin_str.is_empty() || bin_str.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err(PeerTranscodeError::InvalidInput(
@@ -881,7 +1138,18 @@ fn render_worker_service_unit(binary_path: &Path) -> Result<String, PeerTranscod
                 .to_string(),
         ));
     }
+    if transcode_env_path.is_empty()
+        || transcode_env_path
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err(PeerTranscodeError::InvalidInput(
+            "Transcode environment file path must not be empty or contain whitespace or control characters"
+                .to_string(),
+        ));
+    }
     let escaped_bin = escape_systemd_specifiers(&bin_str);
+    let escaped_env = escape_systemd_specifiers(transcode_env_path);
     Ok(format!(
         "{PEER_MANAGED_HEADER}\n\
          [Unit]\n\
@@ -896,16 +1164,46 @@ fn render_worker_service_unit(binary_path: &Path) -> Result<String, PeerTranscod
          SupplementaryGroups=render video\n\
          RuntimeDirectory=aetherflow-transcode-worker\n\
          RuntimeDirectoryMode=0750\n\
+         WorkingDirectory={DEFAULT_WORKER_RUNTIME_DIR}\n\
+         EnvironmentFile=-{escaped_env}\n\
          Environment=AF_TRANSCODE_WORKER_SOCK={DEFAULT_WORKER_SOCKET_PATH}\n\
          Environment=AF_TRANSCODE_WORKER_SOCKET_MODE={DEFAULT_WORKER_SOCKET_MODE_STR}\n\
          ExecStart={escaped_bin} worker\n\
          Restart=on-failure\n\
          RestartSec=2\n\
          NoNewPrivileges=yes\n\
+         PrivateNetwork=yes\n\
+         RestrictAddressFamilies=AF_UNIX\n\
+         ProtectSystem=strict\n\
+         ProtectHome=read-only\n\
+         DevicePolicy=closed\n\
+         DeviceAllow=char-drm rw\n\
+         DeviceAllow=/dev/dri rw\n\
+         DeviceAllow=char-nvidia-frontend rw\n\
+         DeviceAllow=char-nvidia-uvm rw\n\
+         DeviceAllow=char-nvidia-caps rw\n\
+         DeviceAllow=/dev/nvidiactl rw\n\
+         DeviceAllow=/dev/nvidia-modeset rw\n\
+         DeviceAllow=/dev/nvidia-uvm rw\n\
+         DeviceAllow=/dev/nvidia-uvm-tools rw\n\
+         ReadWritePaths=-{DEFAULT_WORKER_RUNTIME_DIR} -{DEFAULT_JELLYFIN_CACHE_DIR}\n\
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n"
     ))
+}
+
+fn render_worker_transcode_paths_dropin(paths: &BTreeSet<String>) -> String {
+    let tokens: Vec<String> = paths
+        .iter()
+        .map(|p| format_systemd_rw_path_token(p))
+        .collect();
+    format!(
+        "{PEER_MANAGED_HEADER}\n\
+         [Service]\n\
+         ReadWritePaths={}\n",
+        tokens.join(" ")
+    )
 }
 
 fn render_transcode_exports_file(
@@ -942,7 +1240,7 @@ fn render_transcode_nfs_mount_unit(link_id: &str, tunnel_ip: IpAddr, path: &str)
     format!(
         "{PEER_MANAGED_HEADER}\n\
          # AetherFlow-Peer-Link: {link_id}\n\
-         # AetherFlow-Peer-Purpose: transcode\n\
+         {TRANSCODE_MOUNT_PURPOSE_HEADER}\n\
          [Unit]\n\
          Description=AetherFlow Peer Transcode NFS Mount ({desc_path})\n\
          Requires={PEER_WG_SERVICE_UNIT}\n\
@@ -965,18 +1263,28 @@ fn render_transcode_nfs_mount_unit(link_id: &str, tunnel_ip: IpAddr, path: &str)
     )
 }
 
-fn render_bind_media_mount_unit(from: &str, to: &str, writable: bool) -> String {
+fn render_bind_media_mount_unit(
+    from: &str,
+    to: &str,
+    writable: bool,
+    backing_mount_unit: Option<&str>,
+) -> String {
     let rw_mode = if writable { "rw" } else { "ro" };
     let options = format!("bind,{rw_mode},nosuid,nodev");
     let desc_path = escape_systemd_specifiers(to);
     let what_escaped = escape_systemd_specifiers(from);
     let where_escaped = escape_systemd_specifiers(to);
+    let backing_deps = match backing_mount_unit {
+        Some(unit) => format!("BindsTo={unit}\nAfter={unit}\n"),
+        None => String::new(),
+    };
     format!(
         "{PEER_MANAGED_HEADER}\n\
-         # AetherFlow-Peer-Purpose: transcode-bind\n\
+         {TRANSCODE_BIND_PURPOSE_HEADER}\n\
          [Unit]\n\
          Description=AetherFlow Peer Transcode Bind Mount ({desc_path})\n\
          After=local-fs.target\n\
+         {backing_deps}\
          \n\
          [Mount]\n\
          What={what_escaped}\n\
@@ -1334,6 +1642,8 @@ pub struct PeerTranscodePathsConfig {
     pub systemd_dir: PathBuf,
     pub exports_dir: PathBuf,
     pub state_dir: PathBuf,
+    pub transcode_env_file: PathBuf,
+    pub extra_bind_media_roots: Vec<PathBuf>,
     pub transcode_bin_override: Option<PathBuf>,
     pub real_ffprobe_override: Option<PathBuf>,
     pub tunnel_cidr: String,
@@ -1359,6 +1669,8 @@ impl Default for PeerTranscodePathsConfig {
             systemd_dir: PathBuf::from(DEFAULT_PEER_SYSTEMD_DIR),
             exports_dir: PathBuf::from(DEFAULT_PEER_EXPORTS_DIR),
             state_dir: PathBuf::from(DEFAULT_PEER_STATE_DIR),
+            transcode_env_file: PathBuf::from(DEFAULT_TRANSCODE_ENV_FILE),
+            extra_bind_media_roots: Vec::new(),
             transcode_bin_override: None,
             real_ffprobe_override: None,
             tunnel_cidr: DEFAULT_PEER_TUNNEL_CIDR.to_string(),
@@ -1403,6 +1715,8 @@ impl PeerTranscodePathsConfig {
             systemd_dir: root.join(DEFAULT_PEER_SYSTEMD_DIR.trim_start_matches('/')),
             exports_dir: root.join(DEFAULT_PEER_EXPORTS_DIR.trim_start_matches('/')),
             state_dir: root.join(DEFAULT_PEER_STATE_DIR.trim_start_matches('/')),
+            transcode_env_file: root.join(DEFAULT_TRANSCODE_ENV_FILE.trim_start_matches('/')),
+            extra_bind_media_roots: Vec::new(),
             transcode_bin_override: None,
             real_ffprobe_override: None,
             tunnel_cidr: DEFAULT_PEER_TUNNEL_CIDR.to_string(),
@@ -1422,6 +1736,8 @@ pub struct PeerTranscodeManager {
     config: PeerTranscodePathsConfig,
     tunnel_cidr: TranscodeTunnelCidr,
     runner: Arc<dyn CommandRunner>,
+    #[cfg(test)]
+    st_dev_overrides: HashMap<String, u64>,
 }
 
 impl fmt::Debug for PeerTranscodeManager {
@@ -1462,7 +1778,15 @@ impl PeerTranscodeManager {
             config,
             tunnel_cidr,
             runner,
+            #[cfg(test)]
+            st_dev_overrides: HashMap::new(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_st_dev_overrides(mut self, overrides: HashMap<String, u64>) -> Self {
+        self.st_dev_overrides = overrides;
+        self
     }
 
     pub fn config(&self) -> &PeerTranscodePathsConfig {
@@ -2227,8 +2551,163 @@ impl PeerTranscodeManager {
             .unwrap_or_else(|| DEFAULT_JELLYFIN_TRANSCODE_DIR.to_string()))
     }
 
+    async fn acquire_unit_locks(
+        &self,
+        unit_names: &[&str],
+    ) -> Result<Vec<OwnedMutexGuard<()>>, PeerTranscodeError> {
+        const BUSY: &str =
+            "Another operation on the same peer transcode unit is in progress; retry shortly";
+        let sorted: BTreeSet<&str> = unit_names.iter().copied().collect();
+        let deadline = Instant::now() + self.config.lock_timeout;
+        let mut guards = Vec::with_capacity(sorted.len());
+        for unit in sorted {
+            let lock = peer_transcode_unit_lock_for(&self.config.state_dir, unit);
+            let guard = tokio::time::timeout_at(deadline, lock.lock_owned())
+                .await
+                .map_err(|_| PeerTranscodeError::Busy(BUSY.to_string()))?;
+            guards.push(guard);
+        }
+        Ok(guards)
+    }
+
+    async fn acquire_unit_lock(
+        &self,
+        unit_name: &str,
+    ) -> Result<OwnedMutexGuard<()>, PeerTranscodeError> {
+        let mut guards = self.acquire_unit_locks(&[unit_name]).await?;
+        guards.pop().ok_or_else(|| {
+            PeerTranscodeError::Runtime("Failed acquiring peer transcode unit lock".to_string())
+        })
+    }
+
+    fn transcode_env_logical_path(&self) -> Result<String, PeerTranscodeError> {
+        let logical = self.logical_path(&self.config.transcode_env_file);
+        if logical.is_empty()
+            || !logical.starts_with('/')
+            || logical.chars().any(|c| c.is_control() || c.is_whitespace())
+        {
+            return Err(PeerTranscodeError::InvalidInput(format!(
+                "Invalid transcode environment file path '{logical}'"
+            )));
+        }
+        Ok(logical)
+    }
+
+    /// Idempotently creates the secret-free transcode environment file (default
+    /// `/etc/aetherflow/transcode.env`, `0640 root:jellyfin` when root and `jellyfin` group
+    /// exists, else `0640`) if it does not already exist. Never overwrites operator edits and
+    /// refuses symlinks or hard-linked targets.
+    pub fn ensure_transcode_env_file(&self) -> Result<bool, PeerTranscodeError> {
+        let env_path = &self.config.transcode_env_file;
+        let _ = self.transcode_env_logical_path()?;
+        let Some(parent) = env_path.parent() else {
+            return Err(PeerTranscodeError::InvalidInput(format!(
+                "Transcode environment file '{}' has no parent directory",
+                env_path.display()
+            )));
+        };
+        let Some(file_name) = env_path.file_name() else {
+            return Err(PeerTranscodeError::InvalidInput(format!(
+                "Transcode environment file '{}' has no filename",
+                env_path.display()
+            )));
+        };
+
+        let parent_dir = self.ensure_system_dir(parent, 0o755, 0o6022)?;
+        match entry_at(parent_dir.file(), file_name) {
+            Ok(st) => {
+                if (st.st_mode & libc::S_IFMT) != libc::S_IFREG || st.st_nlink != 1 {
+                    return Err(PeerTranscodeError::Conflict(format!(
+                        "Refusing symlink, non-regular, or hard-linked transcode env file '{}'",
+                        env_path.display()
+                    )));
+                }
+                return Ok(false);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(PeerTranscodeError::Runtime(format!(
+                    "Cannot stat transcode env file '{}': {err}",
+                    env_path.display()
+                )));
+            }
+        }
+
+        let tmp_name = format!(".af-transcode-env.tmp.{}", uuid::Uuid::new_v4().simple());
+        let tmp_os = OsStr::new(&tmp_name);
+        let mut tmp_file = parent_dir
+            .open_file(tmp_os, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)
+            .map_err(|err| {
+                PeerTranscodeError::Runtime(format!(
+                    "Failed creating temporary transcode env file '{}': {err}",
+                    env_path.display()
+                ))
+            })?;
+
+        let parent_fd = parent_dir.file().as_raw_fd();
+        let jellyfin_gid = self.resolve_jellyfin_gid();
+        let mut appeared_concurrently = false;
+        let write_res = (|| -> std::io::Result<()> {
+            tmp_file.write_all(render_default_transcode_env_file().as_bytes())?;
+            if running_as_root() {
+                let target_gid = jellyfin_gid.unwrap_or(0);
+                if unsafe { libc::fchown(tmp_file.as_raw_fd(), 0, target_gid) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if unsafe { libc::fchmod(tmp_file.as_raw_fd(), 0o640) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            tmp_file.sync_all()?;
+            parent_dir.verify()?;
+            verify_entry(parent_dir.file(), tmp_os, &tmp_file, false)?;
+            match entry_at(parent_dir.file(), file_name) {
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(st) if (st.st_mode & libc::S_IFMT) == libc::S_IFREG && st.st_nlink == 1 => {
+                    appeared_concurrently = true;
+                    return Ok(());
+                }
+                _ => {
+                    return Err(std::io::Error::other(
+                        "non-regular transcode env file appeared concurrently",
+                    ));
+                }
+            }
+            if unsafe {
+                libc::renameat(
+                    parent_fd,
+                    c_name(tmp_os)?.as_ptr(),
+                    parent_fd,
+                    c_name(file_name)?.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            parent_dir.verify()?;
+            verify_entry(parent_dir.file(), file_name, &tmp_file, false)?;
+            parent_dir.file().sync_all()
+        })();
+
+        if appeared_concurrently || write_res.is_err() {
+            if let Ok(tmp_c) = c_name(tmp_os) {
+                unsafe {
+                    libc::unlinkat(parent_fd, tmp_c.as_ptr(), 0);
+                }
+            }
+        }
+        write_res.map_err(|err| {
+            PeerTranscodeError::Runtime(format!(
+                "Failed writing transcode env file '{}': {err}",
+                env_path.display()
+            ))
+        })?;
+        Ok(!appeared_concurrently)
+    }
+
     fn ensure_api_transcode_dropin_locked(
         &self,
+        transcode_env_path: &str,
     ) -> Result<(ReceiptDirectory, Option<Vec<u8>>, bool), PeerTranscodeError> {
         let dropin_dir_path = self
             .config
@@ -2237,7 +2716,7 @@ impl PeerTranscodeManager {
         let dropin_dir = self.ensure_system_dir(&dropin_dir_path, 0o755, 0o6022)?;
         let previous =
             self.read_managed_file_checked(&dropin_dir, API_TRANSCODE_DROPIN_NAME, true)?;
-        let rendered = render_api_transcode_dropin();
+        let rendered = render_api_transcode_dropin(transcode_env_path);
         let unchanged = previous
             .as_deref()
             .is_some_and(|prev| prev == rendered.as_bytes());
@@ -2252,6 +2731,276 @@ impl PeerTranscodeManager {
         Ok((dropin_dir, previous, !unchanged))
     }
 
+    fn ensure_runner_transcode_dropin_locked(
+        &self,
+        transcode_env_path: &str,
+    ) -> Result<(ReceiptDirectory, Option<Vec<u8>>, bool), PeerTranscodeError> {
+        let dropin_dir_path = self
+            .config
+            .systemd_dir
+            .join(format!("{RUNNER_SERVICE_UNIT}.d"));
+        let dropin_dir = self.ensure_system_dir(&dropin_dir_path, 0o755, 0o6022)?;
+        let previous =
+            self.read_managed_file_checked(&dropin_dir, RUNNER_TRANSCODE_DROPIN_NAME, true)?;
+        let rendered = render_runner_transcode_dropin(transcode_env_path);
+        let unchanged = previous
+            .as_deref()
+            .is_some_and(|prev| prev == rendered.as_bytes());
+        if !unchanged {
+            self.write_managed_file_atomic(
+                &dropin_dir,
+                RUNNER_TRANSCODE_DROPIN_NAME,
+                rendered.as_bytes(),
+                0o644,
+            )?;
+        }
+        Ok((dropin_dir, previous, !unchanged))
+    }
+
+    fn is_dispatcher_installed_locked(&self) -> Result<bool, PeerTranscodeError> {
+        if let Some(tmpfiles_dir) =
+            self.open_existing_system_dir(&self.config.tmpfiles_dir, 0o6022)?
+        {
+            if entry_at(
+                tmpfiles_dir.file(),
+                OsStr::new(TRANSCODE_TMPFILES_CONF_NAME),
+            )
+            .is_ok()
+            {
+                return Ok(true);
+            }
+        }
+        match ReceiptDirectory::open_existing(&self.config.dispatcher_runtime_dir) {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(err) => Err(PeerTranscodeError::Conflict(format!(
+                "Refusing unsafe dispatcher runtime directory {}: {err}",
+                self.config.dispatcher_runtime_dir.display()
+            ))),
+        }
+    }
+
+    fn is_worker_unit_installed_locked(&self) -> bool {
+        match ReceiptDirectory::open_existing(&self.config.systemd_dir) {
+            Ok(Some(dir)) => self
+                .read_managed_file_checked(&dir, PEER_TRANSCODE_WORKER_UNIT, true)
+                .ok()
+                .flatten()
+                .is_some(),
+            _ => false,
+        }
+    }
+
+    fn collect_managed_worker_rw_paths_locked(
+        &self,
+        systemd_dir: &ReceiptDirectory,
+    ) -> Result<BTreeSet<String>, PeerTranscodeError> {
+        let mut rw_paths = BTreeSet::new();
+        let entries = match fs::read_dir(&self.config.systemd_dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(rw_paths),
+            Err(err) => {
+                return Err(PeerTranscodeError::Runtime(format!(
+                    "Cannot scan systemd directory {}: {err}",
+                    self.config.systemd_dir.display()
+                )));
+            }
+        };
+        for entry_res in entries {
+            let Ok(entry) = entry_res else {
+                continue;
+            };
+            let file_name_os = entry.file_name();
+            let Some(file_name) = file_name_os.to_str() else {
+                continue;
+            };
+            if !file_name.ends_with(".mount") {
+                continue;
+            }
+            if let Ok(Some(bytes)) = self.read_managed_file_checked(systemd_dir, file_name, false) {
+                if let Some(where_path) = extract_managed_worker_rw_path(&bytes) {
+                    rw_paths.insert(where_path);
+                }
+            }
+        }
+        Ok(rw_paths)
+    }
+
+    /// Synchronizes `af-transcode-worker.service.d/30-aetherflow-transcode-paths.conf` from all
+    /// currently managed transcode NFS `.mount` units and writable bind `.mount` units.
+    /// Returns `Ok(true)` if the drop-in was created, updated, or removed.
+    fn sync_worker_transcode_paths_dropin_locked(
+        &self,
+        systemd_dir: &ReceiptDirectory,
+    ) -> Result<bool, PeerTranscodeError> {
+        let rw_paths = self.collect_managed_worker_rw_paths_locked(systemd_dir)?;
+        let dropin_dir_path = self
+            .config
+            .systemd_dir
+            .join(format!("{PEER_TRANSCODE_WORKER_UNIT}.d"));
+        if rw_paths.is_empty() {
+            let Some(dropin_dir) = self.open_existing_system_dir(&dropin_dir_path, 0o6022)? else {
+                return Ok(false);
+            };
+            let removed = self
+                .delete_managed_file_checked(&dropin_dir, WORKER_TRANSCODE_PATHS_DROPIN_NAME)?
+                .is_some();
+            return Ok(removed);
+        }
+        let dropin_dir = self.ensure_system_dir(&dropin_dir_path, 0o755, 0o6022)?;
+        let prev =
+            self.read_managed_file_checked(&dropin_dir, WORKER_TRANSCODE_PATHS_DROPIN_NAME, true)?;
+        let rendered = render_worker_transcode_paths_dropin(&rw_paths);
+        if prev.as_deref() == Some(rendered.as_bytes()) {
+            return Ok(false);
+        }
+        self.write_managed_file_atomic(
+            &dropin_dir,
+            WORKER_TRANSCODE_PATHS_DROPIN_NAME,
+            rendered.as_bytes(),
+            0o644,
+        )?;
+        Ok(true)
+    }
+
+    /// Restarts `af-transcode-worker.service` ONLY if its managed unit is installed AND currently
+    /// active. Callers must NOT hold any mount unit lock when calling this method.
+    async fn maybe_restart_active_worker(&self) -> Result<(), PeerTranscodeError> {
+        let _worker_guard = self.acquire_unit_lock(PEER_TRANSCODE_WORKER_UNIT).await?;
+        let installed = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_read_locks().await?;
+            self.is_worker_unit_installed_locked()
+        };
+        if !installed {
+            return Ok(());
+        }
+        let is_active = match self
+            .run_command_with_timeout(
+                "systemctl",
+                &strings(&["is-active", PEER_TRANSCODE_WORKER_UNIT]),
+                self.config.command_timeout,
+            )
+            .await
+        {
+            Ok(out) => out.success() && out.stdout.trim() == "active",
+            Err(_) => false,
+        };
+        if is_active {
+            let _ = self
+                .run_checked_with_timeout(
+                    "systemctl",
+                    &strings(&["restart", PEER_TRANSCODE_WORKER_UNIT]),
+                    self.config.mount_command_timeout,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Enforces the worker-side allowlist for `MountTranscodeDirs` and `RemoveTranscodeMounts`:
+    /// every path must match one of the worker's own inspected Jellyfin cache/transcode/tmp
+    /// directories OR be a direct subdirectory inside `/var/cache/jellyfin/`.
+    fn validate_worker_transcode_mount_path(
+        &self,
+        canonical_path: &str,
+    ) -> Result<(), PeerTranscodeError> {
+        let configured_temp = self.read_jellyfin_transcoding_temp_path()?;
+        let tmp_dir = self.logical_path(&self.config.jellyfin_tmp_dir);
+        let cache_dir = self.logical_path(&self.config.jellyfin_cache_dir);
+        let exact_allowed = [
+            configured_temp.as_str(),
+            tmp_dir.as_str(),
+            cache_dir.as_str(),
+            DEFAULT_JELLYFIN_CACHE_DIR,
+            DEFAULT_JELLYFIN_TRANSCODE_DIR,
+            DEFAULT_JELLYFIN_TMP_DIR,
+        ];
+        if exact_allowed.contains(&canonical_path) {
+            return Ok(());
+        }
+        if let Some(sub) = canonical_path.strip_prefix(&format!("{DEFAULT_JELLYFIN_CACHE_DIR}/")) {
+            if !sub.is_empty() && !sub.contains('/') && sub != "." && sub != ".." {
+                return Ok(());
+            }
+        }
+        Err(PeerTranscodeError::InvalidInput(format!(
+            "Transcode mount path '{canonical_path}' is outside the worker Jellyfin cache/transcode allowlist"
+        )))
+    }
+
+    /// Enforces the explicit allowlist on controller-holds-media `BindMedia` target paths (`to`
+    /// outside `/mnt/af-peers/`).
+    fn validate_bind_media_target_allowlist(
+        &self,
+        canonical_to: &str,
+    ) -> Result<(), PeerTranscodeError> {
+        if has_sensitive_dot_segment(canonical_to) {
+            return Err(PeerTranscodeError::InvalidInput(format!(
+                "Refusing sensitive bind target path '{canonical_to}'"
+            )));
+        }
+        for extra in &self.config.extra_bind_media_roots {
+            if let Some(norm) = normalize_allowed_root_entry(&extra.to_string_lossy()) {
+                if canonical_to == norm || is_strict_descendant_path(canonical_to, &norm) {
+                    return Ok(());
+                }
+            }
+        }
+        let env_raw = env::var("AF_ALLOWED_FS_ROOTS").ok();
+        if let Some(env_roots) = parse_allowed_bind_media_roots_env(env_raw.as_deref()) {
+            if env_roots
+                .iter()
+                .any(|root| canonical_to == root || is_strict_descendant_path(canonical_to, root))
+            {
+                return Ok(());
+            }
+            return Err(PeerTranscodeError::InvalidInput(format!(
+                "Bind target '{canonical_to}' is outside allowed AF_ALLOWED_FS_ROOTS media roots"
+            )));
+        }
+        if DEFAULT_BIND_MEDIA_ROOTS
+            .iter()
+            .any(|root| is_strict_descendant_path(canonical_to, root))
+        {
+            return Ok(());
+        }
+        Err(PeerTranscodeError::InvalidInput(format!(
+            "Bind target '{canonical_to}' is outside allowed media roots"
+        )))
+    }
+
+    fn dir_has_entries(&self, canonical_abs: &str) -> Result<bool, PeerTranscodeError> {
+        let resolved = self.resolve_host_path(canonical_abs);
+        match fs::read_dir(&resolved) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(PeerTranscodeError::Runtime(format!(
+                "Cannot inspect directory '{canonical_abs}': {err}"
+            ))),
+            Ok(mut iter) => match iter.next() {
+                None => Ok(false),
+                Some(Ok(_)) => Ok(true),
+                Some(Err(err)) => Err(PeerTranscodeError::Runtime(format!(
+                    "Cannot read entries of directory '{canonical_abs}': {err}"
+                ))),
+            },
+        }
+    }
+
+    fn resolve_dir_st_dev(
+        &self,
+        canonical_abs: &str,
+        dir: &ReceiptDirectory,
+    ) -> Result<u64, PeerTranscodeError> {
+        #[cfg(test)]
+        if let Some(&dev) = self.st_dev_overrides.get(canonical_abs) {
+            return Ok(dev);
+        }
+        let meta = dir.file().metadata().map_err(|err| {
+            PeerTranscodeError::Runtime(format!("Cannot stat directory '{canonical_abs}': {err}"))
+        })?;
+        Ok(meta.dev())
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Operations
     // ─────────────────────────────────────────────────────────────────────────
@@ -2260,57 +3009,78 @@ impl PeerTranscodeManager {
     pub async fn inspect_jellyfin_paths(
         &self,
     ) -> Result<JellyfinTranscodePaths, PeerTranscodeError> {
-        let (_mem_guard, _file_lock) = self.acquire_transcode_read_locks().await?;
+        let (
+            transcoding_temp_path,
+            tmp_dir,
+            cache_dir,
+            shim_path,
+            shim_installed,
+            dropin_enabled,
+            worker_unit_installed,
+            jellyfin_uid,
+            jellyfin_gid,
+        ) = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_read_locks().await?;
 
-        let transcoding_temp_path = self.read_jellyfin_transcoding_temp_path()?;
-        let tmp_dir = self.logical_path(&self.config.jellyfin_tmp_dir);
-        let cache_dir = self.logical_path(&self.config.jellyfin_cache_dir);
-        let shim_disk = self.config.shim_dir.join("ffmpeg");
-        let shim_path = self.logical_path(&shim_disk);
+            let transcoding_temp_path = self.read_jellyfin_transcoding_temp_path()?;
+            let tmp_dir = self.logical_path(&self.config.jellyfin_tmp_dir);
+            let cache_dir = self.logical_path(&self.config.jellyfin_cache_dir);
+            let shim_disk = self.config.shim_dir.join("ffmpeg");
+            let shim_path = self.logical_path(&shim_disk);
 
-        let shim_installed = match ReceiptDirectory::open_existing(&self.config.shim_dir) {
-            Ok(Some(dir)) => {
-                let ffmpeg_ok = match entry_at(dir.file(), OsStr::new("ffmpeg")) {
-                    Ok(st) => {
-                        (st.st_mode & libc::S_IFMT) == libc::S_IFREG
-                            && (st.st_mode & 0o111) != 0
-                            && (st.st_mode & 0o002) == 0
-                    }
-                    Err(_) => false,
-                };
-                let ffprobe_ok = match entry_at(dir.file(), OsStr::new("ffprobe")) {
-                    Ok(st) => (st.st_mode & libc::S_IFMT) == libc::S_IFLNK,
-                    Err(_) => false,
-                };
-                ffmpeg_ok && ffprobe_ok
-            }
-            _ => false,
-        };
-
-        let dropin_dir_path = self
-            .config
-            .systemd_dir
-            .join(format!("{JELLYFIN_SERVICE_UNIT}.d"));
-        let dropin_enabled = match ReceiptDirectory::open_existing(&dropin_dir_path) {
-            Ok(Some(dir)) => {
-                match self.read_managed_file_checked(&dir, JELLYFIN_TRANSCODE_DROPIN_NAME, true) {
-                    Ok(Some(bytes)) => std::str::from_utf8(&bytes)
-                        .ok()
-                        .is_some_and(|text| text.contains("Environment=JELLYFIN_FFMPEG=")),
-                    _ => false,
+            let shim_installed = match ReceiptDirectory::open_existing(&self.config.shim_dir) {
+                Ok(Some(dir)) => {
+                    let ffmpeg_ok = match entry_at(dir.file(), OsStr::new("ffmpeg")) {
+                        Ok(st) => {
+                            (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+                                && (st.st_mode & 0o111) != 0
+                                && (st.st_mode & 0o002) == 0
+                        }
+                        Err(_) => false,
+                    };
+                    let ffprobe_ok = match entry_at(dir.file(), OsStr::new("ffprobe")) {
+                        Ok(st) => (st.st_mode & libc::S_IFMT) == libc::S_IFLNK,
+                        Err(_) => false,
+                    };
+                    ffmpeg_ok && ffprobe_ok
                 }
-            }
-            _ => false,
-        };
+                _ => false,
+            };
 
-        let worker_unit_installed = match ReceiptDirectory::open_existing(&self.config.systemd_dir)
-        {
-            Ok(Some(dir)) => self
-                .read_managed_file_checked(&dir, PEER_TRANSCODE_WORKER_UNIT, true)
-                .ok()
-                .flatten()
-                .is_some(),
-            _ => false,
+            let dropin_dir_path = self
+                .config
+                .systemd_dir
+                .join(format!("{JELLYFIN_SERVICE_UNIT}.d"));
+            let dropin_enabled = match ReceiptDirectory::open_existing(&dropin_dir_path) {
+                Ok(Some(dir)) => {
+                    match self.read_managed_file_checked(&dir, JELLYFIN_TRANSCODE_DROPIN_NAME, true)
+                    {
+                        Ok(Some(bytes)) => std::str::from_utf8(&bytes)
+                            .ok()
+                            .is_some_and(|text| text.contains("Environment=JELLYFIN_FFMPEG=")),
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+
+            let worker_unit_installed = self.is_worker_unit_installed_locked();
+            let (jellyfin_uid, jellyfin_gid) = match self.resolve_jellyfin_identity() {
+                Some((u, g)) => (Some(u), Some(g)),
+                None => (None, None),
+            };
+
+            (
+                transcoding_temp_path,
+                tmp_dir,
+                cache_dir,
+                shim_path,
+                shim_installed,
+                dropin_enabled,
+                worker_unit_installed,
+                jellyfin_uid,
+                jellyfin_gid,
+            )
         };
 
         let worker_unit_active = if worker_unit_installed {
@@ -2329,11 +3099,6 @@ impl PeerTranscodeManager {
             false
         };
 
-        let (jellyfin_uid, jellyfin_gid) = match self.resolve_jellyfin_identity() {
-            Some((u, g)) => (Some(u), Some(g)),
-            None => (None, None),
-        };
-
         Ok(JellyfinTranscodePaths {
             transcoding_temp_path,
             tmp_dir,
@@ -2349,112 +3114,188 @@ impl PeerTranscodeManager {
     }
 
     /// Ensures `/run/aetherflow-transcode` (`0750`, `aetherflow:jellyfin` when root),
-    /// `/etc/tmpfiles.d/aetherflow-transcode.conf`, and `aetherflow-api.service.d/20-aetherflow-transcode.conf`.
+    /// `/etc/aetherflow/transcode.env`, `/etc/tmpfiles.d/aetherflow-transcode.conf`,
+    /// `aetherflow-api.service.d/20-aetherflow-transcode.conf`, and
+    /// `aetherflow-runner.service.d/20-aetherflow-transcode.conf`.
     pub async fn ensure_dispatcher_dir(
         &self,
     ) -> Result<TranscodeMutationReport, PeerTranscodeError> {
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
+        let transcode_env_logical = self.transcode_env_logical_path()?;
+        let _unit_guard = self.acquire_unit_lock(API_SERVICE_UNIT).await?;
 
-        // Pre-validate existing managed files before mutating anything.
-        let tmpfiles_dir = self.ensure_system_dir(&self.config.tmpfiles_dir, 0o755, 0o6022)?;
-        let prev_tmpfiles =
-            self.read_managed_file_checked(&tmpfiles_dir, TRANSCODE_TMPFILES_CONF_NAME, true)?;
-        let api_dropin_dir_path = self
-            .config
-            .systemd_dir
-            .join(format!("{API_SERVICE_UNIT}.d"));
-        let api_dropin_dir = self.ensure_system_dir(&api_dropin_dir_path, 0o755, 0o6022)?;
-        let prev_api_dropin =
-            self.read_managed_file_checked(&api_dropin_dir, API_TRANSCODE_DROPIN_NAME, true)?;
+        let (
+            changed,
+            api_dropin_changed,
+            tmpfiles_changed,
+            runner_dropin_changed,
+            prev_tmpfiles,
+            prev_api_dropin,
+            prev_runner_dropin,
+        ) = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
 
-        // Ensure dispatcher runtime directory safely without following symlinks.
-        let existed = ReceiptDirectory::open_existing(&self.config.dispatcher_runtime_dir)
-            .map_err(|err| {
-                PeerTranscodeError::Conflict(format!(
-                    "Refusing unsafe dispatcher runtime directory {}: {err}",
-                    self.config.dispatcher_runtime_dir.display()
-                ))
-            })?
-            .is_some();
-        let runtime_dir =
-            ReceiptDirectory::open_confined(&self.config.dispatcher_runtime_dir, true, 0o750)
+            // Pre-validate existing managed files before mutating anything.
+            let tmpfiles_dir = self.ensure_system_dir(&self.config.tmpfiles_dir, 0o755, 0o6022)?;
+            let prev_tmpfiles =
+                self.read_managed_file_checked(&tmpfiles_dir, TRANSCODE_TMPFILES_CONF_NAME, true)?;
+            let api_dropin_dir_path = self
+                .config
+                .systemd_dir
+                .join(format!("{API_SERVICE_UNIT}.d"));
+            let api_dropin_dir = self.ensure_system_dir(&api_dropin_dir_path, 0o755, 0o6022)?;
+            let prev_api_dropin =
+                self.read_managed_file_checked(&api_dropin_dir, API_TRANSCODE_DROPIN_NAME, true)?;
+            let runner_dropin_dir_path = self
+                .config
+                .systemd_dir
+                .join(format!("{RUNNER_SERVICE_UNIT}.d"));
+            let runner_dropin_dir =
+                self.ensure_system_dir(&runner_dropin_dir_path, 0o755, 0o6022)?;
+            let prev_runner_dropin = self.read_managed_file_checked(
+                &runner_dropin_dir,
+                RUNNER_TRANSCODE_DROPIN_NAME,
+                true,
+            )?;
+
+            let env_created = self.ensure_transcode_env_file()?;
+
+            // Ensure dispatcher runtime directory safely without following symlinks.
+            let existed = ReceiptDirectory::open_existing(&self.config.dispatcher_runtime_dir)
                 .map_err(|err| {
+                    PeerTranscodeError::Conflict(format!(
+                        "Refusing unsafe dispatcher runtime directory {}: {err}",
+                        self.config.dispatcher_runtime_dir.display()
+                    ))
+                })?
+                .is_some();
+            let runtime_dir =
+                ReceiptDirectory::open_confined(&self.config.dispatcher_runtime_dir, true, 0o750)
+                    .map_err(|err| {
                     PeerTranscodeError::Runtime(format!(
                         "Failed ensuring dispatcher runtime directory {}: {err}",
                         self.config.dispatcher_runtime_dir.display()
                     ))
                 })?;
-        let mut dir_changed = !existed;
-        let before_meta = runtime_dir.file().metadata().map_err(|err| {
-            PeerTranscodeError::Runtime(format!("Cannot stat dispatcher runtime directory: {err}"))
-        })?;
-        if running_as_root() {
-            let af_uid = self.resolve_aetherflow_uid().ok_or_else(|| {
-                PeerTranscodeError::NotFound(
-                    "System user 'aetherflow' is required for dispatcher runtime directory"
-                        .to_string(),
-                )
+            let mut dir_changed = !existed;
+            let before_meta = runtime_dir.file().metadata().map_err(|err| {
+                PeerTranscodeError::Runtime(format!(
+                    "Cannot stat dispatcher runtime directory: {err}"
+                ))
             })?;
-            let jf_gid = self.resolve_jellyfin_gid().ok_or_else(|| {
-                PeerTranscodeError::NotFound(
-                    "System group 'jellyfin' is required for dispatcher runtime directory"
-                        .to_string(),
-                )
-            })?;
-            if before_meta.uid() != af_uid || before_meta.gid() != jf_gid {
-                if unsafe { libc::fchown(runtime_dir.file().as_raw_fd(), af_uid, jf_gid) } != 0 {
+            if running_as_root() {
+                let af_uid = self.resolve_aetherflow_uid().ok_or_else(|| {
+                    PeerTranscodeError::NotFound(
+                        "System user 'aetherflow' is required for dispatcher runtime directory"
+                            .to_string(),
+                    )
+                })?;
+                let jf_gid = self.resolve_jellyfin_gid().ok_or_else(|| {
+                    PeerTranscodeError::NotFound(
+                        "System group 'jellyfin' is required for dispatcher runtime directory"
+                            .to_string(),
+                    )
+                })?;
+                if before_meta.uid() != af_uid || before_meta.gid() != jf_gid {
+                    if unsafe { libc::fchown(runtime_dir.file().as_raw_fd(), af_uid, jf_gid) } != 0
+                    {
+                        return Err(PeerTranscodeError::Runtime(format!(
+                            "Failed setting aetherflow:jellyfin ownership on dispatcher runtime dir: {}",
+                            std::io::Error::last_os_error()
+                        )));
+                    }
+                    dir_changed = true;
+                }
+            }
+            if (before_meta.mode() & 0o7777) != 0o750 {
+                if unsafe { libc::fchmod(runtime_dir.file().as_raw_fd(), 0o750) } != 0 {
                     return Err(PeerTranscodeError::Runtime(format!(
-                        "Failed setting aetherflow:jellyfin ownership on dispatcher runtime dir: {}",
+                        "Failed setting 0750 mode on dispatcher runtime dir: {}",
                         std::io::Error::last_os_error()
                     )));
                 }
                 dir_changed = true;
             }
-        }
-        if (before_meta.mode() & 0o7777) != 0o750 {
-            if unsafe { libc::fchmod(runtime_dir.file().as_raw_fd(), 0o750) } != 0 {
-                return Err(PeerTranscodeError::Runtime(format!(
-                    "Failed setting 0750 mode on dispatcher runtime dir: {}",
-                    std::io::Error::last_os_error()
-                )));
+
+            let tmpfiles_rendered = render_tmpfiles_conf();
+            let tmpfiles_changed = prev_tmpfiles.as_deref() != Some(tmpfiles_rendered.as_bytes());
+            if tmpfiles_changed {
+                self.write_managed_file_atomic(
+                    &tmpfiles_dir,
+                    TRANSCODE_TMPFILES_CONF_NAME,
+                    tmpfiles_rendered.as_bytes(),
+                    0o644,
+                )?;
             }
-            dir_changed = true;
-        }
 
-        let tmpfiles_rendered = render_tmpfiles_conf();
-        let tmpfiles_changed = prev_tmpfiles.as_deref() != Some(tmpfiles_rendered.as_bytes());
-        if tmpfiles_changed {
-            self.write_managed_file_atomic(
-                &tmpfiles_dir,
-                TRANSCODE_TMPFILES_CONF_NAME,
-                tmpfiles_rendered.as_bytes(),
-                0o644,
-            )?;
-        }
-
-        let api_dropin_rendered = render_api_transcode_dropin();
-        let api_dropin_changed = prev_api_dropin.as_deref() != Some(api_dropin_rendered.as_bytes());
-        if api_dropin_changed {
-            if let Err(err) = self.write_managed_file_atomic(
-                &api_dropin_dir,
-                API_TRANSCODE_DROPIN_NAME,
-                api_dropin_rendered.as_bytes(),
-                0o644,
-            ) {
-                if tmpfiles_changed {
-                    let _ = self.restore_managed_file_after_failure(
-                        &tmpfiles_dir,
-                        TRANSCODE_TMPFILES_CONF_NAME,
-                        prev_tmpfiles.as_deref(),
-                        0o644,
-                    );
+            let api_dropin_rendered = render_api_transcode_dropin(&transcode_env_logical);
+            let api_dropin_changed =
+                prev_api_dropin.as_deref() != Some(api_dropin_rendered.as_bytes());
+            if api_dropin_changed {
+                if let Err(err) = self.write_managed_file_atomic(
+                    &api_dropin_dir,
+                    API_TRANSCODE_DROPIN_NAME,
+                    api_dropin_rendered.as_bytes(),
+                    0o644,
+                ) {
+                    if tmpfiles_changed {
+                        let _ = self.restore_managed_file_after_failure(
+                            &tmpfiles_dir,
+                            TRANSCODE_TMPFILES_CONF_NAME,
+                            prev_tmpfiles.as_deref(),
+                            0o644,
+                        );
+                    }
+                    return Err(err);
                 }
-                return Err(err);
             }
-        }
 
-        let changed = dir_changed || tmpfiles_changed || api_dropin_changed;
-        if api_dropin_changed || changed {
+            let runner_dropin_rendered = render_runner_transcode_dropin(&transcode_env_logical);
+            let runner_dropin_changed =
+                prev_runner_dropin.as_deref() != Some(runner_dropin_rendered.as_bytes());
+            if runner_dropin_changed {
+                if let Err(err) = self.write_managed_file_atomic(
+                    &runner_dropin_dir,
+                    RUNNER_TRANSCODE_DROPIN_NAME,
+                    runner_dropin_rendered.as_bytes(),
+                    0o644,
+                ) {
+                    if api_dropin_changed {
+                        let _ = self.restore_managed_file_after_failure(
+                            &api_dropin_dir,
+                            API_TRANSCODE_DROPIN_NAME,
+                            prev_api_dropin.as_deref(),
+                            0o644,
+                        );
+                    }
+                    if tmpfiles_changed {
+                        let _ = self.restore_managed_file_after_failure(
+                            &tmpfiles_dir,
+                            TRANSCODE_TMPFILES_CONF_NAME,
+                            prev_tmpfiles.as_deref(),
+                            0o644,
+                        );
+                    }
+                    return Err(err);
+                }
+            }
+
+            let changed = dir_changed
+                || tmpfiles_changed
+                || api_dropin_changed
+                || runner_dropin_changed
+                || env_created;
+            (
+                changed,
+                api_dropin_changed,
+                tmpfiles_changed,
+                runner_dropin_changed,
+                prev_tmpfiles,
+                prev_api_dropin,
+                prev_runner_dropin,
+            )
+        };
+
+        if api_dropin_changed || runner_dropin_changed || changed {
             if let Err(reload_err) = self
                 .run_checked_with_timeout(
                     "systemctl",
@@ -2463,21 +3304,53 @@ impl PeerTranscodeManager {
                 )
                 .await
             {
-                if api_dropin_changed {
-                    let _ = self.restore_managed_file_after_failure(
-                        &api_dropin_dir,
-                        API_TRANSCODE_DROPIN_NAME,
-                        prev_api_dropin.as_deref(),
-                        0o644,
-                    );
-                }
-                if tmpfiles_changed {
-                    let _ = self.restore_managed_file_after_failure(
-                        &tmpfiles_dir,
-                        TRANSCODE_TMPFILES_CONF_NAME,
-                        prev_tmpfiles.as_deref(),
-                        0o644,
-                    );
+                if let Ok((_mem_guard, _file_lock)) =
+                    self.acquire_transcode_write_locks(false).await
+                {
+                    if runner_dropin_changed {
+                        if let Ok(Some(dir)) = self.open_existing_system_dir(
+                            &self
+                                .config
+                                .systemd_dir
+                                .join(format!("{RUNNER_SERVICE_UNIT}.d")),
+                            0o6022,
+                        ) {
+                            let _ = self.restore_managed_file_after_failure(
+                                &dir,
+                                RUNNER_TRANSCODE_DROPIN_NAME,
+                                prev_runner_dropin.as_deref(),
+                                0o644,
+                            );
+                        }
+                    }
+                    if api_dropin_changed {
+                        if let Ok(Some(dir)) = self.open_existing_system_dir(
+                            &self
+                                .config
+                                .systemd_dir
+                                .join(format!("{API_SERVICE_UNIT}.d")),
+                            0o6022,
+                        ) {
+                            let _ = self.restore_managed_file_after_failure(
+                                &dir,
+                                API_TRANSCODE_DROPIN_NAME,
+                                prev_api_dropin.as_deref(),
+                                0o644,
+                            );
+                        }
+                    }
+                    if tmpfiles_changed {
+                        if let Ok(Some(dir)) =
+                            self.open_existing_system_dir(&self.config.tmpfiles_dir, 0o6022)
+                        {
+                            let _ = self.restore_managed_file_after_failure(
+                                &dir,
+                                TRANSCODE_TMPFILES_CONF_NAME,
+                                prev_tmpfiles.as_deref(),
+                                0o644,
+                            );
+                        }
+                    }
                 }
                 return Err(PeerTranscodeError::Runtime(format!(
                     "systemctl daemon-reload failed after configuring dispatcher directory; previous config restored ({reload_err})"
@@ -2488,20 +3361,28 @@ impl PeerTranscodeManager {
         Ok(TranscodeMutationReport {
             changed,
             detail: if changed {
-                "Configured dispatcher runtime directory, tmpfiles.d rule, and API drop-in"
+                "Configured dispatcher runtime directory, transcode.env, tmpfiles.d rule, and API/runner drop-ins"
                     .to_string()
             } else {
                 "Dispatcher runtime directory and drop-ins are already configured".to_string()
             },
-            units: vec![API_SERVICE_UNIT.to_string()],
+            units: vec![
+                API_SERVICE_UNIT.to_string(),
+                RUNNER_SERVICE_UNIT.to_string(),
+            ],
             paths: vec![
                 self.logical_path(&self.config.dispatcher_runtime_dir),
+                transcode_env_logical,
                 format!(
                     "{}/{TRANSCODE_TMPFILES_CONF_NAME}",
                     self.logical_path(&self.config.tmpfiles_dir)
                 ),
                 format!(
                     "{}/{API_SERVICE_UNIT}.d/{API_TRANSCODE_DROPIN_NAME}",
+                    self.logical_path(&self.config.systemd_dir)
+                ),
+                format!(
+                    "{}/{RUNNER_SERVICE_UNIT}.d/{RUNNER_TRANSCODE_DROPIN_NAME}",
                     self.logical_path(&self.config.systemd_dir)
                 ),
             ],
@@ -2745,80 +3626,92 @@ impl PeerTranscodeManager {
     }
 
     /// Parses Jellyfin's `encoding.xml`, creates `/var/cache/jellyfin/af-tmp` (`0750`, `jellyfin:jellyfin`),
-    /// writes managed `jellyfin.service.d/20-aetherflow-transcode.conf`, and reloads/restarts Jellyfin.
+    /// ensures `/etc/aetherflow/transcode.env`, writes managed `jellyfin.service.d/20-aetherflow-transcode.conf`,
+    /// and reloads/restarts Jellyfin.
     pub async fn enable_jellyfin(&self) -> Result<TranscodeMutationReport, PeerTranscodeError> {
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
+        let transcode_env_logical = self.transcode_env_logical_path()?;
+        let _unit_guard = self.acquire_unit_lock(JELLYFIN_SERVICE_UNIT).await?;
 
-        let transcoding_temp_path = self.read_jellyfin_transcoding_temp_path()?;
-
-        // Check existing drop-in before creating directories or mutating state.
         let dropin_dir_path = self
             .config
             .systemd_dir
             .join(format!("{JELLYFIN_SERVICE_UNIT}.d"));
-        let dropin_dir = self.ensure_system_dir(&dropin_dir_path, 0o755, 0o6022)?;
-        let previous =
-            self.read_managed_file_checked(&dropin_dir, JELLYFIN_TRANSCODE_DROPIN_NAME, true)?;
 
-        // Create `/var/cache/jellyfin/af-tmp` safely (`0750`, owned by `jellyfin:jellyfin` when root).
-        let tmp_existed = ReceiptDirectory::open_existing(&self.config.jellyfin_tmp_dir)
-            .map_err(|err| {
-                PeerTranscodeError::Conflict(format!(
-                    "Refusing unsafe Jellyfin tmp directory {}: {err}",
-                    self.config.jellyfin_tmp_dir.display()
-                ))
-            })?
-            .is_some();
-        let tmp_dir = ReceiptDirectory::open_confined(&self.config.jellyfin_tmp_dir, true, 0o750)
-            .map_err(|err| {
-            PeerTranscodeError::Runtime(format!(
-                "Failed ensuring Jellyfin tmp directory {}: {err}",
-                self.config.jellyfin_tmp_dir.display()
-            ))
-        })?;
-        let mut tmp_changed = !tmp_existed;
-        let tmp_meta = tmp_dir.file().metadata().map_err(|err| {
-            PeerTranscodeError::Runtime(format!("Cannot stat Jellyfin tmp directory: {err}"))
-        })?;
-        if running_as_root() {
-            let (jf_uid, jf_gid) = self.resolve_jellyfin_identity().ok_or_else(|| {
-                PeerTranscodeError::NotFound(
-                    "System user 'jellyfin' is required to configure Jellyfin transcode temp dir"
-                        .to_string(),
-                )
+        let (transcoding_temp_path, previous, dropin_changed, changed) = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
+
+            let transcoding_temp_path = self.read_jellyfin_transcoding_temp_path()?;
+
+            // Check existing drop-in before creating directories or mutating state.
+            let dropin_dir = self.ensure_system_dir(&dropin_dir_path, 0o755, 0o6022)?;
+            let previous =
+                self.read_managed_file_checked(&dropin_dir, JELLYFIN_TRANSCODE_DROPIN_NAME, true)?;
+
+            let env_created = self.ensure_transcode_env_file()?;
+
+            // Create `/var/cache/jellyfin/af-tmp` safely (`0750`, owned by `jellyfin:jellyfin` when root).
+            let tmp_existed = ReceiptDirectory::open_existing(&self.config.jellyfin_tmp_dir)
+                .map_err(|err| {
+                    PeerTranscodeError::Conflict(format!(
+                        "Refusing unsafe Jellyfin tmp directory {}: {err}",
+                        self.config.jellyfin_tmp_dir.display()
+                    ))
+                })?
+                .is_some();
+            let tmp_dir =
+                ReceiptDirectory::open_confined(&self.config.jellyfin_tmp_dir, true, 0o750)
+                    .map_err(|err| {
+                        PeerTranscodeError::Runtime(format!(
+                            "Failed ensuring Jellyfin tmp directory {}: {err}",
+                            self.config.jellyfin_tmp_dir.display()
+                        ))
+                    })?;
+            let mut tmp_changed = !tmp_existed;
+            let tmp_meta = tmp_dir.file().metadata().map_err(|err| {
+                PeerTranscodeError::Runtime(format!("Cannot stat Jellyfin tmp directory: {err}"))
             })?;
-            if tmp_meta.uid() != jf_uid || tmp_meta.gid() != jf_gid {
-                if unsafe { libc::fchown(tmp_dir.file().as_raw_fd(), jf_uid, jf_gid) } != 0 {
+            if running_as_root() {
+                let (jf_uid, jf_gid) = self.resolve_jellyfin_identity().ok_or_else(|| {
+                    PeerTranscodeError::NotFound(
+                        "System user 'jellyfin' is required to configure Jellyfin transcode temp dir"
+                            .to_string(),
+                    )
+                })?;
+                if tmp_meta.uid() != jf_uid || tmp_meta.gid() != jf_gid {
+                    if unsafe { libc::fchown(tmp_dir.file().as_raw_fd(), jf_uid, jf_gid) } != 0 {
+                        return Err(PeerTranscodeError::Runtime(format!(
+                            "Failed setting jellyfin ownership on tmp dir: {}",
+                            std::io::Error::last_os_error()
+                        )));
+                    }
+                    tmp_changed = true;
+                }
+            }
+            if (tmp_meta.mode() & 0o7777) != 0o750 {
+                if unsafe { libc::fchmod(tmp_dir.file().as_raw_fd(), 0o750) } != 0 {
                     return Err(PeerTranscodeError::Runtime(format!(
-                        "Failed setting jellyfin ownership on tmp dir: {}",
+                        "Failed setting 0750 mode on Jellyfin tmp dir: {}",
                         std::io::Error::last_os_error()
                     )));
                 }
                 tmp_changed = true;
             }
-        }
-        if (tmp_meta.mode() & 0o7777) != 0o750 {
-            if unsafe { libc::fchmod(tmp_dir.file().as_raw_fd(), 0o750) } != 0 {
-                return Err(PeerTranscodeError::Runtime(format!(
-                    "Failed setting 0750 mode on Jellyfin tmp dir: {}",
-                    std::io::Error::last_os_error()
-                )));
+
+            let rendered = render_jellyfin_transcode_dropin(&transcode_env_logical);
+            let dropin_changed = previous.as_deref() != Some(rendered.as_bytes());
+            if dropin_changed {
+                self.write_managed_file_atomic(
+                    &dropin_dir,
+                    JELLYFIN_TRANSCODE_DROPIN_NAME,
+                    rendered.as_bytes(),
+                    0o644,
+                )?;
             }
-            tmp_changed = true;
-        }
 
-        let rendered = render_jellyfin_transcode_dropin();
-        let dropin_changed = previous.as_deref() != Some(rendered.as_bytes());
-        if dropin_changed {
-            self.write_managed_file_atomic(
-                &dropin_dir,
-                JELLYFIN_TRANSCODE_DROPIN_NAME,
-                rendered.as_bytes(),
-                0o644,
-            )?;
-        }
+            let changed = dropin_changed || tmp_changed || env_created;
+            (transcoding_temp_path, previous, dropin_changed, changed)
+        };
 
-        let changed = dropin_changed || tmp_changed;
         if changed {
             let apply_res = async {
                 let _ = self
@@ -2841,12 +3734,21 @@ impl PeerTranscodeManager {
 
             if let Err(apply_err) = apply_res {
                 if dropin_changed {
-                    let rb_res = self.restore_managed_file_after_failure(
-                        &dropin_dir,
-                        JELLYFIN_TRANSCODE_DROPIN_NAME,
-                        previous.as_deref(),
-                        0o644,
-                    );
+                    let rb_res = match self.acquire_transcode_write_locks(false).await {
+                        Ok((_mem_guard, _file_lock)) => {
+                            match self.open_existing_system_dir(&dropin_dir_path, 0o6022) {
+                                Ok(Some(dropin_dir)) => self.restore_managed_file_after_failure(
+                                    &dropin_dir,
+                                    JELLYFIN_TRANSCODE_DROPIN_NAME,
+                                    previous.as_deref(),
+                                    0o644,
+                                ),
+                                Ok(None) => Ok(()),
+                                Err(err) => Err(err),
+                            }
+                        }
+                        Err(err) => Err(err),
+                    };
                     if rb_res.is_ok() {
                         let _ = self
                             .run_command_with_timeout(
@@ -2884,6 +3786,7 @@ impl PeerTranscodeManager {
             paths: vec![
                 transcoding_temp_path,
                 self.logical_path(&self.config.jellyfin_tmp_dir),
+                transcode_env_logical,
                 format!(
                     "{}/{JELLYFIN_SERVICE_UNIT}.d/{JELLYFIN_TRANSCODE_DROPIN_NAME}",
                     self.logical_path(&self.config.systemd_dir)
@@ -2896,7 +3799,7 @@ impl PeerTranscodeManager {
     /// Removes managed `jellyfin.service.d/20-aetherflow-transcode.conf` (refusing unmanaged files),
     /// runs `systemctl daemon-reload`, and restarts `jellyfin.service`.
     pub async fn disable_jellyfin(&self) -> Result<TranscodeMutationReport, PeerTranscodeError> {
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+        let _unit_guard = self.acquire_unit_lock(JELLYFIN_SERVICE_UNIT).await?;
         let dropin_dir_path = self
             .config
             .systemd_dir
@@ -2905,25 +3808,30 @@ impl PeerTranscodeManager {
             "{}/{JELLYFIN_SERVICE_UNIT}.d/{JELLYFIN_TRANSCODE_DROPIN_NAME}",
             self.logical_path(&self.config.systemd_dir)
         );
-        let Some(dropin_dir) = self.open_existing_system_dir(&dropin_dir_path, 0o6022)? else {
-            return Ok(TranscodeMutationReport {
-                changed: false,
-                detail: "Jellyfin transcode drop-in is already absent".to_string(),
-                units: Vec::new(),
-                paths: Vec::new(),
-                api_restart_required: false,
-            });
-        };
-        let Some(previous) =
-            self.delete_managed_file_checked(&dropin_dir, JELLYFIN_TRANSCODE_DROPIN_NAME)?
-        else {
-            return Ok(TranscodeMutationReport {
-                changed: false,
-                detail: "Jellyfin transcode drop-in is already absent".to_string(),
-                units: Vec::new(),
-                paths: Vec::new(),
-                api_restart_required: false,
-            });
+
+        let previous = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+            let Some(dropin_dir) = self.open_existing_system_dir(&dropin_dir_path, 0o6022)? else {
+                return Ok(TranscodeMutationReport {
+                    changed: false,
+                    detail: "Jellyfin transcode drop-in is already absent".to_string(),
+                    units: Vec::new(),
+                    paths: Vec::new(),
+                    api_restart_required: false,
+                });
+            };
+            let Some(previous) =
+                self.delete_managed_file_checked(&dropin_dir, JELLYFIN_TRANSCODE_DROPIN_NAME)?
+            else {
+                return Ok(TranscodeMutationReport {
+                    changed: false,
+                    detail: "Jellyfin transcode drop-in is already absent".to_string(),
+                    units: Vec::new(),
+                    paths: Vec::new(),
+                    api_restart_required: false,
+                });
+            };
+            previous
         };
 
         let apply_res = async {
@@ -2946,12 +3854,21 @@ impl PeerTranscodeManager {
         .await;
 
         if let Err(apply_err) = apply_res {
-            if let Err(rb_err) = self.write_managed_file_atomic(
-                &dropin_dir,
-                JELLYFIN_TRANSCODE_DROPIN_NAME,
-                &previous,
-                0o644,
-            ) {
+            let rb_res = match self.acquire_transcode_write_locks(false).await {
+                Ok((_mem_guard, _file_lock)) => {
+                    match self.ensure_system_dir(&dropin_dir_path, 0o755, 0o6022) {
+                        Ok(dropin_dir) => self.write_managed_file_atomic(
+                            &dropin_dir,
+                            JELLYFIN_TRANSCODE_DROPIN_NAME,
+                            &previous,
+                            0o644,
+                        ),
+                        Err(err) => Err(err),
+                    }
+                }
+                Err(err) => Err(err),
+            };
+            if let Err(rb_err) = rb_res {
                 return Err(PeerTranscodeError::Runtime(format!(
                     "Failed reloading/restarting {JELLYFIN_SERVICE_UNIT} after removing drop-in and rollback failed ({apply_err}; rollback: {rb_err})"
                 )));
@@ -2977,51 +3894,130 @@ impl PeerTranscodeManager {
         })
     }
 
-    /// Writes managed `/etc/systemd/system/af-transcode-worker.service` and the API drop-in
-    /// (`SupplementaryGroups=jellyfin` + `ReadWritePaths`), then runs `daemon-reload` and
-    /// `enable --now af-transcode-worker.service`.
+    /// Writes hardened managed `/etc/systemd/system/af-transcode-worker.service`, ensures
+    /// `/etc/aetherflow/transcode.env`, and installs API + runner drop-ins, then runs
+    /// `daemon-reload` and `enable --now af-transcode-worker.service`.
     pub async fn install_worker_unit(&self) -> Result<TranscodeMutationReport, PeerTranscodeError> {
         let bin_path = self.resolve_verified_transcode_binary()?;
-        let rendered_unit = render_worker_service_unit(&bin_path)?;
+        let transcode_env_logical = self.transcode_env_logical_path()?;
+        let rendered_unit = render_worker_service_unit(&bin_path, &transcode_env_logical)?;
 
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
-        let systemd_dir = self.ensure_system_dir(&self.config.systemd_dir, 0o755, 0o6022)?;
-        let prev_unit =
-            self.read_managed_file_checked(&systemd_dir, PEER_TRANSCODE_WORKER_UNIT, true)?;
+        let _unit_guard = self.acquire_unit_lock(PEER_TRANSCODE_WORKER_UNIT).await?;
 
-        // Also pre-validate API drop-in before writing either file so unmanaged files abort cleanly.
-        let api_dropin_dir_path = self
-            .config
-            .systemd_dir
-            .join(format!("{API_SERVICE_UNIT}.d"));
-        let api_dropin_dir = self.ensure_system_dir(&api_dropin_dir_path, 0o755, 0o6022)?;
-        let _ = self.read_managed_file_checked(&api_dropin_dir, API_TRANSCODE_DROPIN_NAME, true)?;
+        let (
+            prev_unit,
+            unit_changed,
+            prev_api_dropin,
+            api_dropin_changed,
+            prev_runner_dropin,
+            runner_dropin_changed,
+            paths_dropin_changed,
+            env_created,
+        ) = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
+            let systemd_dir = self.ensure_system_dir(&self.config.systemd_dir, 0o755, 0o6022)?;
+            let prev_unit =
+                self.read_managed_file_checked(&systemd_dir, PEER_TRANSCODE_WORKER_UNIT, true)?;
 
-        let unit_changed = prev_unit.as_deref() != Some(rendered_unit.as_bytes());
-        if unit_changed {
-            self.write_managed_file_atomic(
-                &systemd_dir,
-                PEER_TRANSCODE_WORKER_UNIT,
-                rendered_unit.as_bytes(),
-                0o644,
+            // Pre-validate API, runner, and worker paths drop-ins before writing any file.
+            let api_dropin_dir_path = self
+                .config
+                .systemd_dir
+                .join(format!("{API_SERVICE_UNIT}.d"));
+            let api_dropin_dir = self.ensure_system_dir(&api_dropin_dir_path, 0o755, 0o6022)?;
+            let _ =
+                self.read_managed_file_checked(&api_dropin_dir, API_TRANSCODE_DROPIN_NAME, true)?;
+            let runner_dropin_dir_path = self
+                .config
+                .systemd_dir
+                .join(format!("{RUNNER_SERVICE_UNIT}.d"));
+            let runner_dropin_dir =
+                self.ensure_system_dir(&runner_dropin_dir_path, 0o755, 0o6022)?;
+            let _ = self.read_managed_file_checked(
+                &runner_dropin_dir,
+                RUNNER_TRANSCODE_DROPIN_NAME,
+                true,
             )?;
-        }
+            let worker_dropin_dir_path = self
+                .config
+                .systemd_dir
+                .join(format!("{PEER_TRANSCODE_WORKER_UNIT}.d"));
+            if let Some(worker_dropin_dir) =
+                self.open_existing_system_dir(&worker_dropin_dir_path, 0o6022)?
+            {
+                let _ = self.read_managed_file_checked(
+                    &worker_dropin_dir,
+                    WORKER_TRANSCODE_PATHS_DROPIN_NAME,
+                    true,
+                )?;
+            }
 
-        let (api_dropin_dir, prev_api_dropin, api_dropin_changed) =
-            match self.ensure_api_transcode_dropin_locked() {
-                Ok(res) => res,
-                Err(err) => {
-                    if unit_changed {
-                        let _ = self.restore_managed_file_after_failure(
-                            &systemd_dir,
-                            PEER_TRANSCODE_WORKER_UNIT,
-                            prev_unit.as_deref(),
-                            0o644,
-                        );
+            let env_created = self.ensure_transcode_env_file()?;
+
+            let unit_changed = prev_unit.as_deref() != Some(rendered_unit.as_bytes());
+            if unit_changed {
+                self.write_managed_file_atomic(
+                    &systemd_dir,
+                    PEER_TRANSCODE_WORKER_UNIT,
+                    rendered_unit.as_bytes(),
+                    0o644,
+                )?;
+            }
+
+            let (api_dropin_dir, prev_api_dropin, api_dropin_changed) =
+                match self.ensure_api_transcode_dropin_locked(&transcode_env_logical) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        if unit_changed {
+                            let _ = self.restore_managed_file_after_failure(
+                                &systemd_dir,
+                                PEER_TRANSCODE_WORKER_UNIT,
+                                prev_unit.as_deref(),
+                                0o644,
+                            );
+                        }
+                        return Err(err);
                     }
-                    return Err(err);
-                }
-            };
+                };
+
+            let (_runner_dropin_dir, prev_runner_dropin, runner_dropin_changed) =
+                match self.ensure_runner_transcode_dropin_locked(&transcode_env_logical) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        if api_dropin_changed {
+                            let _ = self.restore_managed_file_after_failure(
+                                &api_dropin_dir,
+                                API_TRANSCODE_DROPIN_NAME,
+                                prev_api_dropin.as_deref(),
+                                0o644,
+                            );
+                        }
+                        if unit_changed {
+                            let _ = self.restore_managed_file_after_failure(
+                                &systemd_dir,
+                                PEER_TRANSCODE_WORKER_UNIT,
+                                prev_unit.as_deref(),
+                                0o644,
+                            );
+                        }
+                        return Err(err);
+                    }
+                };
+
+            let paths_dropin_changed =
+                self.sync_worker_transcode_paths_dropin_locked(&systemd_dir)?;
+
+            (
+                prev_unit,
+                unit_changed,
+                prev_api_dropin,
+                api_dropin_changed,
+                prev_runner_dropin,
+                runner_dropin_changed,
+                paths_dropin_changed,
+                env_created,
+            )
+        };
 
         let apply_res = async {
             let _ = self
@@ -3052,21 +4048,51 @@ impl PeerTranscodeManager {
         .await;
 
         if let Err(apply_err) = apply_res {
-            if unit_changed {
-                let _ = self.restore_managed_file_after_failure(
-                    &systemd_dir,
-                    PEER_TRANSCODE_WORKER_UNIT,
-                    prev_unit.as_deref(),
-                    0o644,
-                );
-            }
-            if api_dropin_changed {
-                let _ = self.restore_managed_file_after_failure(
-                    &api_dropin_dir,
-                    API_TRANSCODE_DROPIN_NAME,
-                    prev_api_dropin.as_deref(),
-                    0o644,
-                );
+            if let Ok((_mem_guard, _file_lock)) = self.acquire_transcode_write_locks(false).await {
+                if unit_changed {
+                    if let Ok(Some(systemd_dir)) =
+                        self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)
+                    {
+                        let _ = self.restore_managed_file_after_failure(
+                            &systemd_dir,
+                            PEER_TRANSCODE_WORKER_UNIT,
+                            prev_unit.as_deref(),
+                            0o644,
+                        );
+                    }
+                }
+                if api_dropin_changed {
+                    if let Ok(Some(dir)) = self.open_existing_system_dir(
+                        &self
+                            .config
+                            .systemd_dir
+                            .join(format!("{API_SERVICE_UNIT}.d")),
+                        0o6022,
+                    ) {
+                        let _ = self.restore_managed_file_after_failure(
+                            &dir,
+                            API_TRANSCODE_DROPIN_NAME,
+                            prev_api_dropin.as_deref(),
+                            0o644,
+                        );
+                    }
+                }
+                if runner_dropin_changed {
+                    if let Ok(Some(dir)) = self.open_existing_system_dir(
+                        &self
+                            .config
+                            .systemd_dir
+                            .join(format!("{RUNNER_SERVICE_UNIT}.d")),
+                        0o6022,
+                    ) {
+                        let _ = self.restore_managed_file_after_failure(
+                            &dir,
+                            RUNNER_TRANSCODE_DROPIN_NAME,
+                            prev_runner_dropin.as_deref(),
+                            0o644,
+                        );
+                    }
+                }
             }
             let _ = self
                 .run_command_with_timeout(
@@ -3080,25 +4106,39 @@ impl PeerTranscodeManager {
             )));
         }
 
-        let changed = unit_changed || api_dropin_changed;
+        let changed = unit_changed
+            || api_dropin_changed
+            || runner_dropin_changed
+            || paths_dropin_changed
+            || env_created;
         Ok(TranscodeMutationReport {
             changed,
             detail: if changed {
-                format!("Installed and enabled {PEER_TRANSCODE_WORKER_UNIT} and API drop-in")
+                format!(
+                    "Installed and enabled {PEER_TRANSCODE_WORKER_UNIT} and API/runner drop-ins"
+                )
             } else {
-                format!("{PEER_TRANSCODE_WORKER_UNIT} and API drop-in are already up to date")
+                format!(
+                    "{PEER_TRANSCODE_WORKER_UNIT} and API/runner drop-ins are already up to date"
+                )
             },
             units: vec![
                 PEER_TRANSCODE_WORKER_UNIT.to_string(),
                 API_SERVICE_UNIT.to_string(),
+                RUNNER_SERVICE_UNIT.to_string(),
             ],
             paths: vec![
                 format!(
                     "{}/{PEER_TRANSCODE_WORKER_UNIT}",
                     self.logical_path(&self.config.systemd_dir)
                 ),
+                transcode_env_logical,
                 format!(
                     "{}/{API_SERVICE_UNIT}.d/{API_TRANSCODE_DROPIN_NAME}",
+                    self.logical_path(&self.config.systemd_dir)
+                ),
+                format!(
+                    "{}/{RUNNER_SERVICE_UNIT}.d/{RUNNER_TRANSCODE_DROPIN_NAME}",
                     self.logical_path(&self.config.systemd_dir)
                 ),
             ],
@@ -3106,27 +4146,66 @@ impl PeerTranscodeManager {
         })
     }
 
-    /// Disables and stops `af-transcode-worker.service`, removes the managed unit file, and reloads systemd.
+    /// Disables and stops `af-transcode-worker.service`, removes the managed unit file and
+    /// `30-aetherflow-transcode-paths.conf`, cleans up `aetherflow-runner.service.d/20-aetherflow-transcode.conf`
+    /// when neither dispatcher nor worker remains installed, and reloads systemd.
     pub async fn remove_worker_unit(&self) -> Result<TranscodeMutationReport, PeerTranscodeError> {
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+        let _unit_guard = self.acquire_unit_lock(PEER_TRANSCODE_WORKER_UNIT).await?;
         let unit_logical = format!(
             "{}/{PEER_TRANSCODE_WORKER_UNIT}",
             self.logical_path(&self.config.systemd_dir)
         );
-        let Some(systemd_dir) = self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)?
-        else {
-            return Ok(TranscodeMutationReport {
-                changed: false,
-                detail: format!("{PEER_TRANSCODE_WORKER_UNIT} is already absent"),
-                units: Vec::new(),
-                paths: Vec::new(),
-                api_restart_required: false,
-            });
+        let worker_dropin_dir_path = self
+            .config
+            .systemd_dir
+            .join(format!("{PEER_TRANSCODE_WORKER_UNIT}.d"));
+        let runner_dropin_dir_path = self
+            .config
+            .systemd_dir
+            .join(format!("{RUNNER_SERVICE_UNIT}.d"));
+
+        let (worker_present, paths_dropin_present, runner_dropin_removable) = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+            let Some(systemd_dir) =
+                self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)?
+            else {
+                return Ok(TranscodeMutationReport {
+                    changed: false,
+                    detail: format!("{PEER_TRANSCODE_WORKER_UNIT} is already absent"),
+                    units: Vec::new(),
+                    paths: Vec::new(),
+                    api_restart_required: false,
+                });
+            };
+            let worker_present = self
+                .read_managed_file_checked(&systemd_dir, PEER_TRANSCODE_WORKER_UNIT, true)?
+                .is_some();
+            let paths_dropin_present =
+                match self.open_existing_system_dir(&worker_dropin_dir_path, 0o6022)? {
+                    Some(dir) => self
+                        .read_managed_file_checked(&dir, WORKER_TRANSCODE_PATHS_DROPIN_NAME, true)?
+                        .is_some(),
+                    None => false,
+                };
+            let dispatcher_installed = self.is_dispatcher_installed_locked()?;
+            let runner_dropin_removable = if !dispatcher_installed {
+                match self.open_existing_system_dir(&runner_dropin_dir_path, 0o6022)? {
+                    Some(dir) => self
+                        .read_managed_file_checked(&dir, RUNNER_TRANSCODE_DROPIN_NAME, true)?
+                        .is_some(),
+                    None => false,
+                }
+            } else {
+                false
+            };
+            (
+                worker_present,
+                paths_dropin_present,
+                runner_dropin_removable,
+            )
         };
-        if self
-            .read_managed_file_checked(&systemd_dir, PEER_TRANSCODE_WORKER_UNIT, true)?
-            .is_none()
-        {
+
+        if !worker_present && !paths_dropin_present && !runner_dropin_removable {
             return Ok(TranscodeMutationReport {
                 changed: false,
                 detail: format!("{PEER_TRANSCODE_WORKER_UNIT} is already absent"),
@@ -3136,17 +4215,45 @@ impl PeerTranscodeManager {
             });
         }
 
-        let _ = self
-            .run_checked_with_timeout(
-                "systemctl",
-                &strings(&["disable", "--now", PEER_TRANSCODE_WORKER_UNIT]),
-                self.config.mount_command_timeout,
-            )
-            .await?;
+        if worker_present {
+            let _ = self
+                .run_checked_with_timeout(
+                    "systemctl",
+                    &strings(&["disable", "--now", PEER_TRANSCODE_WORKER_UNIT]),
+                    self.config.mount_command_timeout,
+                )
+                .await?;
+        }
 
-        let Some(previous) =
-            self.delete_managed_file_checked(&systemd_dir, PEER_TRANSCODE_WORKER_UNIT)?
-        else {
+        let (prev_unit, prev_paths_dropin, prev_runner_dropin) = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+            let prev_unit = match self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)? {
+                Some(systemd_dir) => {
+                    self.delete_managed_file_checked(&systemd_dir, PEER_TRANSCODE_WORKER_UNIT)?
+                }
+                None => None,
+            };
+            let prev_paths_dropin =
+                match self.open_existing_system_dir(&worker_dropin_dir_path, 0o6022)? {
+                    Some(dir) => {
+                        self.delete_managed_file_checked(&dir, WORKER_TRANSCODE_PATHS_DROPIN_NAME)?
+                    }
+                    None => None,
+                };
+            let prev_runner_dropin = if !self.is_dispatcher_installed_locked()? {
+                match self.open_existing_system_dir(&runner_dropin_dir_path, 0o6022)? {
+                    Some(dir) => {
+                        self.delete_managed_file_checked(&dir, RUNNER_TRANSCODE_DROPIN_NAME)?
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            (prev_unit, prev_paths_dropin, prev_runner_dropin)
+        };
+
+        if prev_unit.is_none() && prev_paths_dropin.is_none() && prev_runner_dropin.is_none() {
             return Ok(TranscodeMutationReport {
                 changed: false,
                 detail: format!("{PEER_TRANSCODE_WORKER_UNIT} is already absent"),
@@ -3154,7 +4261,7 @@ impl PeerTranscodeManager {
                 paths: Vec::new(),
                 api_restart_required: false,
             });
-        };
+        }
 
         if let Err(reload_err) = self
             .run_checked_with_timeout(
@@ -3164,12 +4271,42 @@ impl PeerTranscodeManager {
             )
             .await
         {
-            let _ = self.write_managed_file_atomic(
-                &systemd_dir,
-                PEER_TRANSCODE_WORKER_UNIT,
-                &previous,
-                0o644,
-            );
+            if let Ok((_mem_guard, _file_lock)) = self.acquire_transcode_write_locks(false).await {
+                if let Some(ref prev) = prev_unit {
+                    if let Ok(Some(systemd_dir)) =
+                        self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)
+                    {
+                        let _ = self.write_managed_file_atomic(
+                            &systemd_dir,
+                            PEER_TRANSCODE_WORKER_UNIT,
+                            prev,
+                            0o644,
+                        );
+                    }
+                }
+                if let Some(ref prev) = prev_paths_dropin {
+                    if let Ok(dir) = self.ensure_system_dir(&worker_dropin_dir_path, 0o755, 0o6022)
+                    {
+                        let _ = self.write_managed_file_atomic(
+                            &dir,
+                            WORKER_TRANSCODE_PATHS_DROPIN_NAME,
+                            prev,
+                            0o644,
+                        );
+                    }
+                }
+                if let Some(ref prev) = prev_runner_dropin {
+                    if let Ok(dir) = self.ensure_system_dir(&runner_dropin_dir_path, 0o755, 0o6022)
+                    {
+                        let _ = self.write_managed_file_atomic(
+                            &dir,
+                            RUNNER_TRANSCODE_DROPIN_NAME,
+                            prev,
+                            0o644,
+                        );
+                    }
+                }
+            }
             let _ = self
                 .run_command_with_timeout(
                     "systemctl",
@@ -3182,17 +4319,36 @@ impl PeerTranscodeManager {
             )));
         }
 
+        let mut removed_paths = Vec::new();
+        if prev_unit.is_some() {
+            removed_paths.push(unit_logical);
+        }
+        if prev_paths_dropin.is_some() {
+            removed_paths.push(format!(
+                "{}/{PEER_TRANSCODE_WORKER_UNIT}.d/{WORKER_TRANSCODE_PATHS_DROPIN_NAME}",
+                self.logical_path(&self.config.systemd_dir)
+            ));
+        }
+        if prev_runner_dropin.is_some() {
+            removed_paths.push(format!(
+                "{}/{RUNNER_SERVICE_UNIT}.d/{RUNNER_TRANSCODE_DROPIN_NAME}",
+                self.logical_path(&self.config.systemd_dir)
+            ));
+        }
+
         Ok(TranscodeMutationReport {
             changed: true,
             detail: format!("Disabled and removed {PEER_TRANSCODE_WORKER_UNIT}"),
             units: vec![PEER_TRANSCODE_WORKER_UNIT.to_string()],
-            paths: vec![unit_logical],
+            paths: removed_paths,
             api_restart_required: false,
         })
     }
 
     /// Writes `/etc/exports.d/aetherflow-peer-<link_id>-transcode.exports` with `rw,all_squash`
-    /// mapped to non-root `(uid, gid)` and runs `exportfs -ra`.
+    /// mapped to non-root `(uid, gid)` (pruning strict descendants that share the exact same
+    /// `st_dev` as their nearest kept ancestor while preserving separate-filesystem children)
+    /// and runs `exportfs -ra`.
     pub async fn export_transcode_dirs(
         &self,
         link_id: &str,
@@ -3212,10 +4368,14 @@ impl PeerTranscodeManager {
 
         let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
 
-        // Verify every exported directory exists locally without symlink traversal.
+        // Verify every exported directory exists locally without symlink traversal and inspect st_dev.
+        let mut paths_with_dev: Vec<(String, u64)> = Vec::with_capacity(validated_paths.len());
         for path in &validated_paths {
-            let _ = self.open_verified_local_directory(path)?;
+            let dir = self.open_verified_local_directory(path)?;
+            let dev = self.resolve_dir_st_dev(path, &dir)?;
+            paths_with_dev.push((path.clone(), dev));
         }
+        let exported_paths = prune_same_device_descendant_exports(&paths_with_dev);
 
         let file_name = derive_peer_transcode_export_file_name(valid_link)?;
         let exports_logical = format!(
@@ -3224,7 +4384,7 @@ impl PeerTranscodeManager {
         );
         let exports_dir = self.ensure_system_dir(&self.config.exports_dir, 0o755, 0o6022)?;
         let previous = self.read_managed_file_checked(&exports_dir, &file_name, true)?;
-        let rendered = render_transcode_exports_file(valid_ip, uid, gid, &validated_paths);
+        let rendered = render_transcode_exports_file(valid_ip, uid, gid, &exported_paths);
         let unchanged = previous.as_deref() == Some(rendered.as_bytes());
 
         if !unchanged {
@@ -3264,7 +4424,7 @@ impl PeerTranscodeManager {
         }
 
         let mut report_paths = vec![exports_logical];
-        report_paths.extend(validated_paths);
+        report_paths.extend(exported_paths);
         Ok(TranscodeMutationReport {
             changed: !unchanged,
             detail: if unchanged {
@@ -3344,8 +4504,12 @@ impl PeerTranscodeManager {
         })
     }
 
-    /// Writes managed NFSv4.2 `.mount` units for each validated transcode directory, runs
-    /// `systemctl daemon-reload`, and starts each unit in parent-before-child order.
+    /// Writes managed NFSv4.2 `.mount` units for each allowlisted transcode directory, syncs
+    /// `af-transcode-worker.service.d/30-aetherflow-transcode-paths.conf`, runs
+    /// `systemctl daemon-reload`, and starts each unit in parent-before-child order under
+    /// per-unit locks (releasing the host-wide config lock before slow `systemctl start` calls).
+    /// Rolls back started mounts, newly written units, and empty newly created mount directories
+    /// on any failure.
     pub async fn mount_transcode_dirs(
         &self,
         link_id: &str,
@@ -3355,6 +4519,9 @@ impl PeerTranscodeManager {
         let valid_link = validate_link_id(link_id)?;
         let valid_ip = validate_tunnel_ip(tunnel_ip, &self.tunnel_cidr)?;
         let validated_paths = validate_transcode_paths_list(paths)?;
+        for path in &validated_paths {
+            self.validate_worker_transcode_mount_path(path)?;
+        }
 
         let mut specs: Vec<(String, String, String)> = Vec::with_capacity(validated_paths.len());
         for path in &validated_paths {
@@ -3363,42 +4530,75 @@ impl PeerTranscodeManager {
             specs.push((path.clone(), unit_name, rendered));
         }
 
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
-        let systemd_dir = self.ensure_system_dir(&self.config.systemd_dir, 0o755, 0o6022)?;
+        let unit_refs: Vec<&str> = specs.iter().map(|(_, u, _)| u.as_str()).collect();
+        let unit_guards = self.acquire_unit_locks(&unit_refs).await?;
 
-        // Pre-validate every unit and mountpoint before writing anything.
-        let mut previous_states: Vec<(String, Option<Vec<u8>>, bool)> =
-            Vec::with_capacity(specs.len());
-        for (path, unit_name, rendered) in &specs {
-            self.verify_mountpoint_no_symlinks(path)?;
-            let prev = self.read_managed_file_checked(&systemd_dir, unit_name, true)?;
-            let unit_changed = prev.as_deref() != Some(rendered.as_bytes());
-            previous_states.push((unit_name.clone(), prev, unit_changed));
-        }
+        let (previous_states, written_indices, preexisting_dirs, paths_dropin_changed) = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
+            let systemd_dir = self.ensure_system_dir(&self.config.systemd_dir, 0o755, 0o6022)?;
 
-        let mut written_indices: Vec<usize> = Vec::new();
-        for (idx, (_, unit_name, rendered)) in specs.iter().enumerate() {
-            if previous_states[idx].2 {
-                if let Err(err) = self.write_managed_file_atomic(
-                    &systemd_dir,
-                    unit_name,
-                    rendered.as_bytes(),
-                    0o644,
-                ) {
-                    for &w_idx in written_indices.iter().rev() {
-                        let (ref name, ref prev, _) = previous_states[w_idx];
-                        let _ = self.restore_managed_file_after_failure(
-                            &systemd_dir,
-                            name,
-                            prev.as_deref(),
-                            0o644,
-                        );
-                    }
-                    return Err(err);
-                }
-                written_indices.push(idx);
+            // Pre-validate every unit and mountpoint before writing anything.
+            let mut previous_states: Vec<(String, Option<Vec<u8>>, bool)> =
+                Vec::with_capacity(specs.len());
+            let mut preexisting_dirs: Vec<bool> = Vec::with_capacity(specs.len());
+            for (path, unit_name, rendered) in &specs {
+                self.verify_mountpoint_no_symlinks(path)?;
+                let resolved = self.resolve_host_path(path);
+                preexisting_dirs.push(fs::symlink_metadata(&resolved).is_ok());
+                let prev = self.read_managed_file_checked(&systemd_dir, unit_name, true)?;
+                let unit_changed = prev.as_deref() != Some(rendered.as_bytes());
+                previous_states.push((unit_name.clone(), prev, unit_changed));
             }
-        }
+
+            let mut written_indices: Vec<usize> = Vec::new();
+            for (idx, (_, unit_name, rendered)) in specs.iter().enumerate() {
+                if previous_states[idx].2 {
+                    if let Err(err) = self.write_managed_file_atomic(
+                        &systemd_dir,
+                        unit_name,
+                        rendered.as_bytes(),
+                        0o644,
+                    ) {
+                        for &w_idx in written_indices.iter().rev() {
+                            let (ref name, ref prev, _) = previous_states[w_idx];
+                            let _ = self.restore_managed_file_after_failure(
+                                &systemd_dir,
+                                name,
+                                prev.as_deref(),
+                                0o644,
+                            );
+                        }
+                        return Err(err);
+                    }
+                    written_indices.push(idx);
+                }
+            }
+
+            let paths_dropin_changed =
+                match self.sync_worker_transcode_paths_dropin_locked(&systemd_dir) {
+                    Ok(changed) => changed,
+                    Err(err) => {
+                        for &w_idx in written_indices.iter().rev() {
+                            let (ref name, ref prev, _) = previous_states[w_idx];
+                            let _ = self.restore_managed_file_after_failure(
+                                &systemd_dir,
+                                name,
+                                prev.as_deref(),
+                                0o644,
+                            );
+                        }
+                        let _ = self.sync_worker_transcode_paths_dropin_locked(&systemd_dir);
+                        return Err(err);
+                    }
+                };
+
+            (
+                previous_states,
+                written_indices,
+                preexisting_dirs,
+                paths_dropin_changed,
+            )
+        };
 
         let mut started_units: Vec<String> = Vec::new();
         let apply_res = async {
@@ -3433,14 +4633,32 @@ impl PeerTranscodeManager {
                     )
                     .await;
             }
-            for &w_idx in written_indices.iter().rev() {
-                let (ref name, ref prev, _) = previous_states[w_idx];
-                let _ = self.restore_managed_file_after_failure(
-                    &systemd_dir,
-                    name,
-                    prev.as_deref(),
-                    0o644,
-                );
+            if let Ok((_mem_guard, _file_lock)) = self.acquire_transcode_write_locks(false).await {
+                if let Ok(Some(systemd_dir)) =
+                    self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)
+                {
+                    for &w_idx in written_indices.iter().rev() {
+                        let (ref name, ref prev, _) = previous_states[w_idx];
+                        let _ = self.restore_managed_file_after_failure(
+                            &systemd_dir,
+                            name,
+                            prev.as_deref(),
+                            0o644,
+                        );
+                    }
+                    let _ = self.sync_worker_transcode_paths_dropin_locked(&systemd_dir);
+                }
+                // Remove empty newly created mount directories in child-before-parent order.
+                for (idx, (path, _, _)) in specs.iter().enumerate().rev() {
+                    if !preexisting_dirs[idx] {
+                        let resolved = self.resolve_host_path(path);
+                        if fs::symlink_metadata(&resolved)
+                            .is_ok_and(|meta| meta.file_type().is_dir())
+                        {
+                            let _ = fs::remove_dir(&resolved);
+                        }
+                    }
+                }
             }
             let _ = self
                 .run_command_with_timeout(
@@ -3452,6 +4670,11 @@ impl PeerTranscodeManager {
             return Err(PeerTranscodeError::Runtime(format!(
                 "Failed mounting transcode directories for link '{valid_link}'; rolled back unit files ({apply_err})"
             )));
+        }
+
+        drop(unit_guards);
+        if paths_dropin_changed {
+            self.maybe_restart_active_worker().await?;
         }
 
         let units: Vec<String> = specs.iter().map(|(_, u, _)| u.clone()).collect();
@@ -3469,7 +4692,8 @@ impl PeerTranscodeManager {
     }
 
     /// Stops and removes managed transcode NFS `.mount` units in child-before-parent order,
-    /// then runs `systemctl daemon-reload`.
+    /// updates `af-transcode-worker.service.d/30-aetherflow-transcode-paths.conf`, and runs
+    /// `systemctl daemon-reload`.
     pub async fn remove_transcode_mounts(
         &self,
         link_id: &str,
@@ -3477,6 +4701,9 @@ impl PeerTranscodeManager {
     ) -> Result<TranscodeMutationReport, PeerTranscodeError> {
         let valid_link = validate_link_id(link_id)?;
         let mut validated_paths = validate_transcode_paths_list(paths)?;
+        for path in &validated_paths {
+            self.validate_worker_transcode_mount_path(path)?;
+        }
         // Unmount deeper/child mounts before shallower/parent mounts.
         validated_paths.reverse();
 
@@ -3486,28 +4713,39 @@ impl PeerTranscodeManager {
             targets.push((path.clone(), unit_name));
         }
 
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
-        let Some(systemd_dir) = self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)?
-        else {
-            return Ok(TranscodeMutationReport {
-                changed: false,
-                detail: format!("No transcode mount units present for link '{valid_link}'"),
-                units: Vec::new(),
-                paths: Vec::new(),
-                api_restart_required: false,
-            });
-        };
+        let unit_refs: Vec<&str> = targets.iter().map(|(_, u)| u.as_str()).collect();
+        let unit_guards = self.acquire_unit_locks(&unit_refs).await?;
 
-        // Pre-validate every unit file before stopping or deleting any.
-        let mut existing_targets: Vec<(String, String)> = Vec::new();
-        for (path, unit_name) in &targets {
-            if self
-                .read_managed_file_checked(&systemd_dir, unit_name, true)?
-                .is_some()
-            {
-                existing_targets.push((path.clone(), unit_name.clone()));
+        let existing_targets = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+            let Some(systemd_dir) =
+                self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)?
+            else {
+                return Ok(TranscodeMutationReport {
+                    changed: false,
+                    detail: format!("No transcode mount units present for link '{valid_link}'"),
+                    units: Vec::new(),
+                    paths: Vec::new(),
+                    api_restart_required: false,
+                });
+            };
+
+            // Pre-validate every unit file before stopping or deleting any.
+            let mut existing_targets: Vec<(String, String)> = Vec::new();
+            for (path, unit_name) in &targets {
+                if let Some(bytes) =
+                    self.read_managed_file_checked(&systemd_dir, unit_name, true)?
+                {
+                    if !has_managed_purpose(&bytes, TRANSCODE_MOUNT_PURPOSE_HEADER) {
+                        return Err(PeerTranscodeError::Conflict(format!(
+                            "Refusing to remove non-transcode mount unit '{unit_name}'"
+                        )));
+                    }
+                    existing_targets.push((path.clone(), unit_name.clone()));
+                }
             }
-        }
+            existing_targets
+        };
 
         if existing_targets.is_empty() {
             return Ok(TranscodeMutationReport {
@@ -3528,10 +4766,27 @@ impl PeerTranscodeManager {
                     self.config.mount_command_timeout,
                 )
                 .await?;
-            if let Some(prev) = self.delete_managed_file_checked(&systemd_dir, unit_name)? {
-                deleted.push((path.clone(), unit_name.clone(), prev));
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+            if let Some(systemd_dir) =
+                self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)?
+            {
+                if let Some(prev) = self.delete_managed_file_checked(&systemd_dir, unit_name)? {
+                    deleted.push((path.clone(), unit_name.clone(), prev));
+                }
             }
         }
+
+        let paths_dropin_changed = if !deleted.is_empty() {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+            match self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)? {
+                Some(systemd_dir) => {
+                    self.sync_worker_transcode_paths_dropin_locked(&systemd_dir)?
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
 
         if !deleted.is_empty() {
             if let Err(reload_err) = self
@@ -3542,8 +4797,22 @@ impl PeerTranscodeManager {
                 )
                 .await
             {
-                for (_, unit_name, prev) in deleted.iter().rev() {
-                    let _ = self.write_managed_file_atomic(&systemd_dir, unit_name, prev, 0o644);
+                if let Ok((_mem_guard, _file_lock)) =
+                    self.acquire_transcode_write_locks(false).await
+                {
+                    if let Ok(Some(systemd_dir)) =
+                        self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)
+                    {
+                        for (_, unit_name, prev) in deleted.iter().rev() {
+                            let _ = self.write_managed_file_atomic(
+                                &systemd_dir,
+                                unit_name,
+                                prev,
+                                0o644,
+                            );
+                        }
+                        let _ = self.sync_worker_transcode_paths_dropin_locked(&systemd_dir);
+                    }
                 }
                 let _ = self
                     .run_command_with_timeout(
@@ -3556,6 +4825,11 @@ impl PeerTranscodeManager {
                     "systemctl daemon-reload failed after removing transcode mount units; units restored ({reload_err})"
                 )));
             }
+        }
+
+        drop(unit_guards);
+        if paths_dropin_changed {
+            self.maybe_restart_active_worker().await?;
         }
 
         let removed_units: Vec<String> = deleted.iter().map(|(_, u, _)| u.clone()).collect();
@@ -3572,13 +4846,28 @@ impl PeerTranscodeManager {
         })
     }
 
-    /// Writes a managed systemd bind `.mount` unit (`Type=none`, `Options=bind,ro|rw,nosuid,nodev`),
-    /// runs `systemctl daemon-reload`, and starts the unit.
+    /// Writes a managed systemd bind `.mount` unit (`Type=none`, `Options=bind,ro|rw,nosuid,nodev`)
+    /// without calling-link confinement. Prefer [`Self::bind_media_with_link`] when the calling
+    /// peer's mount segment is known.
     pub async fn bind_media(
         &self,
         from: &str,
         to: &str,
         writable: bool,
+    ) -> Result<TranscodeMutationReport, PeerTranscodeError> {
+        self.bind_media_with_link(from, to, writable, None).await
+    }
+
+    /// Writes a managed systemd bind `.mount` unit (`Type=none`, `Options=bind,ro|rw,nosuid,nodev`),
+    /// enforcing bidirectional allowlists, optional calling-link segment confinement, empty-dir
+    /// protection on `to`, conditional `BindsTo=`/`After=` on backing `/mnt/af-peers/<link>/<export>`
+    /// NFS mounts, and dynamic `30-aetherflow-transcode-paths.conf` syncing.
+    pub async fn bind_media_with_link(
+        &self,
+        from: &str,
+        to: &str,
+        writable: bool,
+        calling_link_segment: Option<&str>,
     ) -> Result<TranscodeMutationReport, PeerTranscodeError> {
         let valid_from = validate_canonical_path_syntax(from, true)?;
         let valid_to = validate_canonical_path_syntax(to, true)?;
@@ -3587,20 +4876,149 @@ impl PeerTranscodeManager {
                 "Bind media source and destination paths must differ".to_string(),
             ));
         }
+
+        let confined_seg = match calling_link_segment {
+            Some(seg) => Some(
+                validate_peer_mount_segment(seg)
+                    .map_err(|err| PeerTranscodeError::InvalidInput(err.to_string()))?,
+            ),
+            None => None,
+        };
+
+        let from_is_peer = is_under_peer_mounts_root(&valid_from);
+        let to_is_peer = is_under_peer_mounts_root(&valid_to);
+        let backing_mount_unit = match (from_is_peer, to_is_peer) {
+            // Worker-holds-media: local source -> `/mnt/af-peers/<link>/<export>(/...)`
+            (false, true) => {
+                if has_sensitive_dot_segment(&valid_from) {
+                    return Err(PeerTranscodeError::InvalidInput(format!(
+                        "Refusing sensitive bind source path '{valid_from}'"
+                    )));
+                }
+                let (to_link_seg, _) = extract_peer_mount_segments(&valid_to)?;
+                if let Some(expected_seg) = confined_seg {
+                    if to_link_seg != expected_seg {
+                        return Err(PeerTranscodeError::InvalidInput(format!(
+                            "Bind destination '{valid_to}' lies outside calling link segment '{expected_seg}'"
+                        )));
+                    }
+                }
+                None
+            }
+            // Controller-holds-media: `/mnt/af-peers/<link>/<export>(/...)` -> allowed local media root
+            (true, false) => {
+                let (from_link_seg, _) = extract_peer_mount_segments(&valid_from)?;
+                if let Some(expected_seg) = confined_seg {
+                    if from_link_seg != expected_seg {
+                        return Err(PeerTranscodeError::InvalidInput(format!(
+                            "Bind source '{valid_from}' lies outside calling link segment '{expected_seg}'"
+                        )));
+                    }
+                }
+                self.validate_bind_media_target_allowlist(&valid_to)?;
+                derive_backing_peer_nfs_mount_unit(&valid_from)?
+            }
+            (true, true) => {
+                return Err(PeerTranscodeError::InvalidInput(format!(
+                    "Refusing bind mount with both source and destination under {DEFAULT_PEER_MOUNTS_ROOT}"
+                )));
+            }
+            (false, false) => {
+                return Err(PeerTranscodeError::InvalidInput(format!(
+                    "BindMedia requires exactly one of 'from' or 'to' to lie under {DEFAULT_PEER_MOUNTS_ROOT}/<link>/<export>"
+                )));
+            }
+        };
+
         let unit_name = derive_systemd_mount_unit(&valid_to)?;
+        let unit_guard = self.acquire_unit_lock(&unit_name).await?;
 
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
-        let _ = self.open_verified_local_directory(&valid_from)?;
-        self.verify_mountpoint_no_symlinks(&valid_to)?;
+        // Phase 1: pre-validate source/target and check non-empty target directory under short lock.
+        let need_active_bind_check = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
+            let _ = self.open_verified_local_directory(&valid_from)?;
+            self.verify_mountpoint_no_symlinks(&valid_to)?;
+            let systemd_dir = self.ensure_system_dir(&self.config.systemd_dir, 0o755, 0o6022)?;
+            let previous = self.read_managed_file_checked(&systemd_dir, &unit_name, true)?;
+            if self.dir_has_entries(&valid_to)? {
+                let is_managed_bind = previous
+                    .as_deref()
+                    .is_some_and(|prev| is_managed_bind_unit_for_path(prev, &valid_to));
+                if !is_managed_bind {
+                    return Err(PeerTranscodeError::Conflict(format!(
+                        "Refusing to bind over non-empty directory '{valid_to}'"
+                    )));
+                }
+                true
+            } else {
+                false
+            }
+        };
 
-        let systemd_dir = self.ensure_system_dir(&self.config.systemd_dir, 0o755, 0o6022)?;
-        let previous = self.read_managed_file_checked(&systemd_dir, &unit_name, true)?;
-        let rendered = render_bind_media_mount_unit(&valid_from, &valid_to, writable);
-        let unit_changed = previous.as_deref() != Some(rendered.as_bytes());
-
-        if unit_changed {
-            self.write_managed_file_atomic(&systemd_dir, &unit_name, rendered.as_bytes(), 0o644)?;
+        if need_active_bind_check {
+            let active = match self
+                .run_command_with_timeout(
+                    "systemctl",
+                    &strings(&["is-active", &unit_name]),
+                    self.config.command_timeout,
+                )
+                .await
+            {
+                Ok(out) => out.success() && out.stdout.trim() == "active",
+                Err(_) => false,
+            };
+            if !active {
+                return Err(PeerTranscodeError::Conflict(format!(
+                    "Refusing to bind over non-empty directory '{valid_to}' (unit {unit_name} is not active)"
+                )));
+            }
         }
+
+        // Phase 2: write unit file and sync worker ReadWritePaths drop-in under short lock.
+        let rendered = render_bind_media_mount_unit(
+            &valid_from,
+            &valid_to,
+            writable,
+            backing_mount_unit.as_deref(),
+        );
+        let (previous, unit_changed, paths_dropin_changed) = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
+            let _ = self.open_verified_local_directory(&valid_from)?;
+            self.verify_mountpoint_no_symlinks(&valid_to)?;
+            let systemd_dir = self.ensure_system_dir(&self.config.systemd_dir, 0o755, 0o6022)?;
+            let previous = self.read_managed_file_checked(&systemd_dir, &unit_name, true)?;
+            if !need_active_bind_check && self.dir_has_entries(&valid_to)? {
+                return Err(PeerTranscodeError::Conflict(format!(
+                    "Refusing to bind over non-empty directory '{valid_to}'"
+                )));
+            }
+            let unit_changed = previous.as_deref() != Some(rendered.as_bytes());
+            if unit_changed {
+                self.write_managed_file_atomic(
+                    &systemd_dir,
+                    &unit_name,
+                    rendered.as_bytes(),
+                    0o644,
+                )?;
+            }
+            let paths_dropin_changed =
+                match self.sync_worker_transcode_paths_dropin_locked(&systemd_dir) {
+                    Ok(changed) => changed,
+                    Err(err) => {
+                        if unit_changed {
+                            let _ = self.restore_managed_file_after_failure(
+                                &systemd_dir,
+                                &unit_name,
+                                previous.as_deref(),
+                                0o644,
+                            );
+                            let _ = self.sync_worker_transcode_paths_dropin_locked(&systemd_dir);
+                        }
+                        return Err(err);
+                    }
+                };
+            (previous, unit_changed, paths_dropin_changed)
+        };
 
         let apply_res = async {
             let _ = self
@@ -3623,12 +5041,21 @@ impl PeerTranscodeManager {
 
         if let Err(apply_err) = apply_res {
             if unit_changed {
-                let _ = self.restore_managed_file_after_failure(
-                    &systemd_dir,
-                    &unit_name,
-                    previous.as_deref(),
-                    0o644,
-                );
+                if let Ok((_mem_guard, _file_lock)) =
+                    self.acquire_transcode_write_locks(false).await
+                {
+                    if let Ok(Some(systemd_dir)) =
+                        self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)
+                    {
+                        let _ = self.restore_managed_file_after_failure(
+                            &systemd_dir,
+                            &unit_name,
+                            previous.as_deref(),
+                            0o644,
+                        );
+                        let _ = self.sync_worker_transcode_paths_dropin_locked(&systemd_dir);
+                    }
+                }
                 let _ = self
                     .run_command_with_timeout(
                         "systemctl",
@@ -3642,6 +5069,11 @@ impl PeerTranscodeManager {
             )));
         }
 
+        drop(unit_guard);
+        if paths_dropin_changed {
+            self.maybe_restart_active_worker().await?;
+        }
+
         Ok(TranscodeMutationReport {
             changed: true,
             detail: format!("Bound media directory '{valid_from}' to '{valid_to}' via {unit_name}"),
@@ -3651,7 +5083,8 @@ impl PeerTranscodeManager {
         })
     }
 
-    /// Stops and removes a managed media bind `.mount` unit for `to`, then runs `daemon-reload`.
+    /// Stops and removes a managed media bind `.mount` unit for `to`, updates
+    /// `af-transcode-worker.service.d/30-aetherflow-transcode-paths.conf`, and runs `daemon-reload`.
     pub async fn remove_bind_media(
         &self,
         to: &str,
@@ -3659,21 +5092,35 @@ impl PeerTranscodeManager {
         let valid_to = validate_canonical_path_syntax(to, true)?;
         let unit_name = derive_systemd_mount_unit(&valid_to)?;
 
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
-        let Some(systemd_dir) = self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)?
-        else {
-            return Ok(TranscodeMutationReport {
-                changed: false,
-                detail: format!("Bind mount unit {unit_name} is already absent"),
-                units: Vec::new(),
-                paths: Vec::new(),
-                api_restart_required: false,
-            });
+        let unit_guard = self.acquire_unit_lock(&unit_name).await?;
+
+        let present = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+            let Some(systemd_dir) =
+                self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)?
+            else {
+                return Ok(TranscodeMutationReport {
+                    changed: false,
+                    detail: format!("Bind mount unit {unit_name} is already absent"),
+                    units: Vec::new(),
+                    paths: Vec::new(),
+                    api_restart_required: false,
+                });
+            };
+            match self.read_managed_file_checked(&systemd_dir, &unit_name, true)? {
+                Some(bytes) => {
+                    if !has_managed_purpose(&bytes, TRANSCODE_BIND_PURPOSE_HEADER) {
+                        return Err(PeerTranscodeError::Conflict(format!(
+                            "Refusing to remove non-bind mount unit '{unit_name}'"
+                        )));
+                    }
+                    true
+                }
+                None => false,
+            }
         };
-        if self
-            .read_managed_file_checked(&systemd_dir, &unit_name, true)?
-            .is_none()
-        {
+
+        if !present {
             return Ok(TranscodeMutationReport {
                 changed: false,
                 detail: format!("Bind mount unit {unit_name} is already absent"),
@@ -3691,14 +5138,31 @@ impl PeerTranscodeManager {
             )
             .await?;
 
-        let Some(previous) = self.delete_managed_file_checked(&systemd_dir, &unit_name)? else {
-            return Ok(TranscodeMutationReport {
-                changed: false,
-                detail: format!("Bind mount unit {unit_name} is already absent"),
-                units: Vec::new(),
-                paths: Vec::new(),
-                api_restart_required: false,
-            });
+        let (previous, paths_dropin_changed) = {
+            let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(false).await?;
+            let Some(systemd_dir) =
+                self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)?
+            else {
+                return Ok(TranscodeMutationReport {
+                    changed: false,
+                    detail: format!("Bind mount unit {unit_name} is already absent"),
+                    units: Vec::new(),
+                    paths: Vec::new(),
+                    api_restart_required: false,
+                });
+            };
+            let Some(previous) = self.delete_managed_file_checked(&systemd_dir, &unit_name)? else {
+                return Ok(TranscodeMutationReport {
+                    changed: false,
+                    detail: format!("Bind mount unit {unit_name} is already absent"),
+                    units: Vec::new(),
+                    paths: Vec::new(),
+                    api_restart_required: false,
+                });
+            };
+            let paths_dropin_changed =
+                self.sync_worker_transcode_paths_dropin_locked(&systemd_dir)?;
+            (previous, paths_dropin_changed)
         };
 
         if let Err(reload_err) = self
@@ -3709,7 +5173,15 @@ impl PeerTranscodeManager {
             )
             .await
         {
-            let _ = self.write_managed_file_atomic(&systemd_dir, &unit_name, &previous, 0o644);
+            if let Ok((_mem_guard, _file_lock)) = self.acquire_transcode_write_locks(false).await {
+                if let Ok(Some(systemd_dir)) =
+                    self.open_existing_system_dir(&self.config.systemd_dir, 0o6022)
+                {
+                    let _ =
+                        self.write_managed_file_atomic(&systemd_dir, &unit_name, &previous, 0o644);
+                    let _ = self.sync_worker_transcode_paths_dropin_locked(&systemd_dir);
+                }
+            }
             let _ = self
                 .run_command_with_timeout(
                     "systemctl",
@@ -3722,6 +5194,11 @@ impl PeerTranscodeManager {
             )));
         }
 
+        drop(unit_guard);
+        if paths_dropin_changed {
+            self.maybe_restart_active_worker().await?;
+        }
+
         Ok(TranscodeMutationReport {
             changed: true,
             detail: format!("Stopped and removed bind mount unit {unit_name}"),
@@ -3731,17 +5208,64 @@ impl PeerTranscodeManager {
         })
     }
 
-    /// Schedules a deferred `systemctl restart aetherflow-api.service` (~1s after response) via
-    /// `systemd-run` so a newly installed `aetherflow-api.service.d/20-aetherflow-transcode.conf`
-    /// drop-in takes effect cleanly without aborting the live HTTP response.
+    /// Deterministically schedules a debounced deferred `systemctl restart aetherflow-api.service`
+    /// (~1s after response) via `systemd-run --unit=aetherflow-transcode-api-restart`. Concurrent
+    /// or repeated calls while the timer/service is already active or queued coalesce cleanly
+    /// without spawning duplicate transient units.
     pub async fn schedule_api_restart(
         &self,
     ) -> Result<TranscodeMutationReport, PeerTranscodeError> {
-        let (_mem_guard, _file_lock) = self.acquire_transcode_write_locks(true).await?;
-        let token = &uuid::Uuid::new_v4().simple().to_string()[..12];
-        let transient_unit = format!("aetherflow-api-transcode-restart-{token}");
+        let _unit_guard = self.acquire_unit_lock(TRANSCODE_API_RESTART_UNIT).await?;
+        let timer_unit = format!("{TRANSCODE_API_RESTART_UNIT}.timer");
+        let service_unit = format!("{TRANSCODE_API_RESTART_UNIT}.service");
+
+        let check_states = |stdout: &str| -> (bool, bool) {
+            let mut active_or_queued = false;
+            let mut failed = false;
+            for line in stdout.lines() {
+                match line.trim() {
+                    "active" | "activating" | "reloading" => active_or_queued = true,
+                    "failed" => failed = true,
+                    _ => {}
+                }
+            }
+            (active_or_queued, failed)
+        };
+
+        let probe = self
+            .run_command_with_timeout(
+                "systemctl",
+                &strings(&["is-active", &timer_unit, &service_unit]),
+                self.config.command_timeout,
+            )
+            .await?;
+        let (already_active, had_failed) = check_states(&probe.stdout);
+        if already_active {
+            return Ok(TranscodeMutationReport {
+                changed: false,
+                detail: format!(
+                    "Deferred restart of {API_SERVICE_UNIT} is already scheduled via transient unit {TRANSCODE_API_RESTART_UNIT}"
+                ),
+                units: vec![
+                    API_SERVICE_UNIT.to_string(),
+                    TRANSCODE_API_RESTART_UNIT.to_string(),
+                ],
+                paths: Vec::new(),
+                api_restart_required: false,
+            });
+        }
+        if had_failed {
+            let _ = self
+                .run_command_with_timeout(
+                    "systemctl",
+                    &strings(&["reset-failed", &timer_unit, &service_unit]),
+                    self.config.command_timeout,
+                )
+                .await;
+        }
+
         let args = vec![
-            format!("--unit={transient_unit}"),
+            format!("--unit={TRANSCODE_API_RESTART_UNIT}"),
             "--on-active=1s".to_string(),
             "--timer-property=AccuracySec=100ms".to_string(),
             "--timer-property=RemainAfterElapse=no".to_string(),
@@ -3752,16 +5276,70 @@ impl PeerTranscodeManager {
             "restart".to_string(),
             API_SERVICE_UNIT.to_string(),
         ];
-        let _ = self
+
+        match self
             .run_checked_with_timeout("systemd-run", &args, self.config.command_timeout)
-            .await?;
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                let err_lower = err.to_string().to_lowercase();
+                if err_lower.contains("already exists") {
+                    let recheck = self
+                        .run_command_with_timeout(
+                            "systemctl",
+                            &strings(&["is-active", &timer_unit, &service_unit]),
+                            self.config.command_timeout,
+                        )
+                        .await?;
+                    let (now_active, now_failed) = check_states(&recheck.stdout);
+                    if now_active {
+                        return Ok(TranscodeMutationReport {
+                            changed: false,
+                            detail: format!(
+                                "Deferred restart of {API_SERVICE_UNIT} is already scheduled via transient unit {TRANSCODE_API_RESTART_UNIT}"
+                            ),
+                            units: vec![
+                                API_SERVICE_UNIT.to_string(),
+                                TRANSCODE_API_RESTART_UNIT.to_string(),
+                            ],
+                            paths: Vec::new(),
+                            api_restart_required: false,
+                        });
+                    }
+                    if now_failed {
+                        let _ = self
+                            .run_command_with_timeout(
+                                "systemctl",
+                                &strings(&["reset-failed", &timer_unit, &service_unit]),
+                                self.config.command_timeout,
+                            )
+                            .await;
+                        let _ = self
+                            .run_checked_with_timeout(
+                                "systemd-run",
+                                &args,
+                                self.config.command_timeout,
+                            )
+                            .await?;
+                    } else {
+                        return Err(err);
+                    }
+                } else {
+                    return Err(err);
+                }
+            }
+        }
 
         Ok(TranscodeMutationReport {
             changed: true,
             detail: format!(
-                "Scheduled deferred restart of {API_SERVICE_UNIT} via transient unit {transient_unit}"
+                "Scheduled deferred restart of {API_SERVICE_UNIT} via transient unit {TRANSCODE_API_RESTART_UNIT}"
             ),
-            units: vec![API_SERVICE_UNIT.to_string(), transient_unit],
+            units: vec![
+                API_SERVICE_UNIT.to_string(),
+                TRANSCODE_API_RESTART_UNIT.to_string(),
+            ],
             paths: Vec::new(),
             api_restart_required: false,
         })
@@ -3906,9 +5484,15 @@ impl PeerTranscodeManager {
                     self.remove_transcode_mounts(link_id, paths).await?,
                 ))
             }
-            PeerTranscodeRequest::BindMedia { from, to, writable } => Ok(
-                PeerTranscodeResponse::Mutation(self.bind_media(from, to, *writable).await?),
-            ),
+            PeerTranscodeRequest::BindMedia {
+                from,
+                to,
+                writable,
+                calling_link_segment,
+            } => Ok(PeerTranscodeResponse::Mutation(
+                self.bind_media_with_link(from, to, *writable, calling_link_segment.as_deref())
+                    .await?,
+            )),
             PeerTranscodeRequest::RemoveBindMedia { to } => Ok(PeerTranscodeResponse::Mutation(
                 self.remove_bind_media(to).await?,
             )),

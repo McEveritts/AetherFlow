@@ -40,12 +40,16 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{
+    watch, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore,
+};
 use tokio::time::Instant;
+use tracing::Instrument;
 
 #[cfg(test)]
 mod tests;
@@ -57,10 +61,13 @@ pub const DEFAULT_PEER_NFS_CONF_DIR: &str = "/etc/nfs.conf.d";
 pub const DEFAULT_PEER_SYSTEMD_DIR: &str = "/etc/systemd/system";
 pub const DEFAULT_PEER_MOUNTS_ROOT: &str = "/mnt/af-peers";
 pub const PEER_NFSD_CONF_NAME: &str = "aetherflow-peers.conf";
+pub const PEER_NFSD_DROPIN_DIR_NAME: &str = "nfs-server.service.d";
+pub const PEER_NFSD_DROPIN_NAME: &str = "20-aetherflow-peers.conf";
 pub const PEER_SENTINEL_FILE_NAME: &str = ".af-peer-sentinel";
 pub const PEER_MANAGED_HEADER: &str =
     "# Managed by AetherFlow Peer Clustering. Do not edit manually.";
 pub const DEFAULT_SENTINEL_PROBE_TIMEOUT_MS: u64 = 5_000;
+pub const MAX_CONCURRENT_SENTINEL_PROBES: usize = 4;
 
 const PEER_STORAGE_LOCK_FILE_NAME: &str = ".aetherflow-peer-storage.lock";
 const PEER_EXPORT_FILE_PREFIX: &str = "aetherflow-peer-";
@@ -1014,6 +1021,24 @@ fn render_nfsd_conf(tunnel_ip: IpAddr) -> String {
     format!("{PEER_MANAGED_HEADER}\n[nfsd]\nhost={tunnel_ip}\n")
 }
 
+fn render_nfsd_boot_dropin() -> String {
+    format!(
+        "{PEER_MANAGED_HEADER}\n\
+         [Unit]\n\
+         After={PEER_WG_SERVICE_UNIT}\n\
+         Wants={PEER_WG_SERVICE_UNIT}\n"
+    )
+}
+
+pub(crate) fn parse_active_etc_exports_lines(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
 fn render_nfs_mount_unit(
     mount_path: &str,
     tunnel_ip: IpAddr,
@@ -1081,9 +1106,273 @@ fn render_bind_mount_unit(source_path: &str, mount_path: &str, writable: bool) -
     (options, content)
 }
 
+type SentinelProbeOutcome = Result<(), String>;
+
+struct InFlightSentinelProbe {
+    id: u64,
+    rx: watch::Receiver<Option<SentinelProbeOutcome>>,
+}
+
+struct InFlightProbeGuard {
+    in_flight: Arc<StdMutex<HashMap<PathBuf, InFlightSentinelProbe>>>,
+    key: PathBuf,
+    id: u64,
+    permit: Option<OwnedSemaphorePermit>,
+    cleaned: bool,
+}
+
+impl InFlightProbeGuard {
+    fn finish(mut self) {
+        self.cleanup();
+    }
+
+    fn cleanup(&mut self) {
+        if !self.cleaned {
+            self.cleaned = true;
+            let mut map = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+            if map.get(&self.key).is_some_and(|entry| entry.id == self.id) {
+                map.remove(&self.key);
+            }
+            drop(map);
+            let _ = self.permit.take();
+        }
+    }
+}
+
+impl Drop for InFlightProbeGuard {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+struct SentinelProbeCoordinator {
+    semaphore: Arc<Semaphore>,
+    in_flight: Arc<StdMutex<HashMap<PathBuf, InFlightSentinelProbe>>>,
+    next_id: AtomicU64,
+}
+
+static SENTINEL_PROBE_COORDINATOR: Lazy<SentinelProbeCoordinator> =
+    Lazy::new(|| SentinelProbeCoordinator::new(MAX_CONCURRENT_SENTINEL_PROBES));
+
+fn normalize_probe_mount_key(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::RootDir => normalized.push(Component::RootDir.as_os_str()),
+            Component::Normal(seg) => normalized.push(seg),
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {}
+        }
+    }
+    normalized
+}
+
+fn run_blocking_sentinel_probe(target_dir: PathBuf) -> SentinelProbeOutcome {
+    let Some(dir) = ReceiptDirectory::open_existing(&target_dir)
+        .map_err(|err| format!("Mount directory is unsafe or inaccessible: {err}"))?
+    else {
+        return Err("Mount directory does not exist".to_string());
+    };
+    let stat = entry_at(dir.file(), OsStr::new(PEER_SENTINEL_FILE_NAME)).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            "Peer sentinel file is missing".to_string()
+        } else {
+            format!("Cannot stat peer sentinel file: {err}")
+        }
+    })?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err("Peer sentinel entry is not a regular file".to_string());
+    }
+    Ok(())
+}
+
+async fn wait_for_probe_outcome(
+    mut rx: watch::Receiver<Option<SentinelProbeOutcome>>,
+) -> Option<SentinelProbeOutcome> {
+    loop {
+        if let Some(outcome) = rx.borrow().clone() {
+            return Some(outcome);
+        }
+        if rx.changed().await.is_err() {
+            return rx.borrow().clone();
+        }
+    }
+}
+
+impl SentinelProbeCoordinator {
+    fn new(max_concurrent: usize) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
+            in_flight: Arc::new(StdMutex::new(HashMap::new())),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    async fn probe_with<F>(
+        &self,
+        resolved_mount_dir: &Path,
+        display_mount_path: &str,
+        timeout: Duration,
+        probe_fn: F,
+    ) -> PeerSentinelProbeResponse
+    where
+        F: FnOnce(PathBuf) -> SentinelProbeOutcome + Send + 'static,
+    {
+        let display_sentinel = format!(
+            "{}/{PEER_SENTINEL_FILE_NAME}",
+            display_mount_path.trim_end_matches('/')
+        );
+        if !resolved_mount_dir.is_absolute()
+            || resolved_mount_dir
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+        {
+            return PeerSentinelProbeResponse {
+                mount_path: display_mount_path.to_string(),
+                sentinel_path: display_sentinel,
+                healthy: false,
+                timed_out: false,
+                error: Some(
+                    "Mount directory for sentinel probe must be an absolute path without '..'"
+                        .to_string(),
+                ),
+            };
+        }
+
+        let key = normalize_probe_mount_key(resolved_mount_dir);
+        let deadline = Instant::now() + timeout;
+
+        // Fast path: coalesce onto an already in-flight OS probe thread for this mount without
+        // consuming an additional concurrency permit or spawning another thread.
+        let existing_rx = {
+            let map = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+            map.get(&key).map(|entry| entry.rx.clone())
+        };
+
+        let rx = match existing_rx {
+            Some(rx) => rx,
+            None => {
+                let permit = match tokio::time::timeout_at(
+                    deadline,
+                    Arc::clone(&self.semaphore).acquire_owned(),
+                )
+                .await
+                {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) => {
+                        return PeerSentinelProbeResponse {
+                            mount_path: display_mount_path.to_string(),
+                            sentinel_path: display_sentinel,
+                            healthy: false,
+                            timed_out: false,
+                            error: Some("Sentinel probe concurrency semaphore closed".to_string()),
+                        };
+                    }
+                    Err(_) => {
+                        return PeerSentinelProbeResponse {
+                            mount_path: display_mount_path.to_string(),
+                            sentinel_path: display_sentinel,
+                            healthy: false,
+                            timed_out: true,
+                            error: Some(
+                                "Sentinel probe concurrency limit reached (other mounts hung)"
+                                    .to_string(),
+                            ),
+                        };
+                    }
+                };
+
+                // Re-check single-flight map after acquiring the permit so two callers racing
+                // on the same mount still coalesce onto a single OS thread.
+                let mut map = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(entry) = map.get(&key) {
+                    let rx = entry.rx.clone();
+                    drop(map);
+                    drop(permit);
+                    rx
+                } else {
+                    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                    let (tx, rx) = watch::channel(None);
+                    map.insert(key.clone(), InFlightSentinelProbe { id, rx: rx.clone() });
+                    drop(map);
+
+                    let in_flight = Arc::clone(&self.in_flight);
+                    let key_for_thread = key.clone();
+                    let target_dir = resolved_mount_dir.to_path_buf();
+                    let spawn_res = std::thread::Builder::new()
+                        .name("af-sentinel-probe".to_string())
+                        .spawn(move || {
+                            let guard = InFlightProbeGuard {
+                                in_flight,
+                                key: key_for_thread,
+                                id,
+                                permit: Some(permit),
+                                cleaned: false,
+                            };
+                            let outcome = probe_fn(target_dir);
+                            // Remove the single-flight entry and release the permit BEFORE
+                            // waking waiters so immediate follow-up probes start fresh.
+                            guard.finish();
+                            let _ = tx.send(Some(outcome));
+                        });
+                    if let Err(err) = spawn_res {
+                        let mut map = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+                        if map.get(&key).is_some_and(|entry| entry.id == id) {
+                            map.remove(&key);
+                        }
+                        return PeerSentinelProbeResponse {
+                            mount_path: display_mount_path.to_string(),
+                            sentinel_path: display_sentinel,
+                            healthy: false,
+                            timed_out: false,
+                            error: Some(format!("Failed spawning sentinel probe thread: {err}")),
+                        };
+                    }
+                    rx
+                }
+            }
+        };
+
+        match tokio::time::timeout_at(deadline, wait_for_probe_outcome(rx)).await {
+            Ok(Some(Ok(()))) => PeerSentinelProbeResponse {
+                mount_path: display_mount_path.to_string(),
+                sentinel_path: display_sentinel,
+                healthy: true,
+                timed_out: false,
+                error: None,
+            },
+            Ok(Some(Err(message))) => PeerSentinelProbeResponse {
+                mount_path: display_mount_path.to_string(),
+                sentinel_path: display_sentinel,
+                healthy: false,
+                timed_out: false,
+                error: Some(message),
+            },
+            Ok(None) => PeerSentinelProbeResponse {
+                mount_path: display_mount_path.to_string(),
+                sentinel_path: display_sentinel,
+                healthy: false,
+                timed_out: false,
+                error: Some("Sentinel probe worker terminated unexpectedly".to_string()),
+            },
+            Err(_) => PeerSentinelProbeResponse {
+                mount_path: display_mount_path.to_string(),
+                sentinel_path: display_sentinel,
+                healthy: false,
+                timed_out: true,
+                error: Some(format!(
+                    "Sentinel probe timed out after {}ms",
+                    timeout.as_millis()
+                )),
+            },
+        }
+    }
+}
+
 /// Probes `<mount_dir>/.af-peer-sentinel` with a bounded timeout, rejecting symlinks and
 /// non-regular sentinel files.
 ///
+/// Uses per-mount single-flight deduplication and a bounded dedicated OS probe thread pool
+/// (never Tokio's shared blocking pool) so hung NFS mounts cannot starve unrelated runner tasks.
 /// Safe for direct non-privileged use in `af-api`'s 15-second peer health loop and local tests.
 pub async fn probe_sentinel_file(mount_dir: &Path, timeout: Duration) -> PeerSentinelProbeResponse {
     probe_sentinel_file_for_display(mount_dir, &mount_dir.to_string_lossy(), timeout).await
@@ -1094,80 +1383,14 @@ async fn probe_sentinel_file_for_display(
     display_mount_path: &str,
     timeout: Duration,
 ) -> PeerSentinelProbeResponse {
-    let display_sentinel = format!(
-        "{}/{PEER_SENTINEL_FILE_NAME}",
-        display_mount_path.trim_end_matches('/')
-    );
-    if !resolved_mount_dir.is_absolute()
-        || resolved_mount_dir
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
-    {
-        return PeerSentinelProbeResponse {
-            mount_path: display_mount_path.to_string(),
-            sentinel_path: display_sentinel,
-            healthy: false,
-            timed_out: false,
-            error: Some(
-                "Mount directory for sentinel probe must be an absolute path without '..'"
-                    .to_string(),
-            ),
-        };
-    }
-
-    let target_dir = resolved_mount_dir.to_path_buf();
-    let probe_task = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let Some(dir) = ReceiptDirectory::open_existing(&target_dir)
-            .map_err(|err| format!("Mount directory is unsafe or inaccessible: {err}"))?
-        else {
-            return Err("Mount directory does not exist".to_string());
-        };
-        let stat = entry_at(dir.file(), OsStr::new(PEER_SENTINEL_FILE_NAME)).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                "Peer sentinel file is missing".to_string()
-            } else {
-                format!("Cannot stat peer sentinel file: {err}")
-            }
-        })?;
-        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
-            return Err("Peer sentinel entry is not a regular file".to_string());
-        }
-        Ok(())
-    });
-
-    match tokio::time::timeout(timeout, probe_task).await {
-        Ok(Ok(Ok(()))) => PeerSentinelProbeResponse {
-            mount_path: display_mount_path.to_string(),
-            sentinel_path: display_sentinel,
-            healthy: true,
-            timed_out: false,
-            error: None,
-        },
-        Ok(Ok(Err(message))) => PeerSentinelProbeResponse {
-            mount_path: display_mount_path.to_string(),
-            sentinel_path: display_sentinel,
-            healthy: false,
-            timed_out: false,
-            error: Some(message),
-        },
-        Ok(Err(_)) => PeerSentinelProbeResponse {
-            mount_path: display_mount_path.to_string(),
-            sentinel_path: display_sentinel,
-            healthy: false,
-            timed_out: false,
-            error: Some("Sentinel probe worker terminated unexpectedly".to_string()),
-        },
-        Err(_) => PeerSentinelProbeResponse {
-            mount_path: display_mount_path.to_string(),
-            sentinel_path: display_sentinel,
-            healthy: false,
-            timed_out: true,
-            error: Some(format!(
-                "Sentinel probe timed out after {}ms",
-                timeout.as_millis()
-            )),
-        },
-    }
+    SENTINEL_PROBE_COORDINATOR
+        .probe_with(
+            resolved_mount_dir,
+            display_mount_path,
+            timeout,
+            run_blocking_sentinel_probe,
+        )
+        .await
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2483,8 +2706,28 @@ impl PeerStorageManager {
         })
     }
 
-    /// Binds `nfsd` exclusively to `tunnel_ip` via `/etc/nfs.conf.d/aetherflow-peers.conf` and
-    /// restarts `nfs-server.service`. Never touches `/etc/nfs.conf` or unrelated drop-ins.
+    /// Read-only inspection of `/etc/exports` (under isolated root when configured) returning any
+    /// pre-existing active (non-blank, non-comment) unmanaged export lines. Never writes or
+    /// modifies `/etc/exports`.
+    pub(crate) fn inspect_unmanaged_etc_exports(&self) -> Vec<String> {
+        let etc_dir_path = self.resolve_host_path("/etc");
+        let Ok(Some(etc_dir)) = ReceiptDirectory::open_existing(&etc_dir_path) else {
+            return Vec::new();
+        };
+        let Ok(Some(bytes)) =
+            etc_dir.read_regular_bounded(OsStr::new("exports"), MAX_MANAGED_FILE_BYTES)
+        else {
+            return Vec::new();
+        };
+        let contents = String::from_utf8_lossy(&bytes);
+        parse_active_etc_exports_lines(&contents)
+    }
+
+    /// Binds `nfsd` exclusively to `tunnel_ip` via `/etc/nfs.conf.d/aetherflow-peers.conf`,
+    /// installs the managed boot-ordering drop-in
+    /// `/etc/systemd/system/nfs-server.service.d/20-aetherflow-peers.conf`, runs
+    /// `systemctl daemon-reload` when the drop-in changes, and restarts `nfs-server.service`.
+    /// Never touches `/etc/nfs.conf`, `/etc/exports`, or unrelated drop-ins.
     pub async fn configure_nfsd(
         &self,
         tunnel_ip: &str,
@@ -2493,15 +2736,40 @@ impl PeerStorageManager {
         let (_mem_guard, _file_lock) = self.acquire_storage_write_locks(true).await?;
 
         let conf_dir = self.ensure_system_dir(&self.nfs_conf_dir, 0o755, 0o6022)?;
-        let previous = self.read_managed_file_checked(&conf_dir, PEER_NFSD_CONF_NAME, true)?;
-        let rendered = render_nfsd_conf(valid_ip);
+        let previous_conf = self.read_managed_file_checked(&conf_dir, PEER_NFSD_CONF_NAME, true)?;
+        let rendered_conf = render_nfsd_conf(valid_ip);
         let config_path = format!("{DEFAULT_PEER_NFS_CONF_DIR}/{PEER_NFSD_CONF_NAME}");
 
+        let _systemd_dir = self.ensure_system_dir(&self.systemd_dir, 0o755, 0o6022)?;
+        let dropin_dir_path = self.systemd_dir.join(PEER_NFSD_DROPIN_DIR_NAME);
+        let dropin_dir = self.ensure_system_dir(&dropin_dir_path, 0o755, 0o6022)?;
+        let previous_dropin =
+            self.read_managed_file_checked(&dropin_dir, PEER_NFSD_DROPIN_NAME, true)?;
+        let rendered_dropin = render_nfsd_boot_dropin();
+        let dropin_path = format!(
+            "{DEFAULT_PEER_SYSTEMD_DIR}/{PEER_NFSD_DROPIN_DIR_NAME}/{PEER_NFSD_DROPIN_NAME}"
+        );
+
+        let unmanaged_etc_exports = self.inspect_unmanaged_etc_exports();
+        if !unmanaged_etc_exports.is_empty() {
+            tracing::warn!(
+                etc_exports = "/etc/exports",
+                active_line_count = unmanaged_etc_exports.len(),
+                tunnel_ip = %valid_ip,
+                "Pre-existing active unmanaged export lines detected in /etc/exports; \
+                 binding nfsd exclusively to the peer tunnel IP may make LAN NFS exports unreachable. \
+                 AetherFlow will not modify /etc/exports."
+            );
+        }
+
         let before_state = self.unit_is_active(PEER_NFSD_SERVICE_UNIT).await;
-        let unchanged = previous
+        let conf_unchanged = previous_conf
             .as_deref()
-            .is_some_and(|prev| prev == rendered.as_bytes());
-        if unchanged && before_state == "active" {
+            .is_some_and(|prev| prev == rendered_conf.as_bytes());
+        let dropin_unchanged = previous_dropin
+            .as_deref()
+            .is_some_and(|prev| prev == rendered_dropin.as_bytes());
+        if conf_unchanged && dropin_unchanged && before_state == "active" {
             return Ok(PeerNfsdConfigResponse {
                 config_path,
                 tunnel_ip: valid_ip.to_string(),
@@ -2511,16 +2779,43 @@ impl PeerStorageManager {
             });
         }
 
-        if !unchanged {
+        if !conf_unchanged {
             self.write_managed_file_atomic(
                 &conf_dir,
                 PEER_NFSD_CONF_NAME,
-                rendered.as_bytes(),
+                rendered_conf.as_bytes(),
                 0o644,
             )?;
         }
+        if !dropin_unchanged {
+            if let Err(dropin_err) = self.write_managed_file_atomic(
+                &dropin_dir,
+                PEER_NFSD_DROPIN_NAME,
+                rendered_dropin.as_bytes(),
+                0o644,
+            ) {
+                if !conf_unchanged {
+                    let _ = self.restore_managed_file_after_failure(
+                        &conf_dir,
+                        PEER_NFSD_CONF_NAME,
+                        previous_conf.as_deref(),
+                        0o644,
+                    );
+                }
+                return Err(dropin_err);
+            }
+        }
 
         let apply_res = async {
+            if !dropin_unchanged {
+                let _ = self
+                    .run_checked_with_timeout(
+                        "systemctl",
+                        &strings(&["daemon-reload"]),
+                        self.command_timeout,
+                    )
+                    .await?;
+            }
             let _ = self
                 .run_checked_with_timeout(
                     "systemctl",
@@ -2540,29 +2835,70 @@ impl PeerStorageManager {
         .await;
 
         if let Err(apply_err) = apply_res {
-            if !unchanged {
-                let rollback_res = self.restore_managed_file_after_failure(
+            let mut rollback_errors = Vec::new();
+            let conf_rb_ok = if !conf_unchanged {
+                match self.restore_managed_file_after_failure(
                     &conf_dir,
                     PEER_NFSD_CONF_NAME,
-                    previous.as_deref(),
+                    previous_conf.as_deref(),
                     0o644,
-                );
-                if before_state == "active" && previous.is_some() && rollback_res.is_ok() {
-                    let _ = self
-                        .output_with_timeout(
-                            "systemctl",
-                            &strings(&["restart", PEER_NFSD_SERVICE_UNIT]),
-                            self.mount_command_timeout,
-                        )
-                        .await;
+                ) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        rollback_errors.push(format!("{config_path}: {err}"));
+                        false
+                    }
                 }
-                if let Err(rb_err) = rollback_res {
-                    return Err(PeerStorageError::Runtime(format!(
-                        "Failed restarting {PEER_NFSD_SERVICE_UNIT} and rollback of {config_path} failed ({apply_err}; rollback: {rb_err})"
-                    )));
+            } else {
+                true
+            };
+            let dropin_rb_ok = if !dropin_unchanged {
+                match self.restore_managed_file_after_failure(
+                    &dropin_dir,
+                    PEER_NFSD_DROPIN_NAME,
+                    previous_dropin.as_deref(),
+                    0o644,
+                ) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        rollback_errors.push(format!("{dropin_path}: {err}"));
+                        false
+                    }
                 }
+            } else {
+                true
+            };
+            if !dropin_unchanged && dropin_rb_ok {
+                let _ = self
+                    .output_with_timeout(
+                        "systemctl",
+                        &strings(&["daemon-reload"]),
+                        self.command_timeout,
+                    )
+                    .await;
+            }
+            if before_state == "active"
+                && (previous_conf.is_some() || conf_unchanged)
+                && conf_rb_ok
+                && dropin_rb_ok
+            {
+                let _ = self
+                    .output_with_timeout(
+                        "systemctl",
+                        &strings(&["restart", PEER_NFSD_SERVICE_UNIT]),
+                        self.mount_command_timeout,
+                    )
+                    .await;
+            }
+            if !rollback_errors.is_empty() {
                 return Err(PeerStorageError::Runtime(format!(
-                    "Failed restarting {PEER_NFSD_SERVICE_UNIT}; previous {config_path} was restored ({apply_err})"
+                    "Failed applying {PEER_NFSD_SERVICE_UNIT} configuration and rollback failed ({apply_err}; rollback: {})",
+                    rollback_errors.join(", ")
+                )));
+            }
+            if !conf_unchanged || !dropin_unchanged {
+                return Err(PeerStorageError::Runtime(format!(
+                    "Failed applying {PEER_NFSD_SERVICE_UNIT} configuration; previous {config_path} and {dropin_path} state were restored ({apply_err})"
                 )));
             }
             return Err(apply_err);
@@ -2574,7 +2910,7 @@ impl PeerStorageManager {
             tunnel_ip: valid_ip.to_string(),
             service_unit: PEER_NFSD_SERVICE_UNIT.to_string(),
             service_state,
-            changed: !unchanged || before_state != "active",
+            changed: !conf_unchanged || !dropin_unchanged || before_state != "active",
         })
     }
 
@@ -3328,7 +3664,7 @@ pub(crate) async fn handle_peer_storage(
     // in-flight write, exportfs/systemctl apply, rollback, or lock release.
     let result = if req.is_mutating() {
         let mgr = Arc::clone(&manager);
-        match tokio::spawn(async move { mgr.execute(&req).await }).await {
+        match tokio::spawn(async move { mgr.execute(&req).await }.in_current_span()).await {
             Ok(res) => res,
             Err(_) => Err(PeerStorageError::Runtime(
                 "Peer-storage operation task terminated unexpectedly".to_string(),

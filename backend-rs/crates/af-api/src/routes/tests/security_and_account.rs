@@ -686,9 +686,10 @@ async fn health_endpoint_reports_peer_protocol_and_links_capability() {
         payload["capabilities"],
         serde_json::json!(["links", "grants", "storage", "transcode"])
     );
-    assert!(
-        payload.get("transcode").is_some(),
-        "expected public /health to include transcode capability key"
+    assert_eq!(
+        payload.get("transcode"),
+        Some(&serde_json::Value::Null),
+        "expected public /health to return null for unauthenticated transcode key"
     );
 
     let live_resp = app

@@ -14,6 +14,19 @@ pub fn is_lifecycle_busy(error: &anyhow::Error) -> bool {
 }
 
 #[cfg(unix)]
+fn runner_post_request_builder(uri: &str) -> hyper::http::request::Builder {
+    let mut builder = hyper::Request::builder()
+        .method(hyper::Method::POST)
+        .uri(uri)
+        .header("Host", "unix")
+        .header("Content-Type", "application/json");
+    if let Some(request_id) = current_runner_request_id() {
+        builder = builder.header(RUNNER_REQUEST_ID_HEADER, request_id);
+    }
+    builder
+}
+
+#[cfg(unix)]
 pub(crate) async fn post_runner_json<T: Serialize + ?Sized>(
     endpoint: &str,
     payload: &T,
@@ -34,12 +47,7 @@ pub(crate) async fn post_runner_json<T: Serialize + ?Sized>(
             let _ = conn.await;
         });
 
-        let req = hyper::Request::builder()
-            .method(hyper::Method::POST)
-            .uri(endpoint)
-            .header("Host", "unix")
-            .header("Content-Type", "application/json")
-            .body(Full::new(Bytes::from(body_bytes)))?;
+        let req = runner_post_request_builder(endpoint).body(Full::new(Bytes::from(body_bytes)))?;
 
         let resp = sender.send_request(req).await?;
         if matches!(endpoint, "/v1/systemctl" | "/v1/blueprint/apply")
@@ -118,11 +126,7 @@ async fn post_runner_plugin_json<T: Serialize + ?Sized>(
             let _ = conn.await;
         });
 
-        let req = hyper::Request::builder()
-            .method(hyper::Method::POST)
-            .uri(endpoint)
-            .header("Host", "unix")
-            .header("Content-Type", "application/json")
+        let req = runner_post_request_builder(endpoint)
             .body(Full::new(Bytes::from(body_bytes)))
             .map_err(|err| {
                 PluginRunnerError::Runtime(format!("Failed to build runner request: {err}"))
@@ -462,11 +466,7 @@ where
                 let _ = conn.await;
             });
 
-            let req = hyper::Request::builder()
-                .method(hyper::Method::POST)
-                .uri("http://unix/v1/package")
-                .header("Host", "unix")
-                .header("Content-Type", "application/json")
+            let req = runner_post_request_builder("http://unix/v1/package")
                 .body(Full::new(Bytes::from(body_bytes)))?;
 
             let resp = sender.send_request(req).await?;
@@ -917,11 +917,7 @@ async fn post_runner_peer_network_json(
             let _ = conn.await;
         });
 
-        let http_req = hyper::Request::builder()
-            .method(hyper::Method::POST)
-            .uri(ENDPOINT)
-            .header("Host", "unix")
-            .header("Content-Type", "application/json")
+        let http_req = runner_post_request_builder(ENDPOINT)
             .body(Full::new(Bytes::from(body_bytes)))
             .map_err(|err| {
                 PeerNetworkError::Runtime(format!("Failed to build peer-network request: {err}"))
@@ -1037,11 +1033,7 @@ async fn post_runner_peer_storage_json(
             let _ = conn.await;
         });
 
-        let http_req = hyper::Request::builder()
-            .method(hyper::Method::POST)
-            .uri(ENDPOINT)
-            .header("Host", "unix")
-            .header("Content-Type", "application/json")
+        let http_req = runner_post_request_builder(ENDPOINT)
             .body(Full::new(Bytes::from(body_bytes)))
             .map_err(|err| {
                 PeerStorageError::Runtime(format!("Failed to build peer-storage request: {err}"))
@@ -1153,11 +1145,7 @@ async fn post_runner_peer_transcode_json(
             let _ = conn.await;
         });
 
-        let http_req = hyper::Request::builder()
-            .method(hyper::Method::POST)
-            .uri(ENDPOINT)
-            .header("Host", "unix")
-            .header("Content-Type", "application/json")
+        let http_req = runner_post_request_builder(ENDPOINT)
             .body(Full::new(Bytes::from(body_bytes)))
             .map_err(|err| {
                 PeerTranscodeError::Runtime(format!(
@@ -1268,4 +1256,207 @@ pub async fn dispatch_app_meta(app_name: &str) -> anyhow::Result<AppRuntimeMeta>
     meta.url_base =
         af_models::app_metadata::validate_app_web_path(&meta.url_base).unwrap_or_default();
     Ok(meta)
+}
+
+#[cfg(all(test, unix))]
+mod request_id_client_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    #[tokio::test]
+    async fn runner_client_propagates_x_request_id_across_all_unix_socket_endpoints() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        type SeenRequestLog = Arc<StdMutex<Vec<(String, Option<String>)>>>;
+        let seen: SeenRequestLog = Arc::new(StdMutex::new(Vec::new()));
+        let seen_clone = Arc::clone(&seen);
+
+        let record_and_respond = move |req: axum::extract::Request| {
+            let seen = Arc::clone(&seen_clone);
+            async move {
+                let path = req.uri().path().to_string();
+                let rid = req
+                    .headers()
+                    .get(RUNNER_REQUEST_ID_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                seen.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((path.clone(), rid));
+
+                if path == "/v1/package" {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from("ok\n"))
+                        .unwrap();
+                }
+
+                let output = match path.as_str() {
+                    "/v1/health" => "ready".to_string(),
+                    "/v1/plugins/status" => serde_json::to_string(&PluginRunnerStatusResponse {
+                        plugin_id: "demo".to_string(),
+                        unit_name: "af-plugin-demo.service".to_string(),
+                        active: true,
+                        sub_state: "running".to_string(),
+                        runtime_id: None,
+                        uid: Some(42),
+                        gid: Some(42),
+                    })
+                    .unwrap(),
+                    "/v1/peer-network" => serde_json::to_string(&PeerStatusResponse {
+                        installed: true,
+                        state: "inactive".to_string(),
+                        interface: "afpeer0".to_string(),
+                        public_key: String::new(),
+                        listen_port: String::new(),
+                        tunnel_ip: String::new(),
+                        tunnel_cidr: "10.231.0.0/16".to_string(),
+                        interface_address: String::new(),
+                        service_state: "inactive".to_string(),
+                        config_available: false,
+                        key_available: false,
+                        route_prefix_ready: false,
+                        peers: Vec::new(),
+                        error: None,
+                    })
+                    .unwrap(),
+                    "/v1/peer-storage" => serde_json::to_string(&PeerStoragePackagesResponse {
+                        installed: true,
+                        already_installed: true,
+                        packages: vec!["nfs-kernel-server".into(), "nfs-common".into()],
+                        versions: HashMap::new(),
+                    })
+                    .unwrap(),
+                    "/v1/peer-transcode" => {
+                        let body = serde_json::to_vec(&RunnerResponse {
+                            success: false,
+                            output: String::new(),
+                            error: "mock transcode probe".to_string(),
+                        })
+                        .unwrap();
+                        return Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .header("Content-Type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap();
+                    }
+                    _ => String::new(),
+                };
+                let body = serde_json::to_vec(&RunnerResponse {
+                    success: true,
+                    output,
+                    error: String::new(),
+                })
+                .unwrap();
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap()
+            }
+        };
+
+        let app = Router::new()
+            .route("/v1/health", post(record_and_respond.clone()))
+            .route("/v1/plugins/status", post(record_and_respond.clone()))
+            .route("/v1/package", post(record_and_respond.clone()))
+            .route("/v1/peer-network", post(record_and_respond.clone()))
+            .route("/v1/peer-storage", post(record_and_respond.clone()))
+            .route("/v1/peer-transcode", post(record_and_respond));
+
+        let sock_dir = PathBuf::from(format!(
+            "/tmp/af-rid-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
+        fs::create_dir_all(&sock_dir).expect("create short sock dir");
+        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).expect("chmod sock dir");
+        let sock_path = sock_dir.join("r.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind test runner sock");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let _ = serve_runner_connections(listener, app, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+        });
+
+        let prev_sock = env::var_os("AETHERFLOW_RUNNER_SOCK");
+        env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+
+        let result = std::panic::AssertUnwindSafe(async {
+            with_runner_request_id("corr-client-99".to_string(), async {
+                let _ = post_runner_json("/v1/health", &(), Duration::from_secs(2))
+                    .await
+                    .expect("post_runner_json");
+                let _ = dispatch_plugin_status(&PluginRunnerStatusRequest {
+                    plugin_id: "demo".to_string(),
+                    runtime_id: None,
+                })
+                .await
+                .expect("dispatch_plugin_status");
+                dispatch_package_action("install", "demo", "installpackage-demo", 0, |_| {})
+                    .await
+                    .expect("dispatch_package_action");
+                let _ = dispatch_peer_network(&PeerNetworkRequest::Status)
+                    .await
+                    .expect("dispatch_peer_network");
+                let _ = dispatch_peer_storage(&PeerStorageRequest::EnsurePackages)
+                    .await
+                    .expect("dispatch_peer_storage");
+                let transcode_err =
+                    dispatch_peer_transcode(&PeerTranscodeRequest::InspectJellyfinPaths)
+                        .await
+                        .unwrap_err();
+                assert!(matches!(transcode_err, PeerTranscodeError::NotFound(_)));
+            })
+            .await;
+
+            // Outside with_runner_request_id, no x-request-id header is sent.
+            let _ = post_runner_json("/v1/health", &(), Duration::from_secs(2))
+                .await
+                .expect("unscoped post_runner_json");
+
+            let recorded = seen.lock().unwrap().clone();
+            assert_eq!(
+                recorded,
+                vec![
+                    ("/v1/health".to_string(), Some("corr-client-99".to_string())),
+                    (
+                        "/v1/plugins/status".to_string(),
+                        Some("corr-client-99".to_string())
+                    ),
+                    (
+                        "/v1/package".to_string(),
+                        Some("corr-client-99".to_string())
+                    ),
+                    (
+                        "/v1/peer-network".to_string(),
+                        Some("corr-client-99".to_string())
+                    ),
+                    (
+                        "/v1/peer-storage".to_string(),
+                        Some("corr-client-99".to_string())
+                    ),
+                    (
+                        "/v1/peer-transcode".to_string(),
+                        Some("corr-client-99".to_string())
+                    ),
+                    ("/v1/health".to_string(), None),
+                ]
+            );
+        });
+        let outcome = futures::FutureExt::catch_unwind(result).await;
+
+        if let Some(prev) = prev_sock {
+            env::set_var("AETHERFLOW_RUNNER_SOCK", prev);
+        } else {
+            env::remove_var("AETHERFLOW_RUNNER_SOCK");
+        }
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+        let _ = fs::remove_dir_all(&sock_dir);
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
 }

@@ -107,6 +107,7 @@ fn build_proxy_test_runtime(
         bind_listener_in_handlers: true,
         management_router_override: None,
         allowed_fs_roots_override: None,
+        interface_index_override: RwLock::new(None),
     });
     (rt, db_conn)
 }
@@ -1420,6 +1421,7 @@ async fn peer_proxy_real_router_backup_download_isolated_ticket_and_auth_csrf_ma
         bind_listener_in_handlers: true,
         management_router_override: None,
         allowed_fs_roots_override: None,
+        interface_index_override: RwLock::new(None),
     });
     let (rt_a, _db_a) = build_proxy_test_runtime(
         "manager-a",
@@ -1916,6 +1918,7 @@ while True:
         bind_listener_in_handlers: true,
         management_router_override: None,
         allowed_fs_roots_override: None,
+        interface_index_override: RwLock::new(None),
     });
     let (rt_a, _) = build_proxy_test_runtime(
         "manager-a",
@@ -2299,4 +2302,756 @@ while True:
     rt_b.shutdown_all().await;
     rt_c.shutdown_all().await;
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn peer_proxy_non_ws_http_streams_cancel_promptly_on_managing_revocation() {
+    let clock = FakeClock::new(1_800_830_000);
+    let local_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 141));
+    let peer_ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 142));
+    let runner = FakePeerRunner::new(fixture_wg_pubkey(141), local_ip, 51821);
+    let (rt, db) = build_proxy_test_runtime(
+        "manager-a",
+        Arc::clone(&runner) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        2, // max_conn_per_link = 2
+        2,
+        Duration::from_secs(5),
+    );
+
+    let (slow_entered_tx, mut slow_entered_rx) = mpsc::channel::<()>(4);
+    let (upload_first_tx, mut upload_first_rx) = mpsc::channel::<()>(4);
+    let upstream_app = Router::new()
+        .route(
+            "/api/v1/stream-sse",
+            get(|| async move {
+                let s = async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: chunk-1\n\n"));
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: never-delivered\n\n"));
+                };
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(s))
+                    .unwrap()
+            }),
+        )
+        .route(
+            "/api/v1/slow-headers",
+            get(move || {
+                let tx = slow_entered_tx.clone();
+                async move {
+                    let _ = tx.send(()).await;
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    StatusCode::OK
+                }
+            }),
+        )
+        .route(
+            "/api/v1/stream-upload",
+            axum::routing::post(move |req: Request| {
+                let tx = upload_first_tx.clone();
+                async move {
+                    use futures::StreamExt as _;
+                    let mut stream = req.into_body().into_data_stream();
+                    if let Some(Ok(_)) = stream.next().await {
+                        let _ = tx.send(()).await;
+                    }
+                    while let Some(Ok(_)) = stream.next().await {}
+                    StatusCode::OK
+                }
+            }),
+        );
+
+    let up_listener = TcpListener::bind(SocketAddr::new(peer_ip, 0))
+        .await
+        .unwrap();
+    let up_port = up_listener.local_addr().unwrap().port();
+    let up_task = tokio::spawn(async move {
+        let _ = axum::serve(up_listener, upstream_app).await;
+    });
+
+    rt.tunnel_port_overrides
+        .write()
+        .unwrap()
+        .insert(peer_ip, up_port);
+    seed_proxy_link(
+        &db,
+        &runner,
+        local_ip,
+        "link-rev",
+        "rev-peer",
+        peer_ip,
+        STATE_ACTIVE,
+        Some(1),
+        Some(r#"["links","grants"]"#),
+        Some(AccessMap::read_write_all()),
+        Some("rev-link-token"),
+        Some(("link-rev", "rev-grant-token")),
+    );
+
+    let proxy_router = admin_proxy_app(Arc::clone(&rt), fixture_admin_user());
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_task = tokio::spawn(async move {
+        let _ = axum::serve(
+            proxy_listener,
+            proxy_router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+    });
+
+    let client = reqwest::Client::new();
+    let sse_url = format!("http://{proxy_addr}/link-rev/stream-sse");
+    let slow_url = format!("http://{proxy_addr}/link-rev/slow-headers");
+
+    // 1. In-flight non-WS streaming HTTP response aborts << 1s on GrantRevoked and releases permit.
+    let mut r_grant = client.get(&sse_url).send().await.unwrap();
+    assert_eq!(r_grant.status(), reqwest::StatusCode::OK);
+    let first = r_grant.chunk().await.unwrap().unwrap();
+    assert_eq!(&first[..], b"data: chunk-1\n\n");
+    assert_eq!(rt.available_link_http_permits("link-rev"), 1);
+
+    let revoke_started = Instant::now();
+    rt.publish_revocation(super::RevocationEvent::GrantRevoked {
+        link_id: "link-rev".to_string(),
+        grant_id: "grant-link-rev".to_string(),
+        run_as_user_id: 1,
+    });
+    let next_res = tokio::time::timeout(Duration::from_secs(1), r_grant.chunk())
+        .await
+        .expect("managing-side streaming HTTP response must abort within 1s on GrantRevoked");
+    assert!(
+        revoke_started.elapsed() < Duration::from_secs(1),
+        "abort took {:?}",
+        revoke_started.elapsed()
+    );
+    assert!(
+        next_res.is_err(),
+        "aborted HTTP chunked stream must error instead of delivering remaining chunks, got {next_res:?}"
+    );
+    drop(r_grant);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while rt.available_link_http_permits("link-rev") != 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("HTTP permit must release promptly after GrantRevoked abort");
+
+    // 2. In-flight non-WS streaming HTTP response aborts << 1s on LinkRevoked and releases permit.
+    let mut r_link = client.get(&sse_url).send().await.unwrap();
+    assert_eq!(r_link.status(), reqwest::StatusCode::OK);
+    let first2 = r_link.chunk().await.unwrap().unwrap();
+    assert_eq!(&first2[..], b"data: chunk-1\n\n");
+    assert_eq!(rt.available_link_http_permits("link-rev"), 1);
+
+    let link_revoke_started = Instant::now();
+    rt.publish_revocation(super::RevocationEvent::LinkRevoked {
+        link_id: "link-rev".to_string(),
+        peer_name: "rev-peer".to_string(),
+    });
+    let next_res2 = tokio::time::timeout(Duration::from_secs(1), r_link.chunk())
+        .await
+        .expect("managing-side streaming HTTP response must abort within 1s on LinkRevoked");
+    assert!(link_revoke_started.elapsed() < Duration::from_secs(1));
+    assert!(
+        next_res2.is_err(),
+        "expected stream abort error on LinkRevoked, got {next_res2:?}"
+    );
+    drop(r_link);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while rt.available_link_http_permits("link-rev") != 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("HTTP permit must release promptly after LinkRevoked abort");
+
+    // 3. Pre-headers pending request aborts << 1s with 403 LINK_REVOKED on LinkRevoked.
+    let slow_client = client.clone();
+    let slow_url_c = slow_url.clone();
+    let slow_req = tokio::spawn(async move { slow_client.get(&slow_url_c).send().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(2), slow_entered_rx.recv())
+        .await
+        .expect("upstream slow-headers handler must be reached")
+        .unwrap();
+    let pre_hdr_started = Instant::now();
+    rt.publish_revocation(super::RevocationEvent::LinkRevoked {
+        link_id: "link-rev".to_string(),
+        peer_name: "rev-peer".to_string(),
+    });
+    let slow_resp = tokio::time::timeout(Duration::from_secs(1), slow_req)
+        .await
+        .expect("pre-headers request must abort within 1s of LinkRevoked")
+        .unwrap();
+    assert!(pre_hdr_started.elapsed() < Duration::from_secs(1));
+    assert_eq!(slow_resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let slow_body: Value = slow_resp.json().await.unwrap();
+    assert_eq!(slow_body["code"], "LINK_REVOKED");
+    assert_eq!(rt.available_link_http_permits("link-rev"), 2);
+
+    // 4. In-flight streaming HTTP upload aborts << 1s with 403 PEER_SCOPE_DENIED on GrantRevoked.
+    let (up_tx, mut up_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+    let up_stream = async_stream::stream! {
+        while let Some(item) = up_rx.recv().await {
+            yield item;
+        }
+    };
+    let upload_url = format!("http://{proxy_addr}/link-rev/stream-upload");
+    let up_client = client.clone();
+    let upload_task = tokio::spawn(async move {
+        up_client
+            .post(&upload_url)
+            .body(reqwest::Body::wrap_stream(up_stream))
+            .send()
+            .await
+            .unwrap()
+    });
+    up_tx
+        .send(Ok(Bytes::from_static(b"partial-upload-chunk")))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), upload_first_rx.recv())
+        .await
+        .expect("upstream upload handler must receive initial chunk")
+        .unwrap();
+    let upload_revoke_started = Instant::now();
+    rt.publish_revocation(super::RevocationEvent::GrantRevoked {
+        link_id: "link-rev".to_string(),
+        grant_id: "grant-link-rev".to_string(),
+        run_as_user_id: 1,
+    });
+    let upload_resp = tokio::time::timeout(Duration::from_secs(1), upload_task)
+        .await
+        .expect("in-flight streaming upload must abort within 1s of GrantRevoked")
+        .unwrap();
+    assert!(upload_revoke_started.elapsed() < Duration::from_secs(1));
+    assert_eq!(upload_resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let upload_body: Value = upload_resp.json().await.unwrap();
+    assert_eq!(upload_body["code"], "PEER_SCOPE_DENIED");
+    drop(up_tx);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while rt.available_link_http_permits("link-rev") != 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("HTTP permit must release promptly after upload abort");
+
+    proxy_task.abort();
+    up_task.abort();
+}
+
+#[tokio::test]
+async fn peer_listener_non_ws_http_streams_cancel_promptly_on_target_revocation() {
+    let clock = FakeClock::new(1_800_831_000);
+    let ip_a = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 143));
+    let ip_b = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 144));
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(143), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(144), ip_b, 51821);
+
+    let (slow_entered_tx, mut slow_entered_rx) = mpsc::channel::<()>(4);
+    let target_mgmt_router = Router::new()
+        .route(
+            "/api/v1/auth/deploy/stream",
+            get(|| async move {
+                let s = async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: target-chunk-1\n\n"));
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: target-never-delivered\n\n"));
+                };
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(s))
+                    .unwrap()
+            }),
+        )
+        .route(
+            "/api/v1/admin/services",
+            get(move || {
+                let tx = slow_entered_tx.clone();
+                async move {
+                    let _ = tx.send(()).await;
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    StatusCode::OK
+                }
+            }),
+        );
+
+    let (mut rt_b_raw, _db_b) = build_proxy_test_runtime(
+        "target-b",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        2,
+        2,
+        Duration::from_secs(5),
+    );
+    Arc::get_mut(&mut rt_b_raw)
+        .unwrap()
+        .management_router_override = Some(target_mgmt_router);
+    let rt_b = rt_b_raw;
+
+    let (rt_a, _db_a) = build_proxy_test_runtime(
+        "manager-a",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 61], 45400)),
+        }),
+        &clock,
+        2,
+        2,
+        Duration::from_secs(5),
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "target-b").await;
+
+    let mut grant_access = AccessMap::none();
+    grant_access.marketplace = AccessLevel::Read;
+    grant_access.services = AccessLevel::Read;
+    let (st, _) = call_admin(
+        &rt_b,
+        Method::PUT,
+        &format!("/{b_link_id}/grant"),
+        Some(json!({ "access": grant_access })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // Build a direct tunnel client bound to Server A's loopback IP hitting Server B's listener
+    // directly (isolating target-side listener cancellation without managing-side proxy!).
+    let b_binding = rt_a.resolve_outbound_tunnel_binding(ip_b).await.unwrap();
+    let direct_client = rt_a.get_or_build_proxy_tunnel_client(&b_binding).unwrap();
+    let link_token = runner_a
+        .state
+        .lock()
+        .unwrap()
+        .credentials
+        .get(&(PeerCredentialSlot::LinkToken, a_link_id.clone()))
+        .unwrap()
+        .clone();
+    let (_, grant_secret) = super::grants::read_committed_received_grant_token(&rt_a, &a_link_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let grant_token = grant_secret.expose_secret().to_string();
+
+    // 1. Target-side post-headers streaming response aborts << 1s on DELETE /grant.
+    let stream_url = rt_a
+        .build_tunnel_url(&ip_b.to_string(), "/api/v1/auth/deploy/stream")
+        .unwrap();
+    let mut resp = direct_client
+        .get(stream_url)
+        .header(HEADER_LINK_TOKEN, &link_token)
+        .header(HEADER_GRANT_TOKEN, &grant_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let first = resp.chunk().await.unwrap().unwrap();
+    assert_eq!(&first[..], b"data: target-chunk-1\n\n");
+    assert_eq!(rt_b.available_link_http_permits(&b_link_id), 1);
+
+    let revoke_started = Instant::now();
+    let (del_st, _) = call_admin(&rt_b, Method::DELETE, &format!("/{b_link_id}/grant"), None).await;
+    assert_eq!(del_st, StatusCode::OK);
+
+    let next_chunk = tokio::time::timeout(Duration::from_secs(1), resp.chunk())
+        .await
+        .expect("target-side streaming HTTP response must abort within 1s of grant revocation");
+    assert!(revoke_started.elapsed() < Duration::from_secs(1));
+    assert!(
+        next_chunk.is_err(),
+        "expected target-side aborted chunked response error, got {next_chunk:?}"
+    );
+    drop(resp);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while rt_b.available_link_http_permits(&b_link_id) != 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("target-side HTTP permit must release promptly after stream abort");
+
+    // 2. Target-side pre-headers oneshot handler aborts << 1s with 403 PEER_SCOPE_DENIED on DELETE /grant.
+    let (regrant_st, _) = call_admin(
+        &rt_b,
+        Method::PUT,
+        &format!("/{b_link_id}/grant"),
+        Some(json!({ "access": grant_access })),
+    )
+    .await;
+    assert_eq!(regrant_st, StatusCode::OK);
+    let (_, grant_secret2) = super::grants::read_committed_received_grant_token(&rt_a, &a_link_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let grant_token2 = grant_secret2.expose_secret().to_string();
+
+    let slow_url = rt_a
+        .build_tunnel_url(&ip_b.to_string(), "/api/v1/admin/services")
+        .unwrap();
+    let client_c = direct_client.clone();
+    let lt_c = link_token.clone();
+    let gt_c = grant_token2.clone();
+    let slow_task = tokio::spawn(async move {
+        client_c
+            .get(slow_url)
+            .header(HEADER_LINK_TOKEN, lt_c)
+            .header(HEADER_GRANT_TOKEN, gt_c)
+            .header("X-Request-ID", "req-target-abort-99")
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(2), slow_entered_rx.recv())
+        .await
+        .expect("target management handler must be entered")
+        .unwrap();
+
+    let pre_started = Instant::now();
+    let (del_st2, _) =
+        call_admin(&rt_b, Method::DELETE, &format!("/{b_link_id}/grant"), None).await;
+    assert_eq!(del_st2, StatusCode::OK);
+
+    let aborted_resp = tokio::time::timeout(Duration::from_secs(1), slow_task)
+        .await
+        .expect("target-side pre-headers request must abort within 1s of grant revocation")
+        .unwrap();
+    assert!(pre_started.elapsed() < Duration::from_secs(1));
+    assert_eq!(aborted_resp.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        aborted_resp
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok()),
+        Some("req-target-abort-99")
+    );
+    let aborted_body: Value = aborted_resp.json().await.unwrap();
+    assert_eq!(aborted_body["code"], "PEER_SCOPE_DENIED");
+    assert_eq!(aborted_body["request_id"], "req-target-abort-99");
+    assert_eq!(rt_b.available_link_http_permits(&b_link_id), 2);
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn peer_tunnel_health_reports_inbound_grant_generation_transcode_and_request_id() {
+    let clock = FakeClock::new(1_800_832_000);
+    let ip_a = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 145));
+    let ip_b = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 146));
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(145), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(146), ip_b, 51821);
+
+    let (rt_b, _db_b) = build_proxy_test_runtime(
+        "target-b",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        8,
+        8,
+        Duration::from_secs(5),
+    );
+    rt_b.transcode_state.set_local_capabilities_override(Some(
+        af_transcode::TranscodeCapabilities {
+            ffmpeg_path: "/usr/lib/jellyfin-ffmpeg/ffmpeg".to_string(),
+            ffmpeg_version: Some("8.1.3".to_string()),
+            ffmpeg_version_line: Some("ffmpeg version 8.1.3-Jellyfin".to_string()),
+            package_name: Some("jellyfin-ffmpeg8".to_string()),
+            package_version: Some("8.1.3-1-trixie".to_string()),
+            encoders: vec!["h264_vaapi".to_string(), "libx264".to_string()],
+            render_nodes: vec![],
+            primary_render_node: Some("/dev/dri/renderD128".to_string()),
+            worker_max_jobs: Some(6),
+        },
+    ));
+
+    let (rt_a, _db_a) = build_proxy_test_runtime(
+        "manager-a",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 62], 45401)),
+        }),
+        &clock,
+        8,
+        8,
+        Duration::from_secs(5),
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "target-b").await;
+
+    let b_binding = rt_a.resolve_outbound_tunnel_binding(ip_b).await.unwrap();
+    let client = rt_a.get_or_build_proxy_tunnel_client(&b_binding).unwrap();
+    let health_url = rt_a.build_tunnel_url(&ip_b.to_string(), "/health").unwrap();
+    let link_token = runner_a
+        .state
+        .lock()
+        .unwrap()
+        .credentials
+        .get(&(PeerCredentialSlot::LinkToken, a_link_id.clone()))
+        .unwrap()
+        .clone();
+
+    // 1. Before any grant exists: inbound_grant_generation is explicitly present and null,
+    //    cached transcode capabilities (including worker_max_jobs) are non-null, and X-Request-ID is echoed.
+    let resp0 = client
+        .get(health_url.clone())
+        .header(HEADER_LINK_TOKEN, &link_token)
+        .header("X-Request-ID", "req-health-corr-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp0.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp0
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok()),
+        Some("req-health-corr-1")
+    );
+    let body0: Value = resp0.json().await.unwrap();
+    assert!(
+        body0
+            .as_object()
+            .unwrap()
+            .contains_key("inbound_grant_generation"),
+        "tunnel /health must always include inbound_grant_generation key: {body0}"
+    );
+    assert!(body0["inbound_grant_generation"].is_null(), "{body0}");
+    assert_eq!(body0["transcode"]["worker_max_jobs"], 6);
+    assert_eq!(body0["transcode"]["ffmpeg_version"], "8.1.3");
+
+    // 2. Unauthorized tunnel call with explicit X-Request-ID echoes header AND populates PeerErrorBody.request_id.
+    let err_resp = client
+        .get(health_url.clone())
+        .header(HEADER_LINK_TOKEN, "wrong-token")
+        .header("X-Request-ID", "req-tunnel-err-42")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(err_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        err_resp
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok()),
+        Some("req-tunnel-err-42")
+    );
+    let err_body: Value = err_resp.json().await.unwrap();
+    assert_eq!(err_body["code"], "PEER_UNAUTHORIZED");
+    assert_eq!(err_body["request_id"], "req-tunnel-err-42");
+
+    // 3. Unauthorized tunnel call WITHOUT X-Request-ID generates one and uses the same ID in header & JSON.
+    let gen_err_resp = client
+        .get(health_url.clone())
+        .header(HEADER_LINK_TOKEN, "wrong-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gen_err_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let generated_id = gen_err_resp
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("tunnel listener must generate and echo X-Request-ID")
+        .to_string();
+    assert!(!generated_id.is_empty());
+    let gen_err_body: Value = gen_err_resp.json().await.unwrap();
+    assert_eq!(gen_err_body["request_id"], generated_id);
+
+    // 4. Grant created -> inbound_grant_generation = 1; rotated -> 2; revoked -> null.
+    let mut svc_read = AccessMap::none();
+    svc_read.services = AccessLevel::Read;
+    let (st1, _) = call_admin(
+        &rt_b,
+        Method::PUT,
+        &format!("/{b_link_id}/grant"),
+        Some(json!({ "access": svc_read })),
+    )
+    .await;
+    assert_eq!(st1, StatusCode::OK);
+    let body1: Value = client
+        .get(health_url.clone())
+        .header(HEADER_LINK_TOKEN, &link_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body1["inbound_grant_generation"], 1);
+
+    let (st2, _) = call_admin(
+        &rt_b,
+        Method::PUT,
+        &format!("/{b_link_id}/grant"),
+        Some(json!({ "access": svc_read })),
+    )
+    .await;
+    assert_eq!(st2, StatusCode::OK);
+    let body2: Value = client
+        .get(health_url.clone())
+        .header(HEADER_LINK_TOKEN, &link_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body2["inbound_grant_generation"], 2);
+
+    let (del_st, _) = call_admin(&rt_b, Method::DELETE, &format!("/{b_link_id}/grant"), None).await;
+    assert_eq!(del_st, StatusCode::OK);
+    let body3: Value = client
+        .get(health_url)
+        .header(HEADER_LINK_TOKEN, &link_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body3
+        .as_object()
+        .unwrap()
+        .contains_key("inbound_grant_generation"));
+    assert!(body3["inbound_grant_generation"].is_null(), "{body3}");
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn peer_proxy_updates_write_narrows_package_updates_to_jellyfin_and_ffmpeg() {
+    let clock = FakeClock::new(1_800_833_000);
+    let ip_a = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 147));
+    let ip_b = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 148));
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(147), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(148), ip_b, 51821);
+
+    let target_mgmt = Router::new().route(
+        "/api/v1/admin/packages/:id/update",
+        axum::routing::post(
+            |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                (StatusCode::OK, axum::Json(json!({ "updated": id })))
+            },
+        ),
+    );
+
+    let (mut rt_b_raw, _db_b) = build_proxy_test_runtime(
+        "target-b",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        8,
+        8,
+        Duration::from_secs(5),
+    );
+    Arc::get_mut(&mut rt_b_raw)
+        .unwrap()
+        .management_router_override = Some(target_mgmt);
+    let rt_b = rt_b_raw;
+
+    let (rt_a, _db_a) = build_proxy_test_runtime(
+        "manager-a",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 63], 45402)),
+        }),
+        &clock,
+        8,
+        8,
+        Duration::from_secs(5),
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "target-b").await;
+
+    // 1. Grant updates:write ONLY on B -> A.
+    let mut updates_only = AccessMap::none();
+    updates_only.updates = AccessLevel::Write;
+    let (st, _) = call_admin(
+        &rt_b,
+        Method::PUT,
+        &format!("/{b_link_id}/grant"),
+        Some(json!({ "access": updates_only })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let proxy_app = admin_proxy_app(Arc::clone(&rt_a), fixture_admin_user());
+
+    for allowed_pkg in ["jellyfin", "jellyfin-ffmpeg8"] {
+        let resp = proxy_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/{a_link_id}/admin/packages/{allowed_pkg}/update"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "pkg={allowed_pkg}");
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(body["updated"], allowed_pkg);
+    }
+
+    let denied_sonarr = proxy_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/{a_link_id}/admin/packages/sonarr/update"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied_sonarr.status(), StatusCode::FORBIDDEN);
+    let denied_body: Value =
+        serde_json::from_slice(&to_bytes(denied_sonarr.into_body(), 8192).await.unwrap()).unwrap();
+    assert_eq!(denied_body["code"], "PEER_SCOPE_DENIED");
+
+    // 2. Grant marketplace:write on B -> A allows updating non-Jellyfin packages.
+    let mut marketplace_write = AccessMap::none();
+    marketplace_write.marketplace = AccessLevel::Write;
+    let (st2, _) = call_admin(
+        &rt_b,
+        Method::PUT,
+        &format!("/{b_link_id}/grant"),
+        Some(json!({ "access": marketplace_write })),
+    )
+    .await;
+    assert_eq!(st2, StatusCode::OK);
+
+    let allowed_sonarr = proxy_app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/{a_link_id}/admin/packages/sonarr/update"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed_sonarr.status(), StatusCode::OK);
+    let allowed_body: Value =
+        serde_json::from_slice(&to_bytes(allowed_sonarr.into_body(), 8192).await.unwrap()).unwrap();
+    assert_eq!(allowed_body["updated"], "sonarr");
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
 }

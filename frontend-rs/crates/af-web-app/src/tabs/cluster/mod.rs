@@ -24,7 +24,7 @@ use pairing::{
     ReconcileInitiated, ReconcileWindow, StartPairingModal, StartPairingResponse,
 };
 use peers::{is_unlinked_empty_state, PeerListSection, PeersSnapshot};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use transcode::TranscodeSection;
 use wasm_bindgen::{JsCast, JsValue};
@@ -119,6 +119,27 @@ pub fn peer_package_update_path(link_id: Option<&str>) -> String {
     }
 }
 
+const MAX_REQUEST_ID_CHARS: usize = 128;
+
+pub(super) fn sanitize_request_id(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_REQUEST_ID_CHARS)
+        .collect();
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn deserialize_sanitized_request_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.as_deref().and_then(sanitize_request_id))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct PeerApiErrorDetail {
     status: u16,
@@ -127,9 +148,22 @@ struct PeerApiErrorDetail {
     step: Option<String>,
     message: String,
     action: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_sanitized_request_id")]
+    request_id: Option<String>,
 }
 
-/// Structured peer API error preserving backend `{code, server, step, message, action}` fields.
+/// Pre-formatted lines rendered by [`PeerErrorAlert`] for a given locale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerErrorBannerContent {
+    pub message: String,
+    pub next_step_label: Option<String>,
+    pub action: Option<String>,
+    pub metadata: Option<String>,
+    pub request_id_line: Option<String>,
+}
+
+/// Structured peer API error preserving backend `{code, server, step, message, action, request_id}`
+/// fields and HTTP `X-Request-ID` correlation metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PeerApiError(Box<PeerApiErrorDetail>);
@@ -142,7 +176,9 @@ impl PeerApiError {
         step: Option<String>,
         message: String,
         action: Option<String>,
+        request_id: Option<String>,
     ) -> Self {
+        let request_id = request_id.as_deref().and_then(sanitize_request_id);
         Self(Box::new(PeerApiErrorDetail {
             status,
             code,
@@ -150,11 +186,12 @@ impl PeerApiError {
             step,
             message,
             action,
+            request_id,
         }))
     }
 
     pub fn client(message: impl Into<String>) -> Self {
-        Self::from_parts(0, None, None, None, message.into(), None)
+        Self::from_parts(0, None, None, None, message.into(), None, None)
     }
 
     pub(super) fn from_envelope(
@@ -164,8 +201,9 @@ impl PeerApiError {
         step: Option<String>,
         message: String,
         action: Option<String>,
+        request_id: Option<String>,
     ) -> Self {
-        Self::from_parts(status, code, server, step, message, action)
+        Self::from_parts(status, code, server, step, message, action, request_id)
     }
 
     #[cfg(test)]
@@ -193,7 +231,15 @@ impl PeerApiError {
         self.0.action.as_deref()
     }
 
-    pub fn context_summary(&self, locale: &str) -> Option<String> {
+    pub fn request_id(&self) -> Option<&str> {
+        self.0
+            .request_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+    }
+
+    fn metadata_summary(&self, locale: &str) -> Option<String> {
         match (self.server(), self.step(), self.code()) {
             (Some(server), Some(step), Some(code)) => Some(translate_with(
                 locale,
@@ -213,11 +259,50 @@ impl PeerApiError {
             _ => None,
         }
     }
+
+    pub fn request_id_summary(&self, locale: &str) -> Option<String> {
+        self.request_id()
+            .map(|id| translate_with(locale, "Cluster.errorRequestId", &[("id", id)]))
+    }
+
+    pub fn context_summary(&self, locale: &str) -> Option<String> {
+        match (
+            self.metadata_summary(locale),
+            self.request_id_summary(locale),
+        ) {
+            (Some(meta), Some(rid)) => Some(format!("{meta} · {rid}")),
+            (Some(meta), None) => Some(meta),
+            (None, Some(rid)) => Some(rid),
+            (None, None) => None,
+        }
+    }
+
+    pub fn banner_content(&self, locale: &str) -> PeerErrorBannerContent {
+        let action = self.action().map(str::to_string);
+        let next_step_label = action
+            .as_ref()
+            .map(|_| translate(locale, "Cluster.errorNextStep"));
+        PeerErrorBannerContent {
+            message: self.message().to_string(),
+            next_step_label,
+            action,
+            metadata: self.metadata_summary(locale),
+            request_id_line: self.request_id_summary(locale),
+        }
+    }
 }
 
 impl From<ApiError> for PeerApiError {
     fn from(error: ApiError) -> Self {
-        Self::from_parts(error.status, error.code, None, None, error.message, None)
+        Self::from_parts(
+            error.status,
+            error.code,
+            None,
+            None,
+            error.message,
+            None,
+            None,
+        )
     }
 }
 
@@ -230,19 +315,36 @@ fn non_empty_field(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn response_request_id(headers: &web_sys::Headers) -> Option<String> {
+    headers
+        .get("X-Request-ID")
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(sanitize_request_id)
+}
+
 /// Decodes a raw peer API response, preserving typed backend error `action`, `server`, `step`,
-/// `code`, and `message` fields when the HTTP status is non-success.
-pub fn parse_peer_api_response<T: DeserializeOwned>(
+/// `code`, `message`, and `request_id` fields (falling back to the HTTP `X-Request-ID` response
+/// header when the JSON body omits `request_id`) when the HTTP status is non-success or decoding
+/// fails.
+pub fn parse_peer_api_response_with_request_id<T: DeserializeOwned>(
     status: u16,
     ok: bool,
     body_text: &str,
+    header_request_id: Option<&str>,
 ) -> Result<T, PeerApiError> {
+    let fallback_request_id = header_request_id.and_then(sanitize_request_id);
     let trimmed = body_text.trim();
     if !ok {
         if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
             let message = non_empty_field(&json, "message")
                 .or_else(|| non_empty_field(&json, "error"))
                 .unwrap_or_else(|| format!("Request failed (HTTP {status})"));
+            let request_id = non_empty_field(&json, "request_id")
+                .as_deref()
+                .and_then(sanitize_request_id)
+                .or(fallback_request_id);
             return Err(PeerApiError::from_parts(
                 status,
                 non_empty_field(&json, "code"),
@@ -250,6 +352,7 @@ pub fn parse_peer_api_response<T: DeserializeOwned>(
                 non_empty_field(&json, "step"),
                 message,
                 non_empty_field(&json, "action"),
+                request_id,
             ));
         }
         return Err(PeerApiError::from_parts(
@@ -263,6 +366,7 @@ pub fn parse_peer_api_response<T: DeserializeOwned>(
                 trimmed.chars().take(240).collect()
             },
             None,
+            fallback_request_id,
         ));
     }
 
@@ -275,6 +379,7 @@ pub fn parse_peer_api_response<T: DeserializeOwned>(
                 None,
                 format!("Invalid API response: {err}"),
                 None,
+                fallback_request_id,
             )
         });
     }
@@ -287,8 +392,38 @@ pub fn parse_peer_api_response<T: DeserializeOwned>(
             None,
             format!("Invalid API response: {err}"),
             None,
+            fallback_request_id,
         )
     })
+}
+
+/// Decodes a raw peer API response without an external `X-Request-ID` header fallback.
+pub fn parse_peer_api_response<T: DeserializeOwned>(
+    status: u16,
+    ok: bool,
+    body_text: &str,
+) -> Result<T, PeerApiError> {
+    parse_peer_api_response_with_request_id(status, ok, body_text, None)
+}
+
+/// Sends an authenticated local same-origin request to `/api/v1/admin/peers*` via `ApiClient.fetch`,
+/// returning both the parsed payload and any sanitized `X-Request-ID` response header.
+pub(super) async fn peer_api_request_with_request_id<T: DeserializeOwned>(
+    path: &str,
+    method: &str,
+    body: Option<&Value>,
+) -> Result<(T, Option<String>), PeerApiError> {
+    let response = ApiClient
+        .fetch(path, method, body)
+        .await
+        .map_err(PeerApiError::from)?;
+    let status = response.status();
+    let ok = response.ok();
+    let header_request_id = response_request_id(&response.headers());
+    let text = response.text().await.map_err(PeerApiError::from)?;
+    let value =
+        parse_peer_api_response_with_request_id(status, ok, &text, header_request_id.as_deref())?;
+    Ok((value, header_request_id))
 }
 
 /// Sends an authenticated local same-origin request to `/api/v1/admin/peers*` via `ApiClient.fetch`
@@ -298,14 +433,9 @@ pub async fn peer_api_request<T: DeserializeOwned>(
     method: &str,
     body: Option<&Value>,
 ) -> Result<T, PeerApiError> {
-    let response = ApiClient
-        .fetch(path, method, body)
+    peer_api_request_with_request_id(path, method, body)
         .await
-        .map_err(PeerApiError::from)?;
-    let status = response.status();
-    let ok = response.ok();
-    let text = response.text().await.map_err(PeerApiError::from)?;
-    parse_peer_api_response(status, ok, &text)
+        .map(|(value, _)| value)
 }
 
 /// Sends a strictly local same-origin GET request (bypassing peer proxy rewriting even while a
@@ -318,6 +448,7 @@ pub async fn local_same_origin_get<T: DeserializeOwned>(path: &str) -> Result<T,
         .map_err(PeerApiError::from)?;
     let status = response.status();
     let ok = response.ok();
+    let header_request_id = response_request_id(&response.headers());
     let text = response.text().await.map_err(PeerApiError::from)?;
     if status == 401
         && ApiClient
@@ -331,10 +462,16 @@ pub async fn local_same_origin_get<T: DeserializeOwned>(path: &str) -> Result<T,
             .map_err(PeerApiError::from)?;
         let retry_status = retried.status();
         let retry_ok = retried.ok();
+        let retry_request_id = response_request_id(&retried.headers());
         let retry_text = retried.text().await.map_err(PeerApiError::from)?;
-        return parse_peer_api_response(retry_status, retry_ok, &retry_text);
+        return parse_peer_api_response_with_request_id(
+            retry_status,
+            retry_ok,
+            &retry_text,
+            retry_request_id.as_deref(),
+        );
     }
-    parse_peer_api_response(status, ok, &text)
+    parse_peer_api_response_with_request_id(status, ok, &text, header_request_id.as_deref())
 }
 
 fn read_local_csrf_cookie() -> Option<String> {
@@ -365,11 +502,18 @@ async fn fetch_local_csrf_token(force_refresh: bool) -> Result<String, PeerApiEr
     read_local_csrf_cookie().ok_or_else(|| PeerApiError::client("CSRF token unavailable"))
 }
 
+struct LocalPostResponse {
+    status: u16,
+    ok: bool,
+    text: String,
+    request_id: Option<String>,
+}
+
 async fn send_local_post_once(
     path: &str,
     body_json: Option<&str>,
     csrf: &str,
-) -> Result<(u16, bool, String), PeerApiError> {
+) -> Result<LocalPostResponse, PeerApiError> {
     let init = web_sys::RequestInit::new();
     init.set_method("POST");
     init.set_credentials(web_sys::RequestCredentials::Include);
@@ -409,6 +553,7 @@ async fn send_local_post_once(
         .map_err(|_| PeerApiError::client("Invalid browser response"))?;
     let status = response.status();
     let ok = response.ok();
+    let request_id = response_request_id(&response.headers());
     let text_promise = response
         .text()
         .map_err(|_| PeerApiError::client("Failed to read response body"))?;
@@ -417,7 +562,12 @@ async fn send_local_post_once(
         .map_err(|_| PeerApiError::client("Failed to decode response body"))?
         .as_string()
         .unwrap_or_default();
-    Ok((status, ok, text))
+    Ok(LocalPostResponse {
+        status,
+        ok,
+        text,
+        request_id,
+    })
 }
 
 /// Sends a strictly local same-origin authenticated POST with `X-CSRF-Token` attached
@@ -437,12 +587,11 @@ pub async fn local_same_origin_post<T: DeserializeOwned>(
 
     let mut refreshed = false;
     let mut csrf_retried = false;
-    let (mut status, mut ok, mut text) =
-        send_local_post_once(path, body_json.as_deref(), &csrf).await?;
+    let mut resp = send_local_post_once(path, body_json.as_deref(), &csrf).await?;
     ensure_same_auth_epoch(origin_epoch, current_auth_epoch()).map_err(PeerApiError::from)?;
 
     loop {
-        if status == 401 && !refreshed {
+        if resp.status == 401 && !refreshed {
             refreshed = true;
             if !ApiClient
                 .fetch(PEERS_LIST_PATH, "GET", None)
@@ -457,14 +606,14 @@ pub async fn local_same_origin_post<T: DeserializeOwned>(
             csrf = fetch_local_csrf_token(true).await?;
             ensure_same_auth_epoch(origin_epoch, current_auth_epoch())
                 .map_err(PeerApiError::from)?;
-            (status, ok, text) = send_local_post_once(path, body_json.as_deref(), &csrf).await?;
+            resp = send_local_post_once(path, body_json.as_deref(), &csrf).await?;
             ensure_same_auth_epoch(origin_epoch, current_auth_epoch())
                 .map_err(PeerApiError::from)?;
             continue;
         }
-        if status == 403
+        if resp.status == 403
             && !csrf_retried
-            && serde_json::from_str::<Value>(text.trim())
+            && serde_json::from_str::<Value>(resp.text.trim())
                 .is_ok_and(|json| is_csrf_rejection(403, &json))
         {
             csrf_retried = true;
@@ -472,7 +621,7 @@ pub async fn local_same_origin_post<T: DeserializeOwned>(
             csrf = fetch_local_csrf_token(true).await?;
             ensure_same_auth_epoch(origin_epoch, current_auth_epoch())
                 .map_err(PeerApiError::from)?;
-            (status, ok, text) = send_local_post_once(path, body_json.as_deref(), &csrf).await?;
+            resp = send_local_post_once(path, body_json.as_deref(), &csrf).await?;
             ensure_same_auth_epoch(origin_epoch, current_auth_epoch())
                 .map_err(PeerApiError::from)?;
             continue;
@@ -480,7 +629,12 @@ pub async fn local_same_origin_post<T: DeserializeOwned>(
         break;
     }
 
-    parse_peer_api_response(status, ok, &text)
+    parse_peer_api_response_with_request_id(
+        resp.status,
+        resp.ok,
+        &resp.text,
+        resp.request_id.as_deref(),
+    )
 }
 
 pub fn current_unix_secs() -> i64 {
@@ -631,16 +785,15 @@ pub fn PeerErrorAlert(
             {move || {
                 error.get().map(|err| {
                     let locale = crate::tabs::l10n::locale(context);
-                    let meta = err.context_summary(&locale);
-                    let action = err.action().map(str::to_string);
-                    let message = err.message().to_string();
+                    let content = err.banner_content(&locale);
+                    let action_row = content.next_step_label.zip(content.action);
                     view! {
                         <div
                             role="alert"
                             class="af-danger-banner space-y-1.5"
                         >
                             <div class="flex items-start justify-between gap-3">
-                                <p class="font-medium break-words">{message}</p>
+                                <p class="font-medium break-words">{content.message}</p>
                                 {on_dismiss.map(|dismiss| {
                                     view! {
                                         <button
@@ -654,21 +807,31 @@ pub fn PeerErrorAlert(
                                     }
                                 })}
                             </div>
-                            {action.map(|next_step| {
+                            {action_row.map(|(label, next_step)| {
                                 view! {
                                     <p class="text-slate-200 break-words">
                                         <span class="font-semibold text-amber-300">
-                                            {move || tt(context, "Cluster.errorNextStep")}
+                                            {label}
                                         </span>
                                         ": "
                                         {next_step}
                                     </p>
                                 }
                             })}
-                            {meta.map(|context_line| {
+                            {content.metadata.map(|context_line| {
                                 view! {
                                     <p class="text-xs font-mono text-slate-400 break-all">
                                         {context_line}
+                                    </p>
+                                }
+                            })}
+                            {content.request_id_line.map(|rid_line| {
+                                view! {
+                                    <p
+                                        data-testid="peer-error-request-id"
+                                        class="text-xs font-mono text-slate-400 break-all"
+                                    >
+                                        {rid_line}
                                     </p>
                                 }
                             })}
@@ -1224,6 +1387,240 @@ mod tests {
 
         let empty = parse_peer_api_response::<Value>(502, false, "").unwrap_err();
         assert_eq!(empty.message(), "Request failed (HTTP 502)");
+        assert_eq!(empty.request_id(), None);
+    }
+
+    #[test]
+    fn peer_error_extracts_request_id_from_body_and_falls_back_to_header() {
+        // 1. Body request_id alone.
+        let body_only = json!({
+            "code": "PEER_INTERNAL_ERROR",
+            "server": "media-2",
+            "step": "confirm_pairing",
+            "message": "Runner call failed",
+            "action": "Inspect logs and retry",
+            "request_id": "  req-body-123  "
+        })
+        .to_string();
+        let err = parse_peer_api_response_with_request_id::<Value>(500, false, &body_only, None)
+            .unwrap_err();
+        assert_eq!(err.request_id(), Some("req-body-123"));
+        assert_eq!(
+            err.request_id_summary("en").as_deref(),
+            Some("Request ID: req-body-123")
+        );
+        let ctx = err.context_summary("en").unwrap();
+        assert!(ctx.contains("media-2"));
+        assert!(ctx.contains("confirm_pairing"));
+        assert!(ctx.contains("PEER_INTERNAL_ERROR"));
+        assert!(ctx.contains("Request ID: req-body-123"));
+
+        // 2. Header fallback when JSON body omits request_id.
+        let no_body_rid = json!({
+            "code": "LINK_DOWN",
+            "server": "media-2",
+            "step": "deliver_grant_token",
+            "message": "Tunnel unreachable",
+            "action": "Check UDP 51821"
+        })
+        .to_string();
+        let err = parse_peer_api_response_with_request_id::<Value>(
+            502,
+            false,
+            &no_body_rid,
+            Some("  hdr-fallback-456  "),
+        )
+        .unwrap_err();
+        assert_eq!(err.request_id(), Some("hdr-fallback-456"));
+
+        // 3. Header fallback when JSON body has blank/whitespace request_id.
+        let blank_body_rid = json!({
+            "code": "LINK_DOWN",
+            "message": "Tunnel unreachable",
+            "request_id": "   \t\n  "
+        })
+        .to_string();
+        let err = parse_peer_api_response_with_request_id::<Value>(
+            502,
+            false,
+            &blank_body_rid,
+            Some("hdr-fallback-789"),
+        )
+        .unwrap_err();
+        assert_eq!(err.request_id(), Some("hdr-fallback-789"));
+
+        // 4. Body request_id takes precedence over X-Request-ID header.
+        let err = parse_peer_api_response_with_request_id::<Value>(
+            500,
+            false,
+            &body_only,
+            Some("hdr-ignored-999"),
+        )
+        .unwrap_err();
+        assert_eq!(err.request_id(), Some("req-body-123"));
+
+        // 5. Absent when both body and header omit or contain only whitespace/control chars.
+        let err = parse_peer_api_response_with_request_id::<Value>(
+            502,
+            false,
+            &no_body_rid,
+            Some(" \r\n\t "),
+        )
+        .unwrap_err();
+        assert_eq!(err.request_id(), None);
+        assert_eq!(err.request_id_summary("en"), None);
+        assert!(!err.context_summary("en").unwrap().contains("Request ID"));
+
+        // 6. Non-JSON error bodies and decode failures preserve sanitized header X-Request-ID.
+        let plain = parse_peer_api_response_with_request_id::<Value>(
+            502,
+            false,
+            "",
+            Some("req-plain\r\n-502"),
+        )
+        .unwrap_err();
+        assert_eq!(plain.request_id(), Some("req-plain-502"));
+        assert_eq!(
+            plain.context_summary("en").as_deref(),
+            Some("Request ID: req-plain-502")
+        );
+
+        let oversized = "x".repeat(200);
+        let invalid_json = parse_peer_api_response_with_request_id::<Value>(
+            200,
+            true,
+            "{not-json",
+            Some(&oversized),
+        )
+        .unwrap_err();
+        assert_eq!(
+            invalid_json.request_id().map(str::len),
+            Some(MAX_REQUEST_ID_CHARS)
+        );
+
+        // 7. Direct serde deserialization defaults missing request_id to None and sanitizes present values.
+        let legacy: PeerApiError = serde_json::from_value(json!({
+            "status": 410,
+            "code": "CODE_EXPIRED",
+            "server": "media-2",
+            "step": "pair",
+            "message": "Expired",
+            "action": "Retry"
+        }))
+        .unwrap();
+        assert_eq!(legacy.request_id(), None);
+
+        let with_rid: PeerApiError = serde_json::from_value(json!({
+            "status": 500,
+            "code": "PEER_INTERNAL_ERROR",
+            "server": "media-2",
+            "step": "pair",
+            "message": "Failed",
+            "action": "Retry",
+            "request_id": "  req-serde-42\n"
+        }))
+        .unwrap();
+        assert_eq!(with_rid.request_id(), Some("req-serde-42"));
+    }
+
+    #[test]
+    fn peer_error_alert_renders_request_id_across_locales_and_omits_when_absent() {
+        let err_with_rid = parse_peer_api_response_with_request_id::<Value>(
+            502,
+            false,
+            &json!({
+                "code": "LINK_DOWN",
+                "server": "media-2",
+                "step": "confirm_pairing",
+                "message": "Tunnel hello timed out",
+                "action": "Check UDP 51821",
+                "request_id": "req-render-42"
+            })
+            .to_string(),
+            None,
+        )
+        .unwrap_err();
+
+        for locale in ["en", "de", "dk", "es", "fr", "zh"] {
+            let banner = err_with_rid.banner_content(locale);
+            assert_eq!(banner.message, "Tunnel hello timed out");
+            assert_eq!(banner.action.as_deref(), Some("Check UDP 51821"));
+            let next_step_label = banner.next_step_label.as_deref().expect("next step label");
+            assert_ne!(next_step_label, "Cluster.errorNextStep", "{locale}");
+            let meta = banner.metadata.as_deref().expect("metadata summary");
+            assert!(meta.contains("media-2"), "{locale}: {meta}");
+            assert!(meta.contains("confirm_pairing"), "{locale}: {meta}");
+            assert!(meta.contains("LINK_DOWN"), "{locale}: {meta}");
+            assert!(
+                !meta.contains("req-render-42"),
+                "banner metadata line must not duplicate request_id: {locale}: {meta}"
+            );
+            let rid_line = banner
+                .request_id_line
+                .as_deref()
+                .expect("request_id banner line");
+            assert!(rid_line.contains("req-render-42"), "{locale}: {rid_line}");
+            assert!(!rid_line.contains("Cluster.errorRequestId"), "{locale}");
+
+            let summary = err_with_rid
+                .context_summary(locale)
+                .expect("context summary");
+            assert!(summary.contains("media-2"), "{locale}: {summary}");
+            assert!(summary.contains("req-render-42"), "{locale}: {summary}");
+        }
+
+        // Generic error with header-only request_id renders request_id line even without server/step/code.
+        let header_only_err = parse_peer_api_response_with_request_id::<Value>(
+            500,
+            false,
+            r#"{"error":"Runner offline"}"#,
+            Some("req-hdr-only-7"),
+        )
+        .unwrap_err();
+        let hdr_banner = header_only_err.banner_content("en");
+        assert_eq!(hdr_banner.message, "Runner offline");
+        assert_eq!(hdr_banner.action, None);
+        assert_eq!(hdr_banner.next_step_label, None);
+        assert_eq!(hdr_banner.metadata, None);
+        assert_eq!(
+            hdr_banner.request_id_line.as_deref(),
+            Some("Request ID: req-hdr-only-7")
+        );
+
+        // Error without request_id omits request_id_line cleanly.
+        let no_rid_err = PeerApiError::client("Local validation error");
+        let no_rid_banner = no_rid_err.banner_content("en");
+        assert_eq!(no_rid_banner.message, "Local validation error");
+        assert_eq!(no_rid_banner.metadata, None);
+        assert_eq!(no_rid_banner.request_id_line, None);
+
+        // Reactive locale switches in AppContext update the banner request_id line dynamically.
+        Owner::new().with(|| {
+            let context = AppContext::new();
+            let current_en = err_with_rid.banner_content(&context.locale.get_untracked());
+            assert_eq!(
+                current_en.request_id_line.as_deref(),
+                Some("Request ID: req-render-42")
+            );
+            context.locale.set("de".into());
+            let current_de = err_with_rid.banner_content(&context.locale.get_untracked());
+            assert_eq!(
+                current_de.request_id_line.as_deref(),
+                Some("Anfrage-ID: req-render-42")
+            );
+            context.locale.set("fr".into());
+            let current_fr = err_with_rid.banner_content(&context.locale.get_untracked());
+            assert_eq!(
+                current_fr.request_id_line.as_deref(),
+                Some("ID de requête\u{00a0}: req-render-42")
+            );
+            context.locale.set("zh".into());
+            let current_zh = err_with_rid.banner_content(&context.locale.get_untracked());
+            assert_eq!(
+                current_zh.request_id_line.as_deref(),
+                Some("请求 ID：req-render-42")
+            );
+        });
     }
 
     #[test]

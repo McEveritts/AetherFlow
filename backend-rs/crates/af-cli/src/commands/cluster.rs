@@ -42,11 +42,34 @@ static WG_KEY_B64_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"[A-Za-z0-9+/]{43}=").expect("constant wireguard base64 key redaction regex")
 });
 
+/// Projects internal durable `peer_links.state` values to canonical public lifecycle states,
+/// matching `af-api/src/peers/mod.rs:122-132`.
+pub(crate) fn public_link_state(state: &str) -> &'static str {
+    match state {
+        "pending" | "pending_owned" => "pending",
+        "active" | "active_unowned" => "active",
+        "down" | "down_unowned" => "down",
+        "revoked" | "revoked_unowned" | "revoking" | "revoking_unowned" => "revoked",
+        _ => "unknown",
+    }
+}
+
+/// Affirmative durable WireGuard peer ownership predicate (fail-closed allowlist),
+/// matching `af-api/src/peers/mod.rs:85-90`.
+pub(crate) fn is_wg_peer_owned(state: &str) -> bool {
+    matches!(
+        state,
+        "pending_owned" | "active" | "down" | "revoked" | "revoking"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkHealthSummary {
     pub id: String,
     pub name: String,
     pub state: String,
+    pub internal_state: String,
+    pub wg_peer_owned: bool,
     pub tunnel_ip: String,
     pub endpoint: String,
     pub wg_port: u16,
@@ -82,8 +105,9 @@ pub struct WireGuardHandshakeSummary {
     pub error: Option<String>,
 }
 
+/// Access THIS server grants TO the peer (`peer_grants`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutgoingGrantSummary {
+pub struct InboundGrantSummary {
     pub id: String,
     pub run_as_user_id: i64,
     pub access: AccessMap,
@@ -93,8 +117,9 @@ pub struct OutgoingGrantSummary {
     pub revoked_at: Option<String>,
 }
 
+/// Access the PEER grants TO this server (`peer_received_grants`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IncomingGrantSummary {
+pub struct OutboundGrantSummary {
     pub grant_id: String,
     pub access: AccessMap,
     pub active: bool,
@@ -106,8 +131,8 @@ pub struct IncomingGrantSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantAccessSummary {
-    pub outgoing: Option<OutgoingGrantSummary>,
-    pub incoming: Option<IncomingGrantSummary>,
+    pub inbound: Option<InboundGrantSummary>,
+    pub outbound: Option<OutboundGrantSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,7 +169,9 @@ pub struct MountDiagnosticEntry {
     pub live_unit_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_error: Option<String>,
-    pub probe: SentinelProbeSummary,
+    pub probe: Option<SentinelProbeSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_skipped_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,61 +264,34 @@ pub(crate) fn execute_cluster_command(
     }
 }
 
-fn rebase_under_root(root: &Path, path: &Path) -> PathBuf {
-    if let Ok(stripped) = path.strip_prefix("/") {
-        root.join(stripped)
-    } else {
-        root.join(path)
-    }
-}
-
 pub(crate) fn resolve_cluster_db_path(
     global: &GlobalOptions,
     explicit_db: Option<&Path>,
 ) -> CliResult<PathBuf> {
+    let isolated_root =
+        af_models::try_resolve_isolated_root_with_env(global.root.as_deref(), |key| {
+            std::env::var(key).ok()
+        })
+        .map_err(CliError::Validation)?;
+
     if let Some(explicit) = explicit_db {
-        if explicit.as_os_str().is_empty() {
+        if explicit.as_os_str().is_empty() || explicit.to_string_lossy().trim().is_empty() {
             return Err(CliError::Validation(
                 "--db path must not be empty".to_string(),
             ));
         }
-        if let Some(ref root) = global.root {
-            if explicit.is_relative() {
-                return Ok(root.join(explicit));
-            }
+        if let Some(ref root) = isolated_root {
+            return af_models::validate_path_within_isolated_root(explicit, root, "--db")
+                .map_err(CliError::Validation);
         }
         return Ok(explicit.to_path_buf());
     }
 
-    for env_key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
-        if let Ok(raw) = std::env::var(env_key) {
-            let trimmed = raw.trim();
-            if !trimmed.is_empty() {
-                let candidate = PathBuf::from(trimmed);
-                if let Some(ref root) = global.root {
-                    if candidate.is_relative() {
-                        return Ok(root.join(candidate));
-                    }
-                }
-                return Ok(candidate);
-            }
-        }
-    }
-
-    let default_sqlite = match global.root.as_deref() {
-        Some(root) => rebase_under_root(root, Path::new("/var/lib/aetherflow/aetherflow.sqlite")),
-        None => PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite"),
-    };
-    let default_db = match global.root.as_deref() {
-        Some(root) => rebase_under_root(root, Path::new("/var/lib/aetherflow/aetherflow.db")),
-        None => PathBuf::from("/var/lib/aetherflow/aetherflow.db"),
-    };
-
-    if default_sqlite.is_file() {
-        Ok(default_sqlite)
-    } else {
-        Ok(default_db)
-    }
+    af_models::try_resolve_active_db_path_from_env(
+        global.root.as_deref(),
+        "/var/lib/aetherflow/aetherflow.sqlite",
+    )
+    .map_err(CliError::Validation)
 }
 
 fn open_readonly_db(db_path: &Path) -> CliResult<Connection> {
@@ -527,6 +527,28 @@ fn build_mount_diagnostics(
     mounts
         .into_iter()
         .map(|mount| {
+            if mount.purpose != "media" {
+                let safe_purpose = redact_diagnostic_secrets(&mount.purpose, exact_secrets);
+                return MountDiagnosticEntry {
+                    id: mount.id,
+                    remote_path: mount.remote_path,
+                    mount_path: mount.mount_path,
+                    unit_name: mount.unit_name,
+                    writable: mount.writable,
+                    purpose: mount.purpose,
+                    state: mount.state,
+                    last_error: redact_optional(mount.last_error.as_deref(), exact_secrets),
+                    live_exists: None,
+                    live_active: None,
+                    live_unit_state: None,
+                    live_error: None,
+                    probe: None,
+                    probe_skipped_reason: Some(format!(
+                        "non-media mount purpose '{safe_purpose}' is not managed by /v1/peer-storage live mount/sentinel probes"
+                    )),
+                };
+            }
+
             let (live_exists, live_active, live_unit_state, live_error) =
                 match transport.query_peer_mount_status(&mount.mount_path) {
                     Ok(state) => (
@@ -580,7 +602,8 @@ fn build_mount_diagnostics(
                 live_active,
                 live_unit_state,
                 live_error,
-                probe,
+                probe: Some(probe),
+                probe_skipped_reason: None,
             }
         })
         .collect()
@@ -803,24 +826,24 @@ pub(crate) fn build_cluster_diagnose_report(
 
     let link = find_peer_link(&conn, link_selector)?;
 
-    let all_outgoing_grants = if table_exists(&conn, "peer_grants")? {
+    let all_inbound_grants = if table_exists(&conn, "peer_grants")? {
         list_peer_grants_for_link(&conn, &link.id)
             .map_err(|err| CliError::Execution(format!("failed querying peer_grants: {err}")))?
     } else {
         Vec::new()
     };
 
-    let outgoing_grant = if table_exists(&conn, "peer_grants")? {
+    let inbound_grant = if table_exists(&conn, "peer_grants")? {
         get_active_peer_grant_for_link(&conn, &link.id)
             .map_err(|err| {
                 CliError::Execution(format!("failed querying active peer_grant: {err}"))
             })?
-            .or_else(|| all_outgoing_grants.last().cloned())
+            .or_else(|| all_inbound_grants.last().cloned())
     } else {
         None
     };
 
-    let incoming_grant = if table_exists(&conn, "peer_received_grants")? {
+    let outbound_grant = if table_exists(&conn, "peer_received_grants")? {
         get_peer_received_grant(&conn, &link.id).map_err(|err| {
             CliError::Execution(format!("failed querying peer_received_grants: {err}"))
         })?
@@ -828,7 +851,7 @@ pub(crate) fn build_cluster_diagnose_report(
         None
     };
 
-    let exact_secrets = collect_exact_secrets(&link, &all_outgoing_grants, incoming_grant.as_ref());
+    let exact_secrets = collect_exact_secrets(&link, &all_inbound_grants, outbound_grant.as_ref());
 
     let exports: Vec<ExportDiagnosticEntry> = if table_exists(&conn, "peer_exports")? {
         list_peer_exports_for_link(&conn, &link.id)
@@ -872,8 +895,8 @@ pub(crate) fn build_cluster_diagnose_report(
     let audit = query_link_audit_entries(
         &conn,
         &link,
-        &all_outgoing_grants,
-        incoming_grant.as_ref(),
+        &all_inbound_grants,
+        outbound_grant.as_ref(),
         &exact_secrets,
     )?;
 
@@ -881,10 +904,14 @@ pub(crate) fn build_cluster_diagnose_report(
     let mounts = build_mount_diagnostics(raw_mounts, transport, &exact_secrets);
     let transcode_worker = build_transcode_summary(worker, recent_jobs, &exact_secrets);
 
+    let public_state = public_link_state(&link.state).to_string();
+    let wg_peer_owned = is_wg_peer_owned(&link.state);
     let link_summary = LinkHealthSummary {
         id: link.id,
         name: link.name,
-        state: link.state,
+        state: public_state,
+        internal_state: link.state,
+        wg_peer_owned,
         tunnel_ip: link.tunnel_ip,
         endpoint: link.endpoint,
         wg_port: link.wg_port,
@@ -900,7 +927,7 @@ pub(crate) fn build_cluster_diagnose_report(
     };
 
     let grants = GrantAccessSummary {
-        outgoing: outgoing_grant.map(|g| OutgoingGrantSummary {
+        inbound: inbound_grant.map(|g| InboundGrantSummary {
             id: g.id,
             run_as_user_id: g.run_as_user_id,
             access: g.access,
@@ -909,7 +936,7 @@ pub(crate) fn build_cluster_diagnose_report(
             created_at: g.created_at,
             revoked_at: g.revoked_at,
         }),
-        incoming: incoming_grant.map(|g| IncomingGrantSummary {
+        outbound: outbound_grant.map(|g| OutboundGrantSummary {
             grant_id: g.grant_id,
             access: g.access,
             active: g.revoked_at.is_none(),
@@ -962,7 +989,10 @@ pub(crate) fn render_diagnose_report_human(report: &ClusterDiagnoseReport) -> St
     lines.push(String::new());
 
     lines.push("[Link Health]".to_string());
-    lines.push(format!("  State:                {}", link.state));
+    lines.push(format!(
+        "  State:                {} (internal: {}, wg_peer_owned: {})",
+        link.state, link.internal_state, link.wg_peer_owned
+    ));
     lines.push(format!("  Tunnel IP:            {}", link.tunnel_ip));
     lines.push(format!(
         "  Endpoint:             {}:{}",
@@ -1056,7 +1086,7 @@ pub(crate) fn render_diagnose_report_human(report: &ClusterDiagnoseReport) -> St
     lines.push(String::new());
 
     lines.push("[Grants]".to_string());
-    match &report.grants.outgoing {
+    match &report.grants.inbound {
         Some(g) => {
             let status = if g.active {
                 "active".to_string()
@@ -1066,17 +1096,17 @@ pub(crate) fn render_diagnose_report_human(report: &ClusterDiagnoseReport) -> St
                 "inactive".to_string()
             };
             lines.push(format!(
-                "  Outgoing:             {} ({}, run_as_user_id={}, created_by={}, created_at={})",
+                "  Inbound grant (this server -> peer):  {} ({}, run_as_user_id={}, created_by={}, created_at={})",
                 g.id, status, g.run_as_user_id, g.created_by, g.created_at
             ));
             lines.push(format!(
-                "    Access:             {}",
+                "    Access:                             {}",
                 format_access_map(&g.access)
             ));
         }
-        None => lines.push("  Outgoing:             none".to_string()),
+        None => lines.push("  Inbound grant (this server -> peer):  none".to_string()),
     }
-    match &report.grants.incoming {
+    match &report.grants.outbound {
         Some(g) => {
             let status = if g.active {
                 "active".to_string()
@@ -1086,7 +1116,7 @@ pub(crate) fn render_diagnose_report_human(report: &ClusterDiagnoseReport) -> St
                 "inactive".to_string()
             };
             lines.push(format!(
-                "  Incoming:             {} ({}, gen={}, created_by={})",
+                "  Outbound grant (peer -> this server): {} ({}, gen={}, created_by={})",
                 if g.grant_id.is_empty() {
                     "(revoked)"
                 } else {
@@ -1097,11 +1127,11 @@ pub(crate) fn render_diagnose_report_human(report: &ClusterDiagnoseReport) -> St
                 g.created_by
             ));
             lines.push(format!(
-                "    Access:             {}",
+                "    Access:                             {}",
                 format_access_map(&g.access)
             ));
         }
-        None => lines.push("  Incoming:             none".to_string()),
+        None => lines.push("  Outbound grant (peer -> this server): none".to_string()),
     }
     lines.push(String::new());
 
@@ -1129,29 +1159,35 @@ pub(crate) fn render_diagnose_report_human(report: &ClusterDiagnoseReport) -> St
     } else {
         for mount in &report.mounts {
             let mode = if mount.writable { "rw" } else { "ro" };
-            let live_desc = match (&mount.live_unit_state, &mount.live_error) {
-                (Some(unit_state), None) => format!(
+            let live_desc = match (
+                &mount.live_unit_state,
+                &mount.live_error,
+                &mount.probe_skipped_reason,
+            ) {
+                (Some(unit_state), None, _) => format!(
                     "unit={} (exists={}, active={})",
                     unit_state,
                     mount.live_exists.unwrap_or(false),
                     mount.live_active.unwrap_or(false)
                 ),
-                (_, Some(err)) => format!("runner_error={err}"),
+                (_, Some(err), _) => format!("runner_error={err}"),
+                (None, None, Some(_)) => format!("skipped ({} mount)", mount.purpose),
                 _ => "unavailable".to_string(),
             };
-            let probe_desc = if mount.probe.ok {
-                format!("ok ({})", mount.probe.checked_path)
-            } else {
-                let err = mount
-                    .probe
-                    .error
-                    .as_deref()
-                    .unwrap_or(if mount.probe.timed_out {
+            let probe_desc = match &mount.probe {
+                Some(probe) if probe.ok => format!("ok ({})", probe.checked_path),
+                Some(probe) => {
+                    let err = probe.error.as_deref().unwrap_or(if probe.timed_out {
                         "timed out"
                     } else {
                         "failed"
                     });
-                format!("failed ({}: {})", mount.probe.checked_path, err)
+                    format!("failed ({}: {})", probe.checked_path, err)
+                }
+                None => match &mount.probe_skipped_reason {
+                    Some(reason) => format!("skipped ({reason})"),
+                    None => "skipped".to_string(),
+                },
             };
             lines.push(format!(
                 "  - {} -> {} [{}, {}, db_state={}]",

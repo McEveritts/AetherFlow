@@ -31,6 +31,7 @@ REAL_TOOLS = (
     "find", "awk", "grep", "sed", "mktemp", "readlink", "chmod", "chown", "id",
     "head", "cut", "tr", "sha256sum", "tar", "gzip", "python3", "touch", "sleep",
     "basename", "dirname", "sort", "tail", "runuser", "sh", "stat", "openssl",
+    "install",
 )
 
 CURL_MOCK = r'''#!/usr/bin/python3
@@ -110,6 +111,10 @@ if arguments and arguments[0] == "show":
     else:
         print(os.environ.get("TEST_UNIT_ENV", "Environment="))
 if arguments == ["stop", "aetherflow-api.service", "aetherflow-runner.service"] and os.environ.get("TEST_FAIL_DATABASE_STOP") == "1":
+    sys.exit(1)
+if arguments == ["is-active", "--quiet", "af-transcode-worker.service"]:
+    sys.exit(0 if os.environ.get("TEST_TRANSCODE_WORKER_ACTIVE") == "1" else 3)
+if arguments == ["restart", "af-transcode-worker.service"] and os.environ.get("TEST_FAIL_WORKER_RESTART") == "1":
     sys.exit(1)
 sys.exit(0)
 '''
@@ -259,6 +264,7 @@ os.execvp(inner[0], inner)
             "CURRENT_LINK": str(self.current),
             "REPO_DIR": str(self.root / "repo"),
             "SYSTEMD_UNITS_DST": str(self.units),
+            "TRANSCODE_SHIM_PATH": str(self.root / "usr" / "lib" / "aetherflow" / "transcode" / "ffmpeg"),
             "DRY_RUN_ROOT": str(self.dry),
             "LEGACY_OPT_ROOT": str(self.legacy_root),
             "HEALTH_ENDPOINT": "http://127.0.0.1:9/health/ready",
@@ -1338,6 +1344,113 @@ os.execvp(inner[0], inner)
         self.assertFalse((self.current / "af-transcode").exists())
         self.assertEqual((self.current / "bin" / "af").stat().st_mode & 0o777, 0o755)
         self.assertEqual((self.current / "bin" / "speedtest-backend").stat().st_mode & 0o777, 0o755)
+
+    def test_package_automation_jellyfin_uses_transcode_socket_directory(self):
+        import json
+
+        automation = json.loads((ROOT / "config" / "package_automation.json").read_text(encoding="utf-8"))
+        rw_paths = automation["jellyfin"]["sandbox_rw_paths"]
+        self.assertIn("-/run/aetherflow-transcode", rw_paths)
+        self.assertNotIn("-/run/aetherflow-transcode/transcode.sock", rw_paths)
+
+    def test_deploy_refreshes_transcode_shim_atomically_and_stays_dormant_when_absent(self):
+        self.prepare_live_units()
+        shim_path = self.root / "usr" / "lib" / "aetherflow" / "transcode" / "ffmpeg"
+
+        # 1. Absent shim stays dormant and never creates the transcode directory or shim file.
+        dormant = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(dormant.returncode, 0, dormant.stdout + dormant.stderr)
+        self.assertFalse(shim_path.exists())
+        self.assertFalse(shim_path.parent.exists())
+
+        # 2. Existing regular shim is atomically replaced via sibling temp + rename (new inode, 0755).
+        shim_path.parent.mkdir(parents=True)
+        shim_path.write_bytes(b"old-shim-v1")
+        shim_path.chmod(0o755)
+        old_ino = shim_path.lstat().st_ino
+        with shim_path.open("rb") as old_handle:
+            refreshed = self.run_manager("deploy", "--channel", "stable")
+            self.assertEqual(refreshed.returncode, 0, refreshed.stdout + refreshed.stderr)
+            self.assertEqual(old_handle.read(), b"old-shim-v1")
+        new_stat = shim_path.lstat()
+        self.assertNotEqual(new_stat.st_ino, old_ino)
+        self.assertEqual(new_stat.st_mode & 0o777, 0o755)
+        self.assertEqual(shim_path.read_bytes(), b"transcode-fixture")
+        self.assertEqual([p.name for p in shim_path.parent.iterdir()], ["ffmpeg"])
+
+        # 3. Legacy release without bin/af-transcode leaves an existing shim untouched.
+        self.write_artifact(include_transcode=False)
+        legacy = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(legacy.returncode, 0, legacy.stdout + legacy.stderr)
+        self.assertEqual(shim_path.read_bytes(), b"transcode-fixture")
+
+    def test_deploy_refuses_symlinked_transcode_shim_and_parent_dir(self):
+        self.prepare_live_units()
+        shim_path = self.root / "usr" / "lib" / "aetherflow" / "transcode" / "ffmpeg"
+        shim_path.parent.mkdir(parents=True)
+
+        # 1. Symlink at shim file is refused without modifying victim or restarting API.
+        victim = self.root / "shim-symlink-victim"
+        victim.write_bytes(b"UNTOUCHED-VICTIM")
+        shim_path.symlink_to(victim)
+        file_res = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(file_res.returncode, 4, file_res.stdout + file_res.stderr)
+        self.assertIn("Refusing symlinked transcode shim path", file_res.stdout + file_res.stderr)
+        self.assertTrue(shim_path.is_symlink())
+        self.assertEqual(victim.read_bytes(), b"UNTOUCHED-VICTIM")
+        self.assertNotIn("systemctl restart aetherflow-api.service", self.commands.read_text())
+
+        # 2. Symlink at parent transcode directory is also refused.
+        outside_dir = self.root / "outside-transcode-dir"
+        outside_dir.mkdir()
+        outside_ffmpeg = outside_dir / "ffmpeg"
+        outside_ffmpeg.write_bytes(b"OUTSIDE-VICTIM")
+        shutil.rmtree(shim_path.parent)
+        shim_path.parent.symlink_to(outside_dir)
+        self.commands.write_text("")
+        # Clean unfinished recovery journal from previous refusal before starting fresh deploy.
+        (self.releases / ".recovery_state.json").unlink(missing_ok=True)
+        dir_res = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(dir_res.returncode, 4, dir_res.stdout + dir_res.stderr)
+        self.assertIn("Refusing symlinked transcode shim path", dir_res.stdout + dir_res.stderr)
+        self.assertEqual(outside_ffmpeg.read_bytes(), b"OUTSIDE-VICTIM")
+        self.assertNotIn("systemctl restart aetherflow-api.service", self.commands.read_text())
+
+    def test_deploy_restarts_af_transcode_worker_only_when_active(self):
+        self.prepare_live_units()
+
+        # 1. Inactive worker: probes is-active and does NOT restart af-transcode-worker.service.
+        inactive = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(inactive.returncode, 0, inactive.stdout + inactive.stderr)
+        inactive_cmds = self.commands.read_text()
+        self.assertIn("systemctl restart aetherflow-runner.service", inactive_cmds)
+        self.assertIn("systemctl restart aetherflow-api.service", inactive_cmds)
+        self.assertIn("systemctl is-active --quiet af-transcode-worker.service", inactive_cmds)
+        self.assertNotIn("systemctl restart af-transcode-worker.service", inactive_cmds)
+
+        # 2. Active worker: restarts af-transcode-worker.service strictly after aetherflow-api.service.
+        self.commands.write_text("")
+        active = self.run_manager("deploy", "--channel", "stable", TEST_TRANSCODE_WORKER_ACTIVE="1")
+        self.assertEqual(active.returncode, 0, active.stdout + active.stderr)
+        active_cmds = self.commands.read_text()
+        self.assertIn("systemctl is-active --quiet af-transcode-worker.service", active_cmds)
+        self.assertIn("systemctl restart af-transcode-worker.service", active_cmds)
+        self.assertLess(
+            active_cmds.index("systemctl restart aetherflow-api.service"),
+            active_cmds.index("systemctl restart af-transcode-worker.service"),
+        )
+
+        # 3. Active worker restart failure fails health probe and triggers rollback (exit 2/4).
+        self.commands.write_text("")
+        failed = self.run_manager(
+            "deploy",
+            "--channel",
+            "stable",
+            TEST_TRANSCODE_WORKER_ACTIVE="1",
+            TEST_FAIL_WORKER_RESTART="1",
+        )
+        self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
+        self.assertIn("systemctl restart af-transcode-worker.service", self.commands.read_text())
 
 
 class SourceReleaseFrontendTests(unittest.TestCase):

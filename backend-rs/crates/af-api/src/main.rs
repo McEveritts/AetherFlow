@@ -313,6 +313,8 @@ async fn async_main() -> anyhow::Result<()> {
                     storage::maintain_backup_upload_staging();
                 })
                 .await;
+                let _ =
+                    peers::transcode::prune_old_transcode_jobs(&peers::PeerRuntime::global()).await;
                 storage::recover_fileshare_pending_publishes().await;
                 account_cleanup::recover().await;
             }

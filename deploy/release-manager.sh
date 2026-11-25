@@ -383,6 +383,7 @@ if [[ -n "${EFFECTIVE_RELEASE_ROOT}" ]]; then
     : "${SYSTEMD_UNITS_SRC:=${EFFECTIVE_RELEASE_ROOT}/opt/AetherFlow/deploy/systemd}"
     : "${SYSTEMD_UNITS_DST:=${EFFECTIVE_RELEASE_ROOT}/etc/systemd/system}"
     : "${CLI_BIN_DIR:=${EFFECTIVE_RELEASE_ROOT}/usr/local/bin}"
+    : "${TRANSCODE_SHIM_PATH:=${EFFECTIVE_RELEASE_ROOT}/usr/lib/aetherflow/transcode/ffmpeg}"
 fi
 
 load_conf_file_safely() {
@@ -400,7 +401,7 @@ allowed_keys = {
     "GIT_REMOTE", "NODE_HEAP_MB", "HEALTH_ENDPOINT", "HEALTH_RETRIES",
     "HEALTH_INTERVAL", "MAX_RELEASES", "LOG_FILE", "DATA_DIR", "ENV_DIR", "ENV_FILE",
     "SQLITE_DB", "SNAPSHOT_TIMEOUT", "SYSTEMD_UNITS_SRC", "SYSTEMD_UNITS_DST",
-    "CLI_BIN_DIR", "AETHERFLOW_RELEASE_ROOT", "AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH",
+    "CLI_BIN_DIR", "TRANSCODE_SHIM_PATH", "AETHERFLOW_RELEASE_ROOT", "AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH",
 }
 key_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -589,7 +590,8 @@ validate_path_within_isolated_root() {
 
 if [[ -n "${EFFECTIVE_RELEASE_ROOT}" ]]; then
     : "${CLI_BIN_DIR:=${EFFECTIVE_RELEASE_ROOT}/usr/local/bin}"
-    for _root_check_var in RELEASES_DIR CURRENT_LINK REPO_DIR LEGACY_OPT_ROOT DRY_RUN_ROOT LOG_FILE DATA_DIR ENV_DIR ENV_FILE SYSTEMD_UNITS_DST CLI_BIN_DIR; do
+    : "${TRANSCODE_SHIM_PATH:=${EFFECTIVE_RELEASE_ROOT}/usr/lib/aetherflow/transcode/ffmpeg}"
+    for _root_check_var in RELEASES_DIR CURRENT_LINK REPO_DIR LEGACY_OPT_ROOT DRY_RUN_ROOT LOG_FILE DATA_DIR ENV_DIR ENV_FILE SYSTEMD_UNITS_DST CLI_BIN_DIR TRANSCODE_SHIM_PATH; do
         validate_path_within_isolated_root "${_root_check_var}" "${!_root_check_var:-}"
     done
 fi
@@ -2042,6 +2044,48 @@ restart_systemd_units() {
         done
     fi
 
+    local transcode_src="${CURRENT_LINK}/bin/af-transcode"
+    local shim_path="${TRANSCODE_SHIM_PATH:-}"
+    if [[ -z "${shim_path}" ]]; then
+        if [[ -n "${EFFECTIVE_RELEASE_ROOT:-}" ]]; then
+            shim_path="${EFFECTIVE_RELEASE_ROOT%/}/usr/lib/aetherflow/transcode/ffmpeg"
+        else
+            shim_path="/usr/lib/aetherflow/transcode/ffmpeg"
+        fi
+    fi
+    if [[ -n "${EFFECTIVE_RELEASE_ROOT:-}" ]]; then
+        if [[ "${shim_path}" != /* || "${shim_path}" == *".."* || ( "${shim_path}" != "${EFFECTIVE_RELEASE_ROOT%/}" && "${shim_path}" != "${EFFECTIVE_RELEASE_ROOT%/}/"* ) ]]; then
+            printf 'Configured TRANSCODE_SHIM_PATH=%s escapes isolated release root %s\n' "${shim_path}" "${EFFECTIVE_RELEASE_ROOT}" >&2
+            return 1
+        fi
+    fi
+    local shim_dir shim_parent
+    shim_dir="$(dirname "${shim_path}")"
+    shim_parent="$(dirname "${shim_dir}")"
+    if [[ -L "${shim_parent}" || -L "${shim_dir}" || -L "${shim_path}" ]]; then
+        printf 'Refusing symlinked transcode shim path: %s\n' "${shim_path}" >&2
+        return 1
+    fi
+    if [[ -e "${shim_path}" && ! -f "${shim_path}" ]]; then
+        printf 'Refusing non-regular transcode shim path: %s\n' "${shim_path}" >&2
+        return 1
+    fi
+    if [[ ! -L "${shim_path}" && -f "${shim_path}" ]]; then
+        if [[ -L "${CURRENT_LINK}/bin" || -L "${transcode_src}" ]]; then
+            printf 'Refusing symlinked transcode binary source: %s\n' "${transcode_src}" >&2
+            return 1
+        fi
+        if [[ -f "${transcode_src}" && -x "${transcode_src}" ]]; then
+            local tmp_shim=""
+            tmp_shim="$(mktemp "${shim_dir}/.ffmpeg.tmp.XXXXXX")" || return 1
+            if ! install -m 0755 -- "${transcode_src}" "${tmp_shim}" || ! mv -Tf -- "${tmp_shim}" "${shim_path}"; then
+                rm -f -- "${tmp_shim}"
+                return 1
+            fi
+            log_info "Refreshed transcode shim ${shim_path} from ${transcode_src}."
+        fi
+    fi
+
     systemctl daemon-reload || return 1
 
     if [[ -f "${CURRENT_LINK}/deploy/log-retention.py" ]]; then
@@ -2058,6 +2102,9 @@ restart_systemd_units() {
     systemctl enable aetherflow-runner.service aetherflow-api.service >/dev/null 2>&1 || true
     systemctl restart aetherflow-runner.service || return 1
     systemctl restart aetherflow-api.service || return 1
+    if systemctl is-active --quiet af-transcode-worker.service 2>/dev/null; then
+        systemctl restart af-transcode-worker.service || return 1
+    fi
 }
 
 # Top-level "status" from a /health/ready body. Key order and whitespace do not matter.

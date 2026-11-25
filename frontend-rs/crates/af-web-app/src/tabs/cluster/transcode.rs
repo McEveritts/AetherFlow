@@ -376,7 +376,26 @@ pub fn effective_worker_supports_transcode(
         && live_peer.is_none_or(supports_transcode)
 }
 
-pub fn resolve_align_action(worker: &TranscodeWorkerView) -> AlignAction {
+/// Returns `true` when the peer has granted a scope that authorizes Jellyfin package alignment
+/// (`POST /api/v1/peers/{id}/admin/packages/jellyfin/update`): `updates: write` (narrowed to
+/// Jellyfin updates on the peer) or `marketplace: write`.
+pub fn has_peer_jellyfin_update_grant(
+    worker: &TranscodeWorkerView,
+    live_peer: Option<&PeerLinkView>,
+) -> bool {
+    worker.has_updates_write_grant
+        || live_peer.is_some_and(|peer| {
+            peer.grants
+                .outbound
+                .as_ref()
+                .is_some_and(|grant| grant.access.marketplace.allows_write())
+        })
+}
+
+pub fn resolve_align_action_for_peer(
+    worker: &TranscodeWorkerView,
+    live_peer: Option<&PeerLinkView>,
+) -> AlignAction {
     if !worker.ffmpeg_mismatch {
         return AlignAction::None;
     }
@@ -385,7 +404,7 @@ pub fn resolve_align_action(worker: &TranscodeWorkerView) -> AlignAction {
             path: peer_package_update_path(None),
         },
         Some("peer") => {
-            if !worker.has_updates_write_grant {
+            if !has_peer_jellyfin_update_grant(worker, live_peer) {
                 return AlignAction::DisabledMissingUpdatesGrant {
                     peer_name: worker.peer_name.clone(),
                     reason_key: "Cluster.transcodeAlignRequiresUpdatesGrant",
@@ -409,6 +428,10 @@ pub fn resolve_align_action(worker: &TranscodeWorkerView) -> AlignAction {
         }
         _ => AlignAction::None,
     }
+}
+
+pub fn resolve_align_action(worker: &TranscodeWorkerView) -> AlignAction {
+    resolve_align_action_for_peer(worker, None)
 }
 
 pub fn can_enable_worker(worker: &TranscodeWorkerView, live_peer: Option<&PeerLinkView>) -> bool {
@@ -1450,6 +1473,7 @@ pub fn TranscodeSection(
                                 matches!(resolve_align_action(w), AlignAction::UpdateLocal { .. })
                             });
                             let any_mismatch = cfg.workers.iter().any(|w| w.ffmpeg_mismatch);
+                            let live_peers = peers.get();
                             let workers_for_table = cfg.workers.clone();
 
                             Some(view! {
@@ -1561,7 +1585,14 @@ pub fn TranscodeSection(
                                                     } else {
                                                         worker.encoders.join(", ")
                                                     };
-                                                    let align_action = resolve_align_action(&worker);
+                                                    let live_peer = live_peers
+                                                        .iter()
+                                                        .find(|p| p.id == worker.link_id);
+                                                    let align_action =
+                                                        resolve_align_action_for_peer(
+                                                            &worker,
+                                                            live_peer,
+                                                        );
                                                     let has_version = worker.package_version.is_some()
                                                         || worker.ffmpeg_version.is_some();
 
@@ -2667,7 +2698,7 @@ mod tests {
             }
         );
 
-        // Peer worker is older WITHOUT updates write grant -> disabled with explicit reason.
+        // Peer worker is older WITHOUT updates write or marketplace write grant -> disabled with explicit reason.
         let peer_no_grant = TranscodeWorkerView {
             ffmpeg_mismatch: true,
             align_target: Some("peer".into()),
@@ -2683,7 +2714,54 @@ mod tests {
         );
         assert_eq!(
             translate("en", "Cluster.transcodeAlignRequiresUpdatesGrant"),
-            "Requires updates write grant on this peer"
+            "Requires updates or marketplace write grant on this peer for Jellyfin updates"
+        );
+
+        // Peer worker without updates:write is still authorized when peer granted marketplace:write.
+        let marketplace_write_peer = PeerLinkView {
+            id: "link-1".into(),
+            name: "media-2".into(),
+            grants: crate::tabs::cluster::peers::LinkGrantsView {
+                inbound: None,
+                outbound: Some(crate::tabs::cluster::peers::GrantSummaryView {
+                    access: crate::tabs::cluster::peers::AccessMapView {
+                        marketplace: crate::tabs::cluster::peers::AccessLevel::Write,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_align_action_for_peer(&peer_no_grant, Some(&marketplace_write_peer)),
+            AlignAction::UpdatePeer {
+                link_id: "link-1".into(),
+                peer_name: "media-2".into(),
+                path: "/api/v1/peers/link-1/admin/packages/jellyfin/update".into(),
+            }
+        );
+
+        // Read-only marketplace grant is not sufficient for Jellyfin package updates.
+        let marketplace_read_peer = PeerLinkView {
+            grants: crate::tabs::cluster::peers::LinkGrantsView {
+                inbound: None,
+                outbound: Some(crate::tabs::cluster::peers::GrantSummaryView {
+                    access: crate::tabs::cluster::peers::AccessMapView {
+                        marketplace: crate::tabs::cluster::peers::AccessLevel::Read,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            ..marketplace_write_peer
+        };
+        assert_eq!(
+            resolve_align_action_for_peer(&peer_no_grant, Some(&marketplace_read_peer)),
+            AlignAction::DisabledMissingUpdatesGrant {
+                peer_name: "media-2".into(),
+                reason_key: "Cluster.transcodeAlignRequiresUpdatesGrant",
+            }
         );
 
         // Peer worker is older with grant, but link is down -> disabled cleanly.

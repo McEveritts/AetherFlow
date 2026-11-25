@@ -723,12 +723,17 @@ async fn configure_nfsd_binds_tunnel_only_idempotence_rollback_and_preservation(
     let fx = StorageFixture::new();
     let mgr = fx.manager();
 
-    // Seed host /etc/nfs.conf and unrelated drop-in.
+    // Seed host /etc/nfs.conf, unrelated nfs.conf.d drop-in, and unrelated nfs-server.service.d drop-in.
     fx.create_system_dir("etc/nfs.conf.d");
+    fx.create_system_dir("etc/systemd/system/nfs-server.service.d");
     let main_nfs_conf = fx.root.join("etc/nfs.conf");
     let unrelated_dropin = fx.root.join("etc/nfs.conf.d/99-custom.conf");
+    let unrelated_unit_dropin = fx
+        .root
+        .join("etc/systemd/system/nfs-server.service.d/10-custom.conf");
     fs::write(&main_nfs_conf, "[nfsd]\nthreads=8\n").unwrap();
     fs::write(&unrelated_dropin, "[mountd]\nmanage-gids=y\n").unwrap();
+    fs::write(&unrelated_unit_dropin, "[Service]\nTimeoutStartSec=60\n").unwrap();
 
     let first = mgr
         .configure_nfsd("10.231.0.1")
@@ -745,7 +750,39 @@ async fn configure_nfsd_binds_tunnel_only_idempotence_rollback_and_preservation(
     assert_eq!(fs::read_to_string(&conf_file).unwrap(), expected_conf);
     assert_eq!(fs::metadata(&conf_file).unwrap().mode() & 0o777, 0o644);
 
-    // Idempotent second call when nfs-server is already active skips restart.
+    let unit_dropin_file = fx
+        .root
+        .join("etc/systemd/system/nfs-server.service.d/20-aetherflow-peers.conf");
+    let expected_dropin = format!(
+        "{PEER_MANAGED_HEADER}\n[Unit]\nAfter=wg-quick@afpeer0.service\nWants=wg-quick@afpeer0.service\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&unit_dropin_file).unwrap(),
+        expected_dropin
+    );
+    assert_eq!(
+        fs::metadata(&unit_dropin_file).unwrap().mode() & 0o777,
+        0o644
+    );
+
+    // Confirm systemctl daemon-reload ran before systemctl restart nfs-server.service.
+    let first_cmds = fx.commands();
+    let reload_idx = first_cmds
+        .iter()
+        .position(|(c, a)| c == "systemctl" && a == &vec!["daemon-reload".to_string()])
+        .expect("systemctl daemon-reload must run when boot drop-in changes");
+    let restart_idx = first_cmds
+        .iter()
+        .position(|(c, a)| {
+            c == "systemctl" && a == &vec!["restart".to_string(), "nfs-server.service".to_string()]
+        })
+        .expect("systemctl restart nfs-server.service must run");
+    assert!(
+        reload_idx < restart_idx,
+        "daemon-reload ({reload_idx}) must run before restart ({restart_idx})"
+    );
+
+    // Idempotent second call when nfs-server is already active skips both daemon-reload and restart.
     fx.clear_commands();
     let second = mgr
         .configure_nfsd("10.231.0.1")
@@ -756,13 +793,20 @@ async fn configure_nfsd_binds_tunnel_only_idempotence_rollback_and_preservation(
     let cmds = fx.commands();
     assert!(!cmds
         .iter()
+        .any(|(c, a)| c == "systemctl" && a.first().map(String::as_str) == Some("daemon-reload")));
+    assert!(!cmds
+        .iter()
         .any(|(c, a)| c == "systemctl" && a.first().map(String::as_str) == Some("restart")));
 
-    // Failed restart rolls back aetherflow-peers.conf to the previous working IP.
+    // Failed restart rolls back aetherflow-peers.conf to the previous working IP while keeping drop-in.
     fx.touch_marker("nfs-server-restart-fail-next");
     let err = mgr.configure_nfsd("10.231.0.9").await.unwrap_err();
     assert!(matches!(err, PeerStorageError::Runtime(_)));
     assert_eq!(fs::read_to_string(&conf_file).unwrap(), expected_conf);
+    assert_eq!(
+        fs::read_to_string(&unit_dropin_file).unwrap(),
+        expected_dropin
+    );
 
     // Refuse out-of-CIDR or network/broadcast tunnel IPs.
     assert!(mgr
@@ -793,8 +837,22 @@ async fn configure_nfsd_binds_tunnel_only_idempotence_rollback_and_preservation(
         .await
         .unwrap_err()
         .is_conflict());
+    fs::write(&conf_file, &expected_conf).unwrap();
 
-    // Host /etc/nfs.conf and unrelated drop-in remain untouched.
+    // Refuse unmanaged file at nfs-server.service.d/20-aetherflow-peers.conf without modifying conf.
+    fs::write(&unit_dropin_file, "[Unit]\nAfter=network.target\n").unwrap();
+    assert!(mgr
+        .configure_nfsd("10.231.0.2")
+        .await
+        .unwrap_err()
+        .is_conflict());
+    assert_eq!(fs::read_to_string(&conf_file).unwrap(), expected_conf);
+    assert_eq!(
+        fs::read_to_string(&unit_dropin_file).unwrap(),
+        "[Unit]\nAfter=network.target\n"
+    );
+
+    // Host /etc/nfs.conf and unrelated drop-ins remain untouched.
     assert_eq!(
         fs::read_to_string(&main_nfs_conf).unwrap(),
         "[nfsd]\nthreads=8\n"
@@ -803,6 +861,25 @@ async fn configure_nfsd_binds_tunnel_only_idempotence_rollback_and_preservation(
         fs::read_to_string(&unrelated_dropin).unwrap(),
         "[mountd]\nmanage-gids=y\n"
     );
+    assert_eq!(
+        fs::read_to_string(&unrelated_unit_dropin).unwrap(),
+        "[Service]\nTimeoutStartSec=60\n"
+    );
+
+    // Fresh configure_nfsd failure during daemon-reload rolls back BOTH newly created files cleanly.
+    let rb_fx = StorageFixture::new();
+    let rb_mgr = rb_fx.manager();
+    rb_fx.touch_marker("daemon-reload-fail-next");
+    let rb_err = rb_mgr.configure_nfsd("10.231.0.1").await.unwrap_err();
+    assert!(matches!(rb_err, PeerStorageError::Runtime(_)));
+    assert!(!rb_fx
+        .root
+        .join("etc/nfs.conf.d/aetherflow-peers.conf")
+        .exists());
+    assert!(!rb_fx
+        .root
+        .join("etc/systemd/system/nfs-server.service.d/20-aetherflow-peers.conf")
+        .exists());
 }
 
 #[tokio::test]
@@ -1573,4 +1650,426 @@ fn sandbox_policy_exempts_nfs_server_and_peer_mount_units() {
         apply_sandbox_dropins_in_dir(&root, &[unit.to_string()], "native", &[]).unwrap();
     }
     assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn configure_nfsd_warns_on_unmanaged_etc_exports_without_modifying_it() {
+    use tracing::field::{Field, Visit};
+    use tracing::instrument::WithSubscriber;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
+
+    #[derive(Clone, Default)]
+    struct WarnCapture {
+        warnings: Arc<StdMutex<Vec<HashMap<String, String>>>>,
+    }
+
+    struct Visitor(HashMap<String, String>);
+    impl Visit for Visitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl Subscriber for WarnCapture {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            if *event.metadata().level() == Level::WARN {
+                let mut v = Visitor(HashMap::new());
+                event.record(&mut v);
+                self.warnings
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(v.0);
+            }
+        }
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
+    }
+
+    assert!(parse_active_etc_exports_lines("# comment\n\n   # indented\n").is_empty());
+    assert_eq!(
+        parse_active_etc_exports_lines(
+            "# default Debian header\n\n/srv/lan 192.168.1.0/24(rw,sync)\n  /srv/public *(ro)\n"
+        ),
+        vec![
+            "/srv/lan 192.168.1.0/24(rw,sync)".to_string(),
+            "/srv/public *(ro)".to_string(),
+        ]
+    );
+
+    let fx = StorageFixture::new();
+    let mgr = fx.manager();
+    fx.create_system_dir("etc");
+    let etc_exports = fx.root.join("etc/exports");
+
+    // 1. Comment-only Debian default /etc/exports emits zero warnings.
+    let comment_only = "# /etc/exports: default Debian template\n\n   # still a comment\n";
+    fs::write(&etc_exports, comment_only).unwrap();
+    let cap = WarnCapture::default();
+    mgr.configure_nfsd("10.231.0.1")
+        .with_subscriber(cap.clone())
+        .await
+        .expect("configure nfsd with comment-only /etc/exports");
+    assert!(
+        cap.warnings.lock().unwrap().is_empty(),
+        "comment-only /etc/exports must not emit warnings"
+    );
+    assert_eq!(fs::read_to_string(&etc_exports).unwrap(), comment_only);
+
+    // 2. Active unmanaged LAN export lines emit a clear WARN and leave /etc/exports untouched.
+    let active_lan_exports =
+        "# Host LAN shares\n/srv/lan 192.168.1.0/24(rw,sync)\n/srv/media *(ro,sync)\n";
+    fs::write(&etc_exports, active_lan_exports).unwrap();
+    let cap2 = WarnCapture::default();
+    mgr.configure_nfsd("10.231.0.1")
+        .with_subscriber(cap2.clone())
+        .await
+        .expect("configure nfsd with unmanaged /etc/exports");
+    let warns = cap2.warnings.lock().unwrap().clone();
+    assert_eq!(warns.len(), 1, "expected exactly 1 warning, got {warns:?}");
+    assert_eq!(
+        warns[0].get("etc_exports").map(String::as_str),
+        Some("/etc/exports")
+    );
+    assert_eq!(
+        warns[0].get("active_line_count").map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(
+        fs::read_to_string(&etc_exports).unwrap(),
+        active_lan_exports,
+        "/etc/exports must never be modified"
+    );
+}
+
+#[tokio::test]
+async fn probe_sentinel_single_flight_deduplicates_concurrent_hung_mount_probes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Condvar;
+
+    let coord = Arc::new(SentinelProbeCoordinator::new(4));
+    let spawn_count = Arc::new(AtomicUsize::new(0));
+    let observed_thread_name: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+    let gate = Arc::new((StdMutex::new(false), Condvar::new()));
+    let entered = Arc::new((StdMutex::new(0usize), Condvar::new()));
+
+    let make_blocking_probe = || {
+        let spawn_count = Arc::clone(&spawn_count);
+        let observed_thread_name = Arc::clone(&observed_thread_name);
+        let gate = Arc::clone(&gate);
+        let entered = Arc::clone(&entered);
+        move |_dir: PathBuf| -> SentinelProbeOutcome {
+            spawn_count.fetch_add(1, Ordering::SeqCst);
+            *observed_thread_name.lock().unwrap() =
+                std::thread::current().name().map(str::to_string);
+            {
+                let (lock, cvar) = &*entered;
+                let mut n = lock.lock().unwrap();
+                *n += 1;
+                cvar.notify_all();
+            }
+            let (lock, cvar) = &*gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = cvar.wait(released).unwrap();
+            }
+            Ok(())
+        }
+    };
+
+    // Launch 3 concurrent probes using lexically equivalent paths for the same hung mount.
+    let p1 = {
+        let coord = Arc::clone(&coord);
+        let probe = make_blocking_probe();
+        tokio::spawn(async move {
+            coord
+                .probe_with(
+                    Path::new("/mnt/af-peers/media-2/movies"),
+                    "/mnt/af-peers/media-2/movies",
+                    Duration::from_millis(120),
+                    probe,
+                )
+                .await
+        })
+    };
+    let p2 = {
+        let coord = Arc::clone(&coord);
+        let probe = make_blocking_probe();
+        tokio::spawn(async move {
+            coord
+                .probe_with(
+                    Path::new("/mnt/af-peers/media-2/movies/"),
+                    "/mnt/af-peers/media-2/movies",
+                    Duration::from_millis(120),
+                    probe,
+                )
+                .await
+        })
+    };
+    let p3 = {
+        let coord = Arc::clone(&coord);
+        let probe = make_blocking_probe();
+        tokio::spawn(async move {
+            coord
+                .probe_with(
+                    Path::new("/mnt/af-peers//media-2/./movies"),
+                    "/mnt/af-peers/media-2/movies",
+                    Duration::from_millis(120),
+                    probe,
+                )
+                .await
+        })
+    };
+
+    let (r1, r2, r3) = tokio::join!(p1, p2, p3);
+    for resp in [r1.unwrap(), r2.unwrap(), r3.unwrap()] {
+        assert!(!resp.healthy);
+        assert!(resp.timed_out);
+        assert!(
+            resp.error
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("Sentinel probe timed out after"),
+            "unexpected error: {:?}",
+            resp.error
+        );
+    }
+    assert_eq!(
+        spawn_count.load(Ordering::SeqCst),
+        1,
+        "concurrent probes for the same hung mount must coalesce onto 1 OS thread"
+    );
+    assert_eq!(
+        observed_thread_name.lock().unwrap().as_deref(),
+        Some("af-sentinel-probe")
+    );
+
+    // A follow-up probe while the original thread is STILL hung also coalesces onto the same thread.
+    let r4 = coord
+        .probe_with(
+            Path::new("/mnt/af-peers/media-2/movies"),
+            "/mnt/af-peers/media-2/movies",
+            Duration::from_millis(80),
+            make_blocking_probe(),
+        )
+        .await;
+    assert!(!r4.healthy);
+    assert!(r4.timed_out);
+    assert_eq!(
+        spawn_count.load(Ordering::SeqCst),
+        1,
+        "subsequent probe on still-hung mount must not spawn a second OS thread"
+    );
+
+    // Unblock the hung OS thread; once it cleans up, a subsequent probe runs fresh and succeeds.
+    {
+        let (lock, cvar) = &*gate;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let empty = coord.in_flight.lock().unwrap().is_empty()
+                && coord.semaphore.available_permits() == 4;
+            if empty {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("hung probe thread must clean up single-flight entry and release semaphore permit");
+
+    let r5 = coord
+        .probe_with(
+            Path::new("/mnt/af-peers/media-2/movies"),
+            "/mnt/af-peers/media-2/movies",
+            Duration::from_secs(1),
+            make_blocking_probe(),
+        )
+        .await;
+    assert!(r5.healthy);
+    assert!(!r5.timed_out);
+    assert_eq!(spawn_count.load(Ordering::SeqCst), 2);
+
+    // Concurrent probes against a slow-but-healthy mount coalesce and both succeed from 1 thread.
+    let slow_spawns = Arc::new(AtomicUsize::new(0));
+    let slow_probe = || {
+        let slow_spawns = Arc::clone(&slow_spawns);
+        move |_dir: PathBuf| -> SentinelProbeOutcome {
+            slow_spawns.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(60));
+            Ok(())
+        }
+    };
+    let (s1, s2) = tokio::join!(
+        coord.probe_with(
+            Path::new("/mnt/af-peers/media-2/shows"),
+            "/mnt/af-peers/media-2/shows",
+            Duration::from_secs(1),
+            slow_probe(),
+        ),
+        coord.probe_with(
+            Path::new("/mnt/af-peers/media-2/shows/"),
+            "/mnt/af-peers/media-2/shows",
+            Duration::from_secs(1),
+            slow_probe(),
+        ),
+    );
+    assert!(s1.healthy && !s1.timed_out);
+    assert!(s2.healthy && !s2.timed_out);
+    assert_eq!(slow_spawns.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn probe_sentinel_global_concurrency_cap_bounds_threads_and_preserves_tokio_pool() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Condvar;
+
+    let coord = Arc::new(SentinelProbeCoordinator::new(2));
+    let spawn_count = Arc::new(AtomicUsize::new(0));
+    let gate_a = Arc::new((StdMutex::new(false), Condvar::new()));
+    let gate_b = Arc::new((StdMutex::new(false), Condvar::new()));
+    let entered = Arc::new((StdMutex::new(0usize), Condvar::new()));
+
+    let start_hung = |path: &'static str, gate: Arc<(StdMutex<bool>, Condvar)>| {
+        let coord = Arc::clone(&coord);
+        let spawn_count = Arc::clone(&spawn_count);
+        let entered = Arc::clone(&entered);
+        tokio::spawn(async move {
+            coord
+                .probe_with(
+                    Path::new(path),
+                    path,
+                    Duration::from_millis(80),
+                    move |_dir| {
+                        spawn_count.fetch_add(1, Ordering::SeqCst);
+                        {
+                            let (lock, cvar) = &*entered;
+                            let mut n = lock.lock().unwrap();
+                            *n += 1;
+                            cvar.notify_all();
+                        }
+                        let (lock, cvar) = &*gate;
+                        let mut released = lock.lock().unwrap();
+                        while !*released {
+                            released = cvar.wait(released).unwrap();
+                        }
+                        Ok(())
+                    },
+                )
+                .await
+        })
+    };
+
+    let ha = start_hung("/mnt/af-peers/peer-a/movies", Arc::clone(&gate_a));
+    let hb = start_hung("/mnt/af-peers/peer-b/movies", Arc::clone(&gate_b));
+
+    let (ra, rb) = tokio::join!(ha, hb);
+    assert!(ra.unwrap().timed_out);
+    assert!(rb.unwrap().timed_out);
+    assert_eq!(spawn_count.load(Ordering::SeqCst), 2);
+    assert_eq!(coord.semaphore.available_permits(), 0);
+
+    // 3rd distinct mount cannot acquire a permit and returns clean concurrency-limit timeout
+    // without spawning another OS thread.
+    let rc_limited = coord
+        .probe_with(
+            Path::new("/mnt/af-peers/peer-c/movies"),
+            "/mnt/af-peers/peer-c/movies",
+            Duration::from_millis(80),
+            {
+                let spawn_count = Arc::clone(&spawn_count);
+                move |_| {
+                    spawn_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+        .await;
+    assert!(!rc_limited.healthy);
+    assert!(rc_limited.timed_out);
+    assert_eq!(
+        rc_limited.error.as_deref(),
+        Some("Sentinel probe concurrency limit reached (other mounts hung)")
+    );
+    assert_eq!(spawn_count.load(Ordering::SeqCst), 2);
+
+    // Probing an already-hung mount still coalesces onto its existing OS thread without needing
+    // a new permit.
+    let ra_coalesced = coord
+        .probe_with(
+            Path::new("/mnt/af-peers/peer-a/movies"),
+            "/mnt/af-peers/peer-a/movies",
+            Duration::from_millis(60),
+            |_| Ok(()),
+        )
+        .await;
+    assert!(!ra_coalesced.healthy);
+    assert!(ra_coalesced.timed_out);
+    assert!(ra_coalesced
+        .error
+        .as_deref()
+        .unwrap_or("")
+        .starts_with("Sentinel probe timed out after"));
+    assert_eq!(spawn_count.load(Ordering::SeqCst), 2);
+
+    // Tokio's shared blocking pool stays completely responsive while sentinel slots are saturated.
+    let blocking_ok = tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(|| 42usize),
+    )
+    .await
+    .expect("tokio blocking pool must not starve")
+    .expect("spawn_blocking join");
+    assert_eq!(blocking_ok, 42);
+
+    // Unblock mount A so its permit returns, then mount C probes cleanly.
+    {
+        let (lock, cvar) = &*gate_a;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
+    let rc_ok = coord
+        .probe_with(
+            Path::new("/mnt/af-peers/peer-c/movies"),
+            "/mnt/af-peers/peer-c/movies",
+            Duration::from_secs(2),
+            |_| Ok(()),
+        )
+        .await;
+    assert!(rc_ok.healthy);
+    assert!(!rc_ok.timed_out);
+
+    // Cleanly release mount B before exiting the test.
+    {
+        let (lock, cvar) = &*gate_b;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if coord.semaphore.available_permits() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("all permits released cleanly");
 }

@@ -9,8 +9,10 @@ pub mod shim;
 pub mod worker;
 
 pub use argv::{
-    is_probe, is_valid_render_node_path, required_capability, rewrite_any_render_node,
-    rewrite_render_node, Capability, HwAccel,
+    has_disallowed_protocol_whitelist, has_network_input, inject_local_protocol_whitelist,
+    is_allowed_local_protocol_whitelist, is_probe, is_valid_render_node_path, required_capability,
+    rewrite_any_render_node, rewrite_render_node, validate_worker_args, Capability, HwAccel,
+    ALLOWED_LOCAL_PROTOCOLS, WORKER_LOCAL_PROTOCOL_WHITELIST,
 };
 pub use capabilities::{
     probe_capabilities, select_render_node, CapabilitiesConfig, RenderNodeInfo,
@@ -18,14 +20,18 @@ pub use capabilities::{
 };
 pub use config::{
     collect_allowed_env_subset, configured_dispatcher_socket_path, configured_handshake_timeout,
-    configured_real_ffmpeg_path, configured_worker_max_jobs, configured_worker_socket_mode,
-    configured_worker_socket_path, validate_real_ffmpeg_path, validate_socket_mode,
+    configured_real_ffmpeg_path, configured_real_ffmpeg_path_with_env_file,
+    configured_worker_max_jobs, configured_worker_max_jobs_with_env_file,
+    configured_worker_socket_mode, configured_worker_socket_path, read_transcode_env_file,
+    resolve_worker_child_cwd, validate_real_ffmpeg_path, validate_safe_dir, validate_socket_mode,
     validate_start_request, ConfigError, ALLOWED_ENV_KEYS, DEFAULT_DISPATCHER_SOCKET_PATH,
-    DEFAULT_FRAME_WRITE_TIMEOUT, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_PROBE_TIMEOUT,
-    DEFAULT_REAL_FFMPEG_PATH, DEFAULT_WORKER_MAX_JOBS, DEFAULT_WORKER_SOCKET_MODE,
-    DEFAULT_WORKER_SOCKET_PATH, DEFAULT_WORKER_START_FRAME_TIMEOUT, ENV_DISPATCHER_SOCKET,
-    ENV_HANDSHAKE_TIMEOUT_MS, ENV_REAL_FFMPEG, ENV_SHIM_RECURSION_GUARD, ENV_WORKER_MAX_JOBS,
-    ENV_WORKER_SOCKET, ENV_WORKER_SOCKET_MODE, RECOMMENDED_DISPATCHER_REMOTE_START_TIMEOUT,
+    DEFAULT_FRAME_WRITE_TIMEOUT, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_JELLYFIN_CACHE_DIR,
+    DEFAULT_PROBE_TIMEOUT, DEFAULT_REAL_FFMPEG_PATH, DEFAULT_TRANSCODE_ENV_FILE,
+    DEFAULT_WORKER_MAX_JOBS, DEFAULT_WORKER_SOCKET_MODE, DEFAULT_WORKER_SOCKET_PATH,
+    DEFAULT_WORKER_START_FRAME_TIMEOUT, ENV_DISPATCHER_SOCKET, ENV_HANDSHAKE_TIMEOUT_MS,
+    ENV_REAL_FFMPEG, ENV_SHIM_RECURSION_GUARD, ENV_WORKER_MAX_JOBS, ENV_WORKER_SOCKET,
+    ENV_WORKER_SOCKET_MODE, MAX_TRANSCODE_ENV_FILE_BYTES,
+    RECOMMENDED_DISPATCHER_REMOTE_START_TIMEOUT,
 };
 pub use protocol::{
     bounded_frame_channel, decode_frame_payload, decode_framed, encode_frame_payload,

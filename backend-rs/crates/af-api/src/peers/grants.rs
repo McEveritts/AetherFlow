@@ -26,7 +26,10 @@
 //!      safely across restarts/sweeps without allowing stale retries to delete committed slots.
 //!   5. `POST /grant-offer` is purely informational and never alters grant state on either server.
 
-use super::errors::{redact_sensitive_text, PeerError};
+use super::errors::{
+    bytes_rejection_to_peer_error, parse_optional_json_bytes, parse_required_json_bytes,
+    redact_sensitive_text, PeerError,
+};
 use super::links::{GrantSummaryView, LinkGrantsView};
 use super::listener::authenticate_active_link;
 use super::pairing::{
@@ -38,10 +41,11 @@ use super::{
 };
 use crate::auth::AuthUser;
 use crate::ws::{extract_client_ip_for_peer, PeerIp};
-use af_db::peers::{self as db_peers, AccessMap, PeerGrant, PeerReceivedGrant};
+use af_db::peers::{self as db_peers, AccessMap, PeerGrant, PeerLink, PeerReceivedGrant};
 use af_runner::{PeerCredentialSecret, PeerCredentialSlot, PeerNetworkError, PeerNetworkRequest};
 use axum::body::Bytes;
 use axum::extract::connect_info::ConnectInfo;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
@@ -55,6 +59,10 @@ use uuid::Uuid;
 
 const ADMIN_GRANT_BODY_LIMIT_BYTES: usize = 8192;
 const GRANT_REVOKE_NOTICE_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyGrantOfferReq {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -590,9 +598,20 @@ pub async fn put_peer_grant(
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     Path(link_id): Path<String>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    match put_peer_grant_inner(&runtime, &auth_user, peer_ip, &headers, &link_id, &body).await {
+    let raw_body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return bytes_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "put_peer_grant",
+            )
+            .into_response();
+        }
+    };
+    match put_peer_grant_inner(&runtime, &auth_user, peer_ip, &headers, &link_id, &raw_body).await {
         Ok(view) => (
             StatusCode::OK,
             [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -630,14 +649,7 @@ async fn put_peer_grant_inner(
             "Send only the access map payload",
         ));
     }
-    let req: PutGrantReq = serde_json::from_slice(raw_body).map_err(|err| {
-        PeerError::invalid_request(
-            &server,
-            step,
-            format!("Invalid grant access payload: {err}"),
-            "Send JSON {\"access\":{\"services\":\"none|read|write\",...}}",
-        )
-    })?;
+    let req: PutGrantReq = parse_required_json_bytes(headers, raw_body, &server, step)?;
 
     if !req.access.has_any_access() {
         return Err(PeerError::invalid_request(
@@ -987,12 +999,28 @@ async fn put_peer_grant_inner(
     if !revoked_jtis.is_empty() {
         crate::auth::finalize_user_credential_revocation(run_as_user_id, &revoked_jtis);
     }
+    let downgraded_transcoding = !req.access.transcoding.allows_write()
+        && superseded_grants
+            .iter()
+            .any(|old| old.access.transcoding.allows_write());
     for old in superseded_grants {
         runtime.publish_revocation(RevocationEvent::GrantRevoked {
             link_id: old.link_id,
             grant_id: old.id,
             run_as_user_id: old.run_as_user_id,
         });
+    }
+    if downgraded_transcoding {
+        if let Err(err) =
+            super::transcode::cleanup_worker_transcode_mounts_for_link(runtime, &link.id, step)
+                .await
+        {
+            tracing::warn!(
+                link_id = %link.id,
+                %err,
+                "Worker transcode mount cleanup failed after inbound transcoding grant downgrade; mounts remain tracked for retry"
+            );
+        }
     }
 
     let client_ip = extract_client_ip_for_peer(headers, peer_ip);
@@ -1101,6 +1129,16 @@ async fn delete_peer_grant_inner(
 
     finalize_grant_revocation_events(runtime, &committed);
 
+    if let Err(err) =
+        super::transcode::cleanup_worker_transcode_mounts_for_link(runtime, &link.id, step).await
+    {
+        tracing::warn!(
+            link_id = %link.id,
+            %err,
+            "Worker transcode mount cleanup failed after inbound grant revocation; mounts remain tracked for retry"
+        );
+    }
+
     let client_ip = extract_client_ip_for_peer(headers, peer_ip);
     let detail = if committed.revoked_grants.is_empty() {
         format!(
@@ -1164,9 +1202,21 @@ pub async fn send_grant_offer(
     PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     Path(link_id): Path<String>,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    match send_grant_offer_inner(&runtime, &auth_user, peer_ip, &headers, &link_id, &body).await {
+    let raw_body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return bytes_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "send_grant_offer",
+            )
+            .into_response();
+        }
+    };
+    match send_grant_offer_inner(&runtime, &auth_user, peer_ip, &headers, &link_id, &raw_body).await
+    {
         Ok(()) => (
             StatusCode::OK,
             [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -1205,34 +1255,7 @@ async fn send_grant_offer_inner(
         ));
     }
     // Accept empty body or `{}` (empty JSON object); reject unexpected payloads cleanly.
-    let trimmed_body = std::str::from_utf8(raw_body)
-        .map_err(|_| {
-            PeerError::invalid_request(
-                &server,
-                step,
-                "Grant offer body must be empty or {}",
-                "Omit the request body or send {}",
-            )
-        })?
-        .trim();
-    if !trimmed_body.is_empty() {
-        let parsed: serde_json::Value = serde_json::from_str(trimmed_body).map_err(|_| {
-            PeerError::invalid_request(
-                &server,
-                step,
-                "Grant offer body must be empty or {}",
-                "Omit the request body or send {}",
-            )
-        })?;
-        if !parsed.as_object().is_some_and(|obj| obj.is_empty()) {
-            return Err(PeerError::invalid_request(
-                &server,
-                step,
-                "Grant offer does not accept payload fields",
-                "Omit the request body or send {}",
-            ));
-        }
-    }
+    let _: EmptyGrantOfferReq = parse_optional_json_bytes(headers, raw_body, &server, step)?;
 
     let id_c = link_id.to_string();
     let server_c = server.clone();
@@ -1329,7 +1352,7 @@ pub(crate) async fn handle_tunnel_grant_token(
     State(runtime): State<Arc<PeerRuntime>>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let (auth, _permit) = match authenticate_active_link(
         &runtime,
@@ -1343,7 +1366,19 @@ pub(crate) async fn handle_tunnel_grant_token(
         Err(err) => return err.into_response(),
     };
 
-    match handle_tunnel_grant_token_inner(&runtime, &auth, &body).await {
+    let raw_body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return bytes_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "receive_grant_token",
+            )
+            .into_response();
+        }
+    };
+
+    match handle_tunnel_grant_token_inner(&runtime, &auth, &headers, &raw_body).await {
         Ok(ack) => (
             StatusCode::OK,
             [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -1762,23 +1797,149 @@ pub(crate) async fn cleanup_pending_received_grant_credentials(runtime: &PeerRun
     }
 }
 
+/// Reconciles an offline grant revocation detected when a peer's authenticated tunnel `GET /health`
+/// explicitly reports `"inbound_grant_generation": null` while we still hold an active
+/// `peer_received_grants` row for that link.
+pub(crate) async fn reconcile_missing_remote_grant(runtime: &PeerRuntime, link: &PeerLink) {
+    let server = runtime.local_server_name();
+    let step = "health_grant_reconcile";
+    let Ok(_link_guard) = runtime.lock_link(&link.id, step).await else {
+        return;
+    };
+
+    let link_id_c = link.id.clone();
+    let expected_pk = link.wg_pubkey.clone();
+    let expected_ip = link.tunnel_ip.clone();
+    let now_rfc = runtime.now().to_rfc3339();
+    let server_c = server.clone();
+
+    let reconciled = runtime
+        .db
+        .write(&server, step, move |conn| {
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(
+                |err| {
+                    PeerError::internal(
+                        &server_c,
+                        step,
+                        format!("Failed starting health grant reconciliation transaction: {err}"),
+                    )
+                },
+            )?;
+            let Some(current_link) = db_peers::get_peer_link(&tx, &link_id_c)
+                .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?
+            else {
+                return Ok(None);
+            };
+            if !is_live_link_state(&current_link.state)
+                || current_link.wg_pubkey != expected_pk
+                || current_link.tunnel_ip != expected_ip
+            {
+                return Ok(None);
+            }
+            let Some(existing) = db_peers::get_peer_received_grant(&tx, &link_id_c)
+                .map_err(|err| PeerError::internal(&server_c, step, err.to_string()))?
+            else {
+                return Ok(None);
+            };
+            if existing.revoked_at.is_some() {
+                return Ok(None);
+            }
+
+            let cred_id = existing.effective_credential_id().to_string();
+            db_peers::delete_peer_received_grant(&tx, &link_id_c).map_err(|err| {
+                PeerError::internal(
+                    &server_c,
+                    step,
+                    format!(
+                        "Failed deleting stale received grant during health reconciliation: {err}"
+                    ),
+                )
+            })?;
+            db_peers::upsert_peer_received_grant_cleanup(
+                &tx,
+                &link_id_c,
+                &cred_id,
+                existing.generation,
+                &now_rfc,
+            )
+            .map_err(|err| {
+                PeerError::internal(
+                    &server_c,
+                    step,
+                    format!("Failed queuing stale received grant credential cleanup: {err}"),
+                )
+            })?;
+            tx.commit().map_err(|err| {
+                PeerError::internal(
+                    &server_c,
+                    step,
+                    format!("Failed committing health grant reconciliation: {err}"),
+                )
+            })?;
+            Ok(Some((
+                existing.grant_id,
+                existing.run_as_user_id,
+                existing.generation,
+                existing.access.transcoding.allows_write(),
+            )))
+        })
+        .await;
+
+    drop(_link_guard);
+
+    let Ok(Some((grant_id, run_as_user_id, generation, had_transcoding_write))) = reconciled else {
+        return;
+    };
+
+    runtime.publish_revocation(RevocationEvent::GrantRevoked {
+        link_id: link.id.clone(),
+        grant_id: grant_id.clone(),
+        run_as_user_id,
+    });
+    runtime
+        .db
+        .record_audit(
+            0,
+            format!("peer-{}", link.name),
+            "peer_grant_revoked_by_remote".to_string(),
+            "peer_link".to_string(),
+            link.id.clone(),
+            format!(
+                "Cleared stale outbound management grant '{}' from '{}' (gen={}; reconciled via tunnel health check)",
+                grant_id, link.name, generation
+            ),
+            link.tunnel_ip.clone(),
+            String::new(),
+        )
+        .await;
+
+    if had_transcoding_write {
+        if let Err(err) =
+            super::transcode::cleanup_worker_transcode_mounts_for_link(runtime, &link.id, step)
+                .await
+        {
+            tracing::warn!(
+                link_id = %link.id,
+                %err,
+                "Worker transcode mount cleanup failed during health grant reconciliation; mounts remain tracked for retry"
+            );
+        }
+    }
+
+    cleanup_pending_received_grant_credentials(runtime).await;
+}
+
 async fn handle_tunnel_grant_token_inner(
     runtime: &PeerRuntime,
     auth: &super::listener::AuthenticatedPeerLink,
+    headers: &HeaderMap,
     raw_body: &[u8],
 ) -> Result<GrantTokenDeliveryAck, PeerError> {
     let server = runtime.local_server_name();
     let step = "receive_grant_token";
 
     let mut payload: GrantTokenDeliveryPayload =
-        serde_json::from_slice(raw_body).map_err(|_| {
-            PeerError::invalid_request(
-                &server,
-                step,
-                "Invalid grant delivery payload",
-                "Retry saving the grant from the issuing server",
-            )
-        })?;
+        parse_required_json_bytes(headers, raw_body, &server, step)?;
     let new_token = PeerCredentialSecret::new(std::mem::take(&mut payload.token));
 
     if !is_valid_credential_id(&payload.grant_id)
@@ -1956,7 +2117,7 @@ async fn handle_tunnel_grant_token_inner(
     let updated_at = runtime.now().to_rfc3339();
     let server_c = server.clone();
 
-    let commit_res: Result<Option<(String, i64)>, PeerError> = runtime
+    let commit_res: Result<(Option<(String, i64)>, bool), PeerError> = runtime
         .db
         .write(&server, step, move |conn| {
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(
@@ -2001,6 +2162,10 @@ async fn handle_tunnel_grant_token_inner(
                     ));
                 }
             }
+
+            let previously_had_transcoding_write = existing
+                .as_ref()
+                .is_some_and(|ex| ex.revoked_at.is_none() && ex.access.transcoding.allows_write());
 
             let retired_slot = existing.as_ref().and_then(|ex| {
                 if ex.revoked_at.is_none() {
@@ -2061,12 +2226,12 @@ async fn handle_tunnel_grant_token_inner(
                     format!("Failed committing received grant metadata: {err}"),
                 )
             })?;
-            Ok(retired_slot)
+            Ok((retired_slot, previously_had_transcoding_write))
         })
         .await;
 
-    let retired_slot = match commit_res {
-        Ok(retired) => retired,
+    let (retired_slot, previously_had_transcoding_write) = match commit_res {
+        Ok(ok) => ok,
         Err(commit_err) => {
             // Re-read authoritative SQLite state before deleting `staged_cred_id` so an ambiguous
             // commit that actually succeeded is never deleted, and never touch the prior slot.
@@ -2169,6 +2334,19 @@ async fn handle_tunnel_grant_token_inner(
 
     drop(_link_guard);
 
+    if previously_had_transcoding_write && !payload.access.transcoding.allows_write() {
+        if let Err(err) =
+            super::transcode::cleanup_worker_transcode_mounts_for_link(runtime, &auth.link.id, step)
+                .await
+        {
+            tracing::warn!(
+                link_id = %auth.link.id,
+                %err,
+                "Worker transcode mount cleanup failed after transcoding grant downgrade; mounts remain tracked for retry"
+            );
+        }
+    }
+
     runtime
         .db
         .record_audit(
@@ -2200,7 +2378,7 @@ pub(crate) async fn handle_tunnel_grant_revoke(
     State(runtime): State<Arc<PeerRuntime>>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let (auth, _permit) = match authenticate_active_link(
         &runtime,
@@ -2214,7 +2392,19 @@ pub(crate) async fn handle_tunnel_grant_revoke(
         Err(err) => return err.into_response(),
     };
 
-    match handle_tunnel_grant_revoke_inner(&runtime, &auth, &body).await {
+    let raw_body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return bytes_rejection_to_peer_error(
+                err,
+                &runtime.local_server_name(),
+                "receive_grant_revoke",
+            )
+            .into_response();
+        }
+    };
+
+    match handle_tunnel_grant_revoke_inner(&runtime, &auth, &headers, &raw_body).await {
         Ok((revoked, generation)) => (
             StatusCode::OK,
             [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -2231,19 +2421,13 @@ pub(crate) async fn handle_tunnel_grant_revoke(
 async fn handle_tunnel_grant_revoke_inner(
     runtime: &PeerRuntime,
     auth: &super::listener::AuthenticatedPeerLink,
+    headers: &HeaderMap,
     raw_body: &[u8],
 ) -> Result<(bool, i64), PeerError> {
     let server = runtime.local_server_name();
     let step = "receive_grant_revoke";
 
-    let payload: GrantRevokePayload = serde_json::from_slice(raw_body).map_err(|_| {
-        PeerError::invalid_request(
-            &server,
-            step,
-            "Invalid grant revocation payload",
-            "Retry revoking the grant from the issuing server",
-        )
-    })?;
+    let payload: GrantRevokePayload = parse_required_json_bytes(headers, raw_body, &server, step)?;
     if payload.generation <= 0 {
         return Err(PeerError::invalid_request(
             &server,
@@ -2377,6 +2561,22 @@ async fn handle_tunnel_grant_revoke_inner(
 
         drop(_link_guard);
 
+        if previously_active {
+            if let Err(err) = super::transcode::cleanup_worker_transcode_mounts_for_link(
+                runtime,
+                &auth.link.id,
+                step,
+            )
+            .await
+            {
+                tracing::warn!(
+                    link_id = %auth.link.id,
+                    %err,
+                    "Worker transcode mount cleanup failed after remote grant revocation; mounts remain tracked for retry"
+                );
+            }
+        }
+
         if let Some(del_err) = first_del_err {
             if previously_active {
                 runtime
@@ -2424,7 +2624,7 @@ pub(crate) async fn handle_tunnel_grant_offer(
     State(runtime): State<Arc<PeerRuntime>>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let (auth, _permit) = match authenticate_active_link(
         &runtime,
@@ -2438,22 +2638,17 @@ pub(crate) async fn handle_tunnel_grant_offer(
         Err(err) => return err.into_response(),
     };
 
-    let payload: GrantOfferPayload = if body.is_empty() {
-        GrantOfferPayload::default()
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(p) => p,
-            Err(_) => {
-                return PeerError::invalid_request(
-                    runtime.local_server_name(),
-                    "receive_grant_offer",
-                    "Invalid grant offer payload",
-                    "Send an empty body or JSON metadata",
-                )
-                .into_response();
-            }
-        }
+    let server = runtime.local_server_name();
+    let step = "receive_grant_offer";
+    let raw_body = match body {
+        Ok(bytes) => bytes,
+        Err(err) => return bytes_rejection_to_peer_error(err, &server, step).into_response(),
     };
+    let payload: GrantOfferPayload =
+        match parse_optional_json_bytes(&headers, &raw_body, &server, step) {
+            Ok(p) => p,
+            Err(err) => return err.into_response(),
+        };
 
     let requester = payload
         .requested_by

@@ -8,10 +8,13 @@ use super::tests::{
     RouterPublicTransport, UnreachablePublicTransport,
 };
 use super::transcode::{
-    bind_dispatcher_socket, cleanup_revoked_link_transcode_best_effort, compare_debian_versions,
-    ensure_dispatcher_started, evaluate_version_alignment, prune_old_transcode_jobs,
-    select_weighted_index, stop_dispatcher, JellyfinFfmpegProbe, JellyfinFfmpegProbeOutcome,
-    PeerTranscodeRunner, TranscodeRuntimeState, WsClientMessage, WsClientReader,
+    bind_dispatcher_socket, cleanup_revoked_link_transcode_best_effort,
+    cleanup_revoked_link_transcode_locked, cleanup_worker_transcode_mounts_for_link,
+    compare_debian_versions, effective_worker_max_jobs, ensure_dispatcher_started,
+    evaluate_version_alignment, handle_remote_health_transcode_caps, prune_old_transcode_jobs,
+    reconcile_dispatcher_if_configured, select_weighted_index, stop_dispatcher,
+    JellyfinFfmpegProbe, JellyfinFfmpegProbeOutcome, PeerTranscodeRunner, TranscodeRuntimeState,
+    WsClientMessage, WsClientReader, TRANSCODE_MOUNT_SYNC_TIMEOUT,
 };
 use super::{
     start_with_runtime, KeyedAsyncLockPool, PeerDb, PeerRunner, PeerRuntime, RevocationEvent,
@@ -435,6 +438,7 @@ fn sample_caps(
         encoders: encoders.iter().map(|s| (*s).to_string()).collect(),
         render_nodes,
         primary_render_node,
+        worker_max_jobs: None,
     }
 }
 
@@ -483,6 +487,7 @@ fn build_transcode_runtime(
         tunnel_binding: TunnelTransportBinding::LoopbackFixture,
         tunnel_request_timeout: Duration::from_secs(3),
         tunnel_port_overrides: RwLock::new(HashMap::new()),
+        interface_index_override: RwLock::new(None),
         bind_listener_in_handlers: true,
         management_router_override: None,
         allowed_fs_roots_override: None,
@@ -1455,7 +1460,8 @@ async fn end_to_end_local_fixture_relay_stdout_stderr_stdin_and_exit_code() {
         assert_eq!(stdout, payload);
         let stderr_str = String::from_utf8_lossy(&stderr);
         assert!(
-            stderr_str.contains("stderr:args=-i pipe:0 -c:v libx264 out.mkv"),
+            stderr_str.contains("-protocol_whitelist file,pipe,fd,crypto,data,subfile")
+                && stderr_str.contains("-i pipe:0 -c:v libx264 out.mkv"),
             "unexpected stderr: {stderr_str}"
         );
     }
@@ -2512,6 +2518,8 @@ async fn admin_transcode_settings_enable_rollback_parity_mismatch_dedup_pruning_
     tc_runner_a.state.lock().unwrap().transcoding_temp_path =
         parity_dir.to_string_lossy().into_owned();
     let tc_runner_b = FakePeerTranscodeRunner::new_arc();
+    tc_runner_b.state.lock().unwrap().transcoding_temp_path =
+        parity_dir.to_string_lossy().into_owned();
 
     let (rt_b, db_b) = build_transcode_runtime(
         "gpu-worker",
@@ -2644,7 +2652,7 @@ async fn admin_transcode_settings_enable_rollback_parity_mismatch_dedup_pruning_
         assert_eq!(bad_st, StatusCode::BAD_REQUEST);
     }
 
-    // 5. Enable worker & run real 2-second parity test -> succeeds & cleans up temp file!
+    // 5. Enable worker & run real 1-second clip / 5-second timeout parity test -> succeeds & cleans up temp file!
     let (st, body) = call_admin(
         &rt_a,
         Method::PUT,
@@ -3101,17 +3109,21 @@ async fn first_enable_api_restart_runner_parity_cleanup_and_worker_mount_sync_li
     let runner_a = FakePeerRunner::new(fixture_wg_pubkey(191), ip_a, 51821);
     let runner_b = FakePeerRunner::new(fixture_wg_pubkey(192), ip_b, 51821);
     let tc_runner_a = FakePeerTranscodeRunner::new_arc();
+    let dir_s = shared_tc_dir.to_string_lossy().into_owned();
     {
         let mut st = tc_runner_a.state.lock().unwrap();
         // Deliberately set transcoding_temp_path == tmp_dir to verify deduplication!
-        let dir_s = shared_tc_dir.to_string_lossy().into_owned();
         st.transcoding_temp_path = dir_s.clone();
         st.tmp_dir = dir_s.clone();
-        st.cache_dir = dir_s;
+        st.cache_dir = dir_s.clone();
         st.api_restart_required_on_ensure_dir = true;
         st.api_restart_required_on_install_worker = true;
     }
     let tc_runner_b = FakePeerTranscodeRunner::new_arc();
+    {
+        let mut st = tc_runner_b.state.lock().unwrap();
+        st.transcoding_temp_path = dir_s;
+    }
 
     let (rt_b, db_b) = build_transcode_runtime(
         "gpu-worker",
@@ -3344,6 +3356,1191 @@ async fn first_enable_api_restart_runner_parity_cleanup_and_worker_mount_sync_li
 
     let _ = w_stop.send(true);
     let _ = w_task.await;
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 14. Bundle A (R4-ESC-01): Worker Mount Allowlist, Calling-Link Confinement,
+//     Atomic Rollback on BindMedia / SQLite Failure, & Structured JSON Errors
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn worker_mount_allowlist_calling_link_confinement_and_atomic_rollback() {
+    use axum::body::to_bytes;
+
+    let ips = next_transcode_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = TestClock::new(1_801_000_000);
+    let now_str = clock.now().to_rfc3339();
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(201), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(202), ip_b, 51821);
+    let tc_runner_a = FakePeerTranscodeRunner::new_arc();
+    let tc_runner_b = FakePeerTranscodeRunner::new_arc();
+
+    let (rt_b, db_b) = build_transcode_runtime(
+        "gpu-worker",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        Arc::clone(&tc_runner_b),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_a, db_a) = build_transcode_runtime(
+        "seedbox-1",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::clone(&tc_runner_a),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 20], 45020)),
+        }),
+        &clock,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+    let mut access = AccessMap::none();
+    access.transcoding = af_db::peers::AccessLevel::Write;
+    let (_, grant_token, _) = install_transcode_grant_pair(
+        &db_a,
+        &runner_a,
+        &a_link_id,
+        &db_b,
+        &b_link_id,
+        "seedbox-1",
+        access,
+        &now_str,
+    );
+    let link_token = runner_a
+        .state
+        .lock()
+        .unwrap()
+        .credentials
+        .get(&(PeerCredentialSlot::LinkToken, a_link_id.clone()))
+        .cloned()
+        .unwrap();
+
+    // Seed B with:
+    // - Export `/srv/media/movies` and `/srv/media/shows` for calling link A ("seedbox-1")
+    // - Media mount `/mnt/af-peers/seedbox-1/ctrl-movies` -> `/srv/media/ctrl-movies`
+    // - Media mount for another link (`other-peer`) at `/mnt/af-peers/other-peer/secret`
+    {
+        let conn = db_b.lock().unwrap();
+        for (id, path) in [
+            ("exp-movies", "/srv/media/movies"),
+            ("exp-shows", "/srv/media/shows"),
+        ] {
+            db_peers::insert_peer_export(
+                &conn,
+                &PeerExport {
+                    id: id.to_string(),
+                    link_id: b_link_id.clone(),
+                    path: path.to_string(),
+                    writable: false,
+                    squash_uid: Some(1000),
+                    squash_gid: Some(1000),
+                    created_at: now_str.clone(),
+                },
+            )
+            .unwrap();
+        }
+        db_peers::insert_peer_mount(
+            &conn,
+            &PeerMount {
+                id: "mnt-ctrl-movies".to_string(),
+                link_id: b_link_id.clone(),
+                remote_path: "/srv/media/ctrl-movies".to_string(),
+                mount_path: "/mnt/af-peers/seedbox-1/ctrl-movies".to_string(),
+                unit_name: "mnt-af\\x2dpeers-seedbox\\x2d1-ctrl\\x2dmovies.mount".to_string(),
+                writable: false,
+                purpose: "media".to_string(),
+                state: "mounted".to_string(),
+                last_error: None,
+            },
+        )
+        .unwrap();
+        // Insert an out-of-root remote_path row to prove controller-holds-media allowlist rejects
+        // it BEFORE calling af-runner even if requested explicitly!
+        db_peers::insert_peer_mount(
+            &conn,
+            &PeerMount {
+                id: "mnt-bad-ssh".to_string(),
+                link_id: b_link_id.clone(),
+                remote_path: "/home/admin/.ssh".to_string(),
+                mount_path: "/mnt/af-peers/seedbox-1/ssh-leak".to_string(),
+                unit_name: "mnt-af\\x2dpeers-seedbox\\x2d1-ssh\\x2dleak.mount".to_string(),
+                writable: false,
+                purpose: "media".to_string(),
+                state: "mounted".to_string(),
+                last_error: None,
+            },
+        )
+        .unwrap();
+    }
+
+    async fn post_mounts(
+        rt: &Arc<PeerRuntime>,
+        src_ip: IpAddr,
+        ltok: &str,
+        gtok: &str,
+        content_type: Option<&str>,
+        raw_body: Vec<u8>,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = build_listener_router(Arc::clone(rt));
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/peer/v1/transcode/mounts")
+            .header(HEADER_LINK_TOKEN, ltok)
+            .header(HEADER_GRANT_TOKEN, gtok);
+        if let Some(ct) = content_type {
+            builder = builder.header("content-type", ct);
+        }
+        let mut req = builder.body(Body::from(raw_body)).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(src_ip, 50020)));
+        let resp = app.oneshot(req).await.unwrap();
+        let st = resp.status();
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let val = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
+        (st, val)
+    }
+
+    // 1. Structured PeerError JSON on wrong content-type (415) & malformed JSON (400)
+    let (st, body) = post_mounts(
+        &rt_b,
+        ip_a,
+        &link_token,
+        &grant_token,
+        Some("text/plain"),
+        br#"{"action":"teardown"}"#.to_vec(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(body["code"], "UNSUPPORTED_MEDIA_TYPE");
+
+    let (st, body) = post_mounts(
+        &rt_b,
+        ip_a,
+        &link_token,
+        &grant_token,
+        Some("application/json"),
+        b"{not-valid-json".to_vec(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "INVALID_REQUEST");
+
+    // 2. Worker allowlist rejects non-Jellyfin `transcode_paths` BEFORE calling af-runner!
+    for bad_path in [
+        "/tmp/evil",
+        "/etc/jellyfin",
+        "/home/admin/.ssh",
+        "/var/spool/cron/crontabs",
+        "/var/cache/jellyfin/nested/deep",
+        "/var/cache/jellyfin-evil",
+    ] {
+        let payload = serde_json::to_vec(&json!({
+            "action": "sync",
+            "transcode_paths": [bad_path],
+            "media_binds": []
+        }))
+        .unwrap();
+        let (st, body) = post_mounts(
+            &rt_b,
+            ip_a,
+            &link_token,
+            &grant_token,
+            Some("application/json"),
+            payload,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "expected 400 for non-allowlisted transcode_path={bad_path}, got {body}"
+        );
+        assert_eq!(body["code"], "INVALID_REQUEST");
+    }
+    assert_eq!(
+        tc_runner_b.count_action("mount_transcode_dirs"),
+        0,
+        "non-allowlisted transcode_paths must be rejected before calling af-runner"
+    );
+
+    // 3. Calling-link confinement rejects cross-link shadowing & prefix-overlap on worker-holds-media
+    for bad_to in [
+        "/mnt/af-peers/other-peer/movies",
+        "/mnt/af-peers/seedbox-10/movies",
+        "/mnt/af-peers/gpu-worker2/movies",
+    ] {
+        let payload = serde_json::to_vec(&json!({
+            "action": "sync",
+            "transcode_paths": ["/var/cache/jellyfin/transcodes"],
+            "media_binds": [{ "from": "/srv/media/movies", "to": bad_to, "writable": false }]
+        }))
+        .unwrap();
+        let (st, body) = post_mounts(
+            &rt_b,
+            ip_a,
+            &link_token,
+            &grant_token,
+            Some("application/json"),
+            payload,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "expected 400 for cross-link bind to={bad_to}, got {body}"
+        );
+        assert_eq!(body["code"], "INVALID_REQUEST");
+    }
+    assert_eq!(tc_runner_b.count_action("bind_media"), 0);
+
+    // 4. Controller-holds-media rejects cross-link `from` AND out-of-root `to` targets
+    for (bad_from, bad_to) in [
+        ("/mnt/af-peers/other-peer/secret", "/srv/media/secret"),
+        ("/mnt/af-peers/seedbox-10/movies", "/srv/media/movies"),
+        ("/mnt/af-peers/seedbox-1/ssh-leak", "/home/admin/.ssh"),
+        (
+            "/mnt/af-peers/seedbox-1/ssh-leak",
+            "/var/spool/cron/crontabs",
+        ),
+        ("/mnt/af-peers/seedbox-1/ssh-leak", "/etc/movies"),
+        ("/mnt/af-peers/seedbox-1/ssh-leak", "/root/movies"),
+    ] {
+        let payload = serde_json::to_vec(&json!({
+            "action": "sync",
+            "transcode_paths": ["/var/cache/jellyfin/transcodes"],
+            "media_binds": [{ "from": bad_from, "to": bad_to, "writable": false }]
+        }))
+        .unwrap();
+        let (st, body) = post_mounts(
+            &rt_b,
+            ip_a,
+            &link_token,
+            &grant_token,
+            Some("application/json"),
+            payload,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "expected 400 for controller-holds-media bind {bad_from} -> {bad_to}, got {body}"
+        );
+        assert_eq!(body["code"], "INVALID_REQUEST");
+    }
+    assert_eq!(tc_runner_b.count_action("bind_media"), 0);
+
+    // 5. Atomic rollback when `BindMedia` fails after `MountTranscodeDirs` succeeded!
+    tc_runner_b.state.lock().unwrap().fail_next.insert(
+        "bind_media",
+        PeerTranscodeError::Runtime("bind mount unit failed".to_string()),
+    );
+    let sync_payload = serde_json::to_vec(&json!({
+        "action": "sync",
+        "transcode_paths": ["/var/cache/jellyfin/transcodes", "/var/cache/jellyfin/custom-sub"],
+        "media_binds": [
+            { "from": "/srv/media/movies", "to": "/mnt/af-peers/gpu-worker/movies", "writable": false },
+            { "from": "/mnt/af-peers/seedbox-1/ctrl-movies", "to": "/srv/media/ctrl-movies", "writable": false }
+        ]
+    }))
+    .unwrap();
+    let (st, body) = post_mounts(
+        &rt_b,
+        ip_a,
+        &link_token,
+        &grant_token,
+        Some("application/json"),
+        sync_payload.clone(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "got {body}");
+    assert_eq!(
+        tc_runner_b.count_action("mount_transcode_dirs"),
+        1,
+        "MountTranscodeDirs ran before BindMedia failed"
+    );
+    assert_eq!(
+        tc_runner_b.count_action("remove_transcode_mounts"),
+        1,
+        "MountTranscodeDirs MUST be rolled back via RemoveTranscodeMounts when BindMedia fails"
+    );
+    let tc_rows_after_rb: Vec<PeerMount> =
+        db_peers::list_peer_mounts_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.purpose == "transcode" || m.purpose == "transcode_bind")
+            .collect();
+    assert!(
+        tc_rows_after_rb.is_empty(),
+        "no orphan transcode DB rows may exist after BindMedia rollback: {tc_rows_after_rb:?}"
+    );
+
+    // 6. Atomic rollback when SQLite IMMEDIATE transaction fails mid-replace!
+    db_b.lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_tb_insert BEFORE INSERT ON peer_mounts
+             WHEN NEW.purpose = 'transcode_bind'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected sqlite tx failure');
+             END;",
+        )
+        .unwrap();
+    let (st, body) = post_mounts(
+        &rt_b,
+        ip_a,
+        &link_token,
+        &grant_token,
+        Some("application/json"),
+        sync_payload.clone(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "got {body}");
+    // Rollback must undo BOTH applied BindMedia mounts AND newly mounted MountTranscodeDirs!
+    assert_eq!(tc_runner_b.count_action("remove_bind_media"), 2);
+    assert_eq!(tc_runner_b.count_action("remove_transcode_mounts"), 2);
+    // And SQLite transaction must have rolled back the `transcode` inserts too (0 transcode rows)!
+    let rows_after_db_fail: Vec<PeerMount> =
+        db_peers::list_peer_mounts_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.purpose == "transcode" || m.purpose == "transcode_bind")
+            .collect();
+    assert!(
+        rows_after_db_fail.is_empty(),
+        "SQLite transaction must roll back cleanly on partial insert error: {rows_after_db_fail:?}"
+    );
+
+    // Drop the injected trigger and confirm valid sync succeeds & passes `calling_link_segment`
+    // while auto-skipping the out-of-root `/home/admin/.ssh` media mount!
+    db_b.lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_tb_insert;")
+        .unwrap();
+    tc_runner_b.state.lock().unwrap().calls.clear();
+    let (st, body) = post_mounts(
+        &rt_b,
+        ip_a,
+        &link_token,
+        &grant_token,
+        Some("application/json"),
+        sync_payload,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "valid sync failed: {body}");
+
+    let bind_calls: Vec<(String, String, Option<String>)> = tc_runner_b
+        .state
+        .lock()
+        .unwrap()
+        .calls
+        .iter()
+        .filter_map(|c| match c {
+            PeerTranscodeRequest::BindMedia {
+                from,
+                to,
+                calling_link_segment,
+                ..
+            } => Some((from.clone(), to.clone(), calling_link_segment.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        bind_calls,
+        vec![
+            (
+                "/srv/media/movies".to_string(),
+                "/mnt/af-peers/gpu-worker/movies".to_string(),
+                Some("gpu-worker".to_string()),
+            ),
+            (
+                "/mnt/af-peers/seedbox-1/ctrl-movies".to_string(),
+                "/srv/media/ctrl-movies".to_string(),
+                Some("seedbox-1".to_string()),
+            ),
+        ],
+        "BindMedia must pass exact calling_link_segment and skip out-of-root auto-binds"
+    );
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 15. Bundle B(d): Dispatcher RunLocal Bypass for Network Inputs & Protocol Whitelist
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn dispatcher_returns_run_local_for_network_inputs_without_contacting_worker() {
+    let ips = next_transcode_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = TestClock::new(1_801_010_000);
+    let tmp = ShortTempDir::new("net");
+    let fake_ffmpeg = write_fake_ffmpeg_script(&tmp.path, "ffmpeg", standard_fake_ffmpeg_body());
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(204), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(205), ip_b, 51821);
+    let (rt_b, db_b) = build_transcode_runtime(
+        "gpu-worker",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_a, db_a) = build_transcode_runtime(
+        "seedbox-1",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 21], 45021)),
+        }),
+        &clock,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+    let mut access = AccessMap::none();
+    access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_a,
+        &runner_a,
+        &a_link_id,
+        &db_b,
+        &b_link_id,
+        "seedbox-1",
+        access,
+        &clock.now().to_rfc3339(),
+    );
+
+    let worker_sock = tmp.path.join("w.sock");
+    let (w_stop, w_task) = spawn_real_worker(worker_sock.clone(), fake_ffmpeg.clone(), 4);
+    rt_b.transcode_state.set_worker_socket_override(worker_sock);
+
+    let caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264"],
+        &[],
+    );
+    rt_a.transcode_state
+        .set_local_capabilities_override(Some(caps.clone()));
+    rt_a.transcode_state
+        .record_remote_capabilities(&a_link_id, caps);
+    db_peers::upsert_transcode_worker(
+        &db_a.lock().unwrap(),
+        &af_db::peers::TranscodeWorker {
+            link_id: a_link_id.clone(),
+            enabled: true,
+            weight: 1,
+            max_jobs: 4,
+            ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+            encoders: Some(r#"["libx264"]"#.to_string()),
+            render_node: None,
+            parity_ok: true,
+            parity_error: None,
+        },
+    )
+    .unwrap();
+
+    let disp_sock = tmp.path.join("d.sock");
+    rt_a.transcode_state
+        .set_dispatcher_socket_override(disp_sock.clone());
+    ensure_dispatcher_started(&rt_a).await.unwrap();
+
+    let shim_cfg = ShimConfig {
+        real_ffmpeg: fake_ffmpeg,
+        dispatcher_socket: disp_sock,
+        handshake_timeout: Duration::from_secs(2),
+        frame_write_timeout: Duration::from_secs(5),
+    };
+
+    for args in [
+        vec![
+            "-i".into(),
+            "https://live.example.test/stream.m3u8".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "out.ts".into(),
+        ],
+        vec![
+            "-i".into(),
+            "rtsp://camera.lan/live".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "out.ts".into(),
+        ],
+        vec![
+            "-protocol_whitelist".into(),
+            "file,http,https,tcp".into(),
+            "-i".into(),
+            "/srv/media/local.mkv".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "out.ts".into(),
+        ],
+    ] {
+        clock.advance(1);
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec =
+            run_shim_protocol(&args, &shim_cfg, stdin_fd.as_raw_fd(), &mut out, &mut err).await;
+        assert_eq!(
+            dec,
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal
+            },
+            "expected RunLocal bypass for args={args:?}"
+        );
+    }
+
+    // Worker must NEVER have been contacted for any of the network-input jobs.
+    let worker_audits = audit_actions_list(&db_b);
+    assert!(
+        !worker_audits.contains(&"peer_transcode_job_started".to_string()),
+        "network-input jobs must bypass worker completely: {worker_audits:?}"
+    );
+    let jobs = wait_for_job_count(&db_a, 3).await;
+    assert_eq!(jobs.len(), 3);
+    assert!(jobs.iter().all(|j| j.ran_locally && j.link_id.is_none()));
+
+    // Normal local file input MUST still dispatch remotely!
+    clock.advance(1);
+    let stdin_fd = make_stdin_pipe(b"");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let dec = run_shim_protocol(
+        &[
+            "-i".into(),
+            "/srv/media/movie.mkv".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "out.mkv".into(),
+        ],
+        &shim_cfg,
+        stdin_fd.as_raw_fd(),
+        &mut out,
+        &mut err,
+    )
+    .await;
+    assert_eq!(dec, ShimDecision::RemoteExited(0));
+    assert!(audit_actions_list(&db_b).contains(&"peer_transcode_job_started".to_string()));
+
+    stop_dispatcher(&rt_a).await;
+    let _ = w_stop.send(true);
+    let _ = w_task.await;
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 16. Bundle B(b) & R5-ESC-02: Controller Auto-Clamping to `worker_max_jobs`,
+//     `has_updates_write_grant` Marketplace Parity, & 180s > 150s Mount Timeout
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn controller_clamps_job_slots_to_advertised_worker_max_jobs_and_aligns_updates_grant() {
+    // R5-ESC-02: controller HTTP timeout must strictly exceed worker runner client timeout (150s).
+    assert!(
+        TRANSCODE_MOUNT_SYNC_TIMEOUT > af_runner::peer_transcode::TRANSCODE_MOUNT_CLIENT_TIMEOUT,
+        "controller mount sync timeout ({:?}) must exceed worker runner client timeout ({:?})",
+        TRANSCODE_MOUNT_SYNC_TIMEOUT,
+        af_runner::peer_transcode::TRANSCODE_MOUNT_CLIENT_TIMEOUT
+    );
+
+    let ips = next_transcode_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = TestClock::new(1_801_020_000);
+    let tmp = ShortTempDir::new("cap");
+    let fake_ffmpeg = write_fake_ffmpeg_script(&tmp.path, "ffmpeg", standard_fake_ffmpeg_body());
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(206), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(207), ip_b, 51821);
+    let (rt_b, db_b) = build_transcode_runtime(
+        "gpu-worker",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_a, db_a) = build_transcode_runtime(
+        "seedbox-1",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 22], 45022)),
+        }),
+        &clock,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+    // Grant `transcoding: write` + `marketplace: write` (with `updates: none`) to test alignment!
+    let mut access = AccessMap::none();
+    access.transcoding = af_db::peers::AccessLevel::Write;
+    access.marketplace = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_a,
+        &runner_a,
+        &a_link_id,
+        &db_b,
+        &b_link_id,
+        "seedbox-1",
+        access,
+        &clock.now().to_rfc3339(),
+    );
+
+    let local_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264"],
+        &[],
+    );
+    let mut remote_caps = local_caps.clone();
+    remote_caps.worker_max_jobs = Some(2);
+    assert_eq!(effective_worker_max_jobs(16, Some(&remote_caps)), 2);
+    assert_eq!(effective_worker_max_jobs(1, Some(&remote_caps)), 1);
+    assert_eq!(effective_worker_max_jobs(16, None), 16);
+
+    rt_a.transcode_state
+        .set_local_capabilities_override(Some(local_caps));
+    rt_a.transcode_state
+        .record_remote_capabilities(&a_link_id, remote_caps);
+    db_peers::upsert_transcode_worker(
+        &db_a.lock().unwrap(),
+        &af_db::peers::TranscodeWorker {
+            link_id: a_link_id.clone(),
+            enabled: true,
+            weight: 1,
+            max_jobs: 16,
+            ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+            encoders: Some(r#"["libx264"]"#.to_string()),
+            render_node: None,
+            parity_ok: true,
+            parity_error: None,
+        },
+    )
+    .unwrap();
+
+    // GET /transcode exposes `worker_max_jobs: 2`, `effective_max_jobs: 2`, and `has_updates_write_grant: true`
+    let (st, body) = call_admin(&rt_a, Method::GET, "/transcode", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let w = &body["workers"][0];
+    assert_eq!(w["max_jobs"], 16);
+    assert_eq!(w["worker_max_jobs"], 2);
+    assert_eq!(w["effective_max_jobs"], 2);
+    assert_eq!(w["has_updates_write_grant"], true);
+    assert_eq!(w["eligible"], true);
+
+    // try_acquire_job_slot clamps configured max_jobs=16 down to advertised worker_max_jobs=2
+    let g1 = rt_a
+        .transcode_state
+        .try_acquire_job_slot(&a_link_id, 16)
+        .expect("slot 1");
+    let g2 = rt_a
+        .transcode_state
+        .try_acquire_job_slot(&a_link_id, 16)
+        .expect("slot 2");
+    assert!(
+        rt_a.transcode_state
+            .try_acquire_job_slot(&a_link_id, 16)
+            .is_none(),
+        "3rd slot must be refused because worker advertised worker_max_jobs=2"
+    );
+
+    // Dispatcher must also skip the saturated worker and emit RunLocal
+    let disp_sock = tmp.path.join("d.sock");
+    rt_a.transcode_state
+        .set_dispatcher_socket_override(disp_sock.clone());
+    ensure_dispatcher_started(&rt_a).await.unwrap();
+
+    let shim_cfg = ShimConfig {
+        real_ffmpeg: fake_ffmpeg,
+        dispatcher_socket: disp_sock,
+        handshake_timeout: Duration::from_secs(2),
+        frame_write_timeout: Duration::from_secs(5),
+    };
+    let stdin_fd = make_stdin_pipe(b"");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let dec = run_shim_protocol(
+        &[
+            "-i".into(),
+            "in.mkv".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "out.mkv".into(),
+        ],
+        &shim_cfg,
+        stdin_fd.as_raw_fd(),
+        &mut out,
+        &mut err,
+    )
+    .await;
+    assert_eq!(
+        dec,
+        ShimDecision::ExecLocal {
+            reason: LocalFallbackReason::DispatcherRunLocal
+        }
+    );
+
+    drop(g1);
+    drop(g2);
+    stop_dispatcher(&rt_a).await;
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 17. Bundle B(a) & R3-ESC-01: Controller/Worker Toggle-Off Teardown,
+//     Inbound Grant Mount Cleanup, & Revocation Error Propagation
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn disable_teardown_inbound_grant_cleanup_and_revocation_error_propagation() {
+    let ips = next_transcode_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = TestClock::new(1_801_030_000);
+    let tmp = ShortTempDir::new("tear");
+    let now_str = clock.now().to_rfc3339();
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(208), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(209), ip_b, 51821);
+    let tc_runner_a = FakePeerTranscodeRunner::new_arc();
+    let tc_runner_b = FakePeerTranscodeRunner::new_arc();
+
+    let (rt_b, db_b) = build_transcode_runtime(
+        "gpu-worker",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        Arc::clone(&tc_runner_b),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_a, db_a) = build_transcode_runtime(
+        "seedbox-1",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::clone(&tc_runner_a),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 23], 45023)),
+        }),
+        &clock,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+    let mut access = AccessMap::none();
+    access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_a,
+        &runner_a,
+        &a_link_id,
+        &db_b,
+        &b_link_id,
+        "seedbox-1",
+        access,
+        &now_str,
+    );
+
+    // Seed worker B with `transcode`, `transcode_bind`, AND a P7 `media` mount row, plus
+    // controller A with an enabled `transcode_workers` row and running dispatcher.
+    {
+        let conn = db_b.lock().unwrap();
+        for (id, purpose, mp) in [
+            ("b-tc-1", "transcode", "/var/cache/jellyfin/transcodes"),
+            (
+                "b-tb-1",
+                "transcode_bind",
+                "/mnt/af-peers/gpu-worker/movies",
+            ),
+            ("b-media-1", "media", "/mnt/af-peers/seedbox-1/library"),
+        ] {
+            db_peers::insert_peer_mount(
+                &conn,
+                &PeerMount {
+                    id: id.to_string(),
+                    link_id: b_link_id.clone(),
+                    remote_path: mp.to_string(),
+                    mount_path: mp.to_string(),
+                    unit_name: format!("{id}.mount"),
+                    writable: purpose == "transcode",
+                    purpose: purpose.to_string(),
+                    state: "mounted".to_string(),
+                    last_error: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+    db_peers::upsert_transcode_worker(
+        &db_a.lock().unwrap(),
+        &af_db::peers::TranscodeWorker {
+            link_id: a_link_id.clone(),
+            enabled: true,
+            weight: 1,
+            max_jobs: 2,
+            ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+            encoders: Some(r#"["libx264"]"#.to_string()),
+            render_node: None,
+            parity_ok: true,
+            parity_error: None,
+        },
+    )
+    .unwrap();
+    rt_a.transcode_state
+        .set_dispatcher_socket_override(tmp.path.join("d.sock"));
+    ensure_dispatcher_started(&rt_a).await.unwrap();
+
+    // 1. Controller toggle-off (`enabled: false`) tears down exports on A AND sends remote
+    //    teardown to B (removing B's transcode/bind mounts while leaving B's P7 media mount!)
+    //    AND marks worker `enabled = false, parity_ok = false` on A.
+    let (st, body) = call_admin(
+        &rt_a,
+        Method::PUT,
+        "/transcode",
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "disable failed: {body}");
+    assert_eq!(tc_runner_a.count_action("disable_jellyfin"), 1);
+    assert_eq!(tc_runner_a.count_action("remove_transcode_exports"), 1);
+    assert_eq!(tc_runner_b.count_action("remove_bind_media"), 1);
+    assert_eq!(tc_runner_b.count_action("remove_transcode_mounts"), 1);
+    let a_worker = db_peers::get_transcode_worker(&db_a.lock().unwrap(), &a_link_id)
+        .unwrap()
+        .unwrap();
+    assert!(!a_worker.enabled);
+    assert!(!a_worker.parity_ok);
+    let b_remaining =
+        db_peers::list_peer_mounts_for_link(&db_b.lock().unwrap(), &b_link_id).unwrap();
+    assert_eq!(b_remaining.len(), 1);
+    assert_eq!(b_remaining[0].purpose, "media");
+
+    // 1b. Controller toggle-off (`enabled: false`) MUST still succeed (200 OK) and remove local
+    //     exports + mark worker disabled/parity_ok=false when the remote worker is offline!
+    {
+        db_peers::upsert_transcode_worker(
+            &db_a.lock().unwrap(),
+            &af_db::peers::TranscodeWorker {
+                link_id: a_link_id.clone(),
+                enabled: true,
+                weight: 1,
+                max_jobs: 2,
+                ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+                encoders: Some(r#"["libx264"]"#.to_string()),
+                render_node: None,
+                parity_ok: true,
+                parity_error: None,
+            },
+        )
+        .unwrap();
+        // Point A's tunnel port override for B at a dead port so remote teardown fails cleanly.
+        let dead_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let saved_port = rt_a
+            .tunnel_port_overrides
+            .write()
+            .unwrap()
+            .insert(ip_b, dead_port);
+        tc_runner_a.state.lock().unwrap().calls.clear();
+        let (st, body) = call_admin(
+            &rt_a,
+            Method::PUT,
+            "/transcode",
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "controller disable must remain non-fatal when remote worker is offline: {body}"
+        );
+        assert_eq!(tc_runner_a.count_action("remove_transcode_exports"), 1);
+        let a_worker_offline = db_peers::get_transcode_worker(&db_a.lock().unwrap(), &a_link_id)
+            .unwrap()
+            .unwrap();
+        assert!(!a_worker_offline.enabled);
+        assert!(!a_worker_offline.parity_ok);
+        // Restore tunnel port override for subsequent steps.
+        if let Some(port) = saved_port {
+            rt_a.tunnel_port_overrides
+                .write()
+                .unwrap()
+                .insert(ip_b, port);
+        }
+    }
+
+    // 2. Worker toggle-off (`worker_service_enabled: false`) tears down ALL local
+    //    `transcode_bind` (first) and `transcode` (second) mounts BEFORE `RemoveWorkerUnit`!
+    {
+        let conn = db_b.lock().unwrap();
+        for (id, purpose, mp) in [
+            ("b-tc-2", "transcode", "/var/cache/jellyfin/transcodes"),
+            (
+                "b-tb-2",
+                "transcode_bind",
+                "/mnt/af-peers/gpu-worker/movies",
+            ),
+        ] {
+            db_peers::insert_peer_mount(
+                &conn,
+                &PeerMount {
+                    id: id.to_string(),
+                    link_id: b_link_id.clone(),
+                    remote_path: mp.to_string(),
+                    mount_path: mp.to_string(),
+                    unit_name: format!("{id}.mount"),
+                    writable: purpose == "transcode",
+                    purpose: purpose.to_string(),
+                    state: "mounted".to_string(),
+                    last_error: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+    tc_runner_b.state.lock().unwrap().calls.clear();
+    let (st, body) = call_admin(
+        &rt_b,
+        Method::PUT,
+        "/transcode",
+        Some(json!({ "worker_service_enabled": false })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "worker disable failed: {body}");
+    let actions_b: Vec<&'static str> = tc_runner_b
+        .state
+        .lock()
+        .unwrap()
+        .calls
+        .iter()
+        .map(FakePeerTranscodeRunner::action_name)
+        .collect();
+    let idx_bind = actions_b
+        .iter()
+        .position(|a| *a == "remove_bind_media")
+        .expect("RemoveBindMedia must run");
+    let idx_tc = actions_b
+        .iter()
+        .position(|a| *a == "remove_transcode_mounts")
+        .expect("RemoveTranscodeMounts must run");
+    let idx_unit = actions_b
+        .iter()
+        .position(|a| *a == "remove_worker_unit")
+        .expect("RemoveWorkerUnit must run");
+    assert!(
+        idx_bind < idx_tc && idx_tc < idx_unit,
+        "expected RemoveBindMedia < RemoveTranscodeMounts < RemoveWorkerUnit, got {actions_b:?}"
+    );
+    let b_remaining2 =
+        db_peers::list_peer_mounts_for_link(&db_b.lock().unwrap(), &b_link_id).unwrap();
+    assert_eq!(b_remaining2.len(), 1);
+    assert_eq!(b_remaining2[0].purpose, "media");
+
+    // 3. `cleanup_worker_transcode_mounts_for_link` tears down binds & transcode mounts on
+    //    inbound `transcoding: write` revocation and leaves media mounts untouched.
+    {
+        let conn = db_b.lock().unwrap();
+        for (id, purpose, mp) in [
+            ("b-tc-3", "transcode", "/var/cache/jellyfin/transcodes"),
+            (
+                "b-tb-3",
+                "transcode_bind",
+                "/mnt/af-peers/gpu-worker/movies",
+            ),
+        ] {
+            db_peers::insert_peer_mount(
+                &conn,
+                &PeerMount {
+                    id: id.to_string(),
+                    link_id: b_link_id.clone(),
+                    remote_path: mp.to_string(),
+                    mount_path: mp.to_string(),
+                    unit_name: format!("{id}.mount"),
+                    writable: purpose == "transcode",
+                    purpose: purpose.to_string(),
+                    state: "mounted".to_string(),
+                    last_error: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+    tc_runner_b.state.lock().unwrap().calls.clear();
+    cleanup_worker_transcode_mounts_for_link(&rt_b, &b_link_id, "revoke_transcoding_grant")
+        .await
+        .expect("worker mount cleanup should succeed");
+    assert_eq!(tc_runner_b.count_action("remove_bind_media"), 1);
+    assert_eq!(tc_runner_b.count_action("remove_transcode_mounts"), 1);
+    let b_remaining3 =
+        db_peers::list_peer_mounts_for_link(&db_b.lock().unwrap(), &b_link_id).unwrap();
+    assert_eq!(b_remaining3.len(), 1);
+    assert_eq!(b_remaining3[0].purpose, "media");
+
+    // 4. `cleanup_revoked_link_transcode_locked` MUST propagate runner failures as `Err(PeerError)`
+    //    and retain retryable DB state until the retry succeeds and deletes the rows!
+    tc_runner_a.state.lock().unwrap().fail_next.insert(
+        "remove_transcode_exports",
+        PeerTranscodeError::Runtime("exportfs busy".to_string()),
+    );
+    let err = cleanup_revoked_link_transcode_locked(&rt_a, &a_link_id, "revoke_link")
+        .await
+        .expect_err("runner error MUST propagate instead of being swallowed");
+    assert_eq!(err.code(), "PEER_INTERNAL_ERROR");
+    assert!(
+        db_peers::get_transcode_worker(&db_a.lock().unwrap(), &a_link_id)
+            .unwrap()
+            .is_some(),
+        "transcode_workers row must stay until RemoveTranscodeExports succeeds so retry works"
+    );
+
+    // Retry succeeds and deletes the `transcode_workers` row completely.
+    cleanup_revoked_link_transcode_locked(&rt_a, &a_link_id, "revoke_link")
+        .await
+        .expect("retry cleanup should succeed");
+    assert!(
+        db_peers::get_transcode_worker(&db_a.lock().unwrap(), &a_link_id)
+            .unwrap()
+            .is_none(),
+        "transcode_workers row must be deleted after cleanup succeeds"
+    );
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 18. R3-ESC-03 & R5-ESC-01: Skip No-Op `transcode_workers` Upserts &
+//     Dispatcher Reconciliation After Transient Boot `InspectJellyfinPaths` Error
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn health_caps_skips_noop_db_writes_and_reconcile_dispatcher_recovers_after_boot_error() {
+    let ips = next_transcode_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = TestClock::new(1_801_040_000);
+    let tmp = ShortTempDir::new("rec");
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(210), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(211), ip_b, 51821);
+    let tc_runner_a = FakePeerTranscodeRunner::new_arc();
+    let (rt_b, _db_b) = build_transcode_runtime(
+        "gpu-worker",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_a, db_a) = build_transcode_runtime(
+        "seedbox-1",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::clone(&tc_runner_a),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 24], 45024)),
+        }),
+        &clock,
+    );
+
+    let (a_link_id, _, _) = pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+    let link = db_peers::get_peer_link(&db_a.lock().unwrap(), &a_link_id)
+        .unwrap()
+        .unwrap();
+
+    // 1. R3-ESC-03: Attach SQLite audit counter trigger on `transcode_workers` writes.
+    db_a.lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE tc_write_counter (n INTEGER NOT NULL);
+             INSERT INTO tc_write_counter VALUES (0);
+             CREATE TRIGGER tc_ins AFTER INSERT ON transcode_workers
+             BEGIN UPDATE tc_write_counter SET n = n + 1; END;
+             CREATE TRIGGER tc_upd AFTER UPDATE ON transcode_workers
+             BEGIN UPDATE tc_write_counter SET n = n + 1; END;",
+        )
+        .unwrap();
+
+    let count_writes = || -> i64 {
+        db_a.lock()
+            .unwrap()
+            .query_row("SELECT n FROM tc_write_counter", [], |r| r.get(0))
+            .unwrap()
+    };
+
+    let caps_v1 = sample_caps(
+        Some("8.1.3-1-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    // First sync inserts row -> 1 write.
+    handle_remote_health_transcode_caps(&rt_a, &link, caps_v1.clone()).await;
+    assert_eq!(count_writes(), 1);
+    // Subsequent identical health ticks MUST skip SQLite write completely -> still 1 write!
+    handle_remote_health_transcode_caps(&rt_a, &link, caps_v1.clone()).await;
+    handle_remote_health_transcode_caps(&rt_a, &link, caps_v1).await;
+    assert_eq!(
+        count_writes(),
+        1,
+        "identical remote transcode capabilities must not trigger SQLite write transactions"
+    );
+
+    // Changed version DOES trigger update -> 2 writes.
+    let caps_v2 = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.4-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    handle_remote_health_transcode_caps(&rt_a, &link, caps_v2).await;
+    assert_eq!(count_writes(), 2);
+
+    // 2. R5-ESC-01: Transient boot `InspectJellyfinPaths` error recovers cleanly on next reconcile!
+    {
+        let mut st = tc_runner_a.state.lock().unwrap();
+        st.shim_installed = true;
+        st.dropin_enabled = true;
+        st.fail_next.insert(
+            "inspect_jellyfin_paths",
+            PeerTranscodeError::Runtime("runner socket not ready yet".to_string()),
+        );
+    }
+    let disp_sock = tmp.path.join("disp.sock");
+    rt_a.transcode_state
+        .set_dispatcher_socket_override(disp_sock.clone());
+    rt_a.transcode_state
+        .set_local_capabilities_override(Some(sample_caps(
+            Some("8.1.3-2-trixie"),
+            Some("8.1.3-Jellyfin"),
+            &["libx264"],
+            &[],
+        )));
+
+    // Boot attempt fails transiently -> dispatcher stays inactive
+    reconcile_dispatcher_if_configured(&rt_a).await;
+    assert!(!rt_a.transcode_state.is_dispatcher_active().await);
+
+    // Subsequent health tick retries -> dispatcher starts automatically!
+    reconcile_dispatcher_if_configured(&rt_a).await;
+    assert!(rt_a.transcode_state.is_dispatcher_active().await);
+    assert!(disp_sock.exists());
+
+    // Once active, further reconcile calls take the fast path with zero extra runner calls.
+    let inspect_calls_before = tc_runner_a.count_action("inspect_jellyfin_paths");
+    reconcile_dispatcher_if_configured(&rt_a).await;
+    assert_eq!(
+        tc_runner_a.count_action("inspect_jellyfin_paths"),
+        inspect_calls_before
+    );
+
+    stop_dispatcher(&rt_a).await;
     rt_a.shutdown_all().await;
     rt_b.shutdown_all().await;
 }

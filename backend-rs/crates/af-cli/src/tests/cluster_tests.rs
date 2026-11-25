@@ -16,8 +16,10 @@ use std::sync::{Arc, Mutex};
 
 const TEST_PUBKEY: &str = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
 const TEST_PRIVATE_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-const TEST_INBOUND_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const TEST_OUTGOING_HASH: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+const TEST_INBOUND_LINK_HASH: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const TEST_INBOUND_GRANT_HASH: &str =
+    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 const TEST_CREDENTIAL_ID: &str = "cred-secret-received-grant-991827";
 
 #[derive(Default, Clone)]
@@ -246,7 +248,7 @@ fn create_cluster_test_db(db_path: &Path) {
             "10.231.0.2",
             "203.0.113.20",
             51821,
-            "online",
+            "active_unowned",
             "4.0.0",
             1,
             r#"["storage","transcode","proxy"]"#,
@@ -254,7 +256,7 @@ fn create_cluster_test_db(db_path: &Path) {
             "2026-11-24T04:00:00Z",
             contaminated_link_err,
             1,
-            TEST_INBOUND_HASH,
+            TEST_INBOUND_LINK_HASH,
             "2026-11-20T01:00:00Z",
             "2026-11-24T04:00:00Z"
         ],
@@ -273,7 +275,7 @@ fn create_cluster_test_db(db_path: &Path) {
             "10.231.0.9",
             "203.0.113.99",
             51821,
-            "offline",
+            "down",
             "2026-11-20T01:00:00Z",
             "2026-11-24T04:00:00Z"
         ],
@@ -285,11 +287,11 @@ fn create_cluster_test_db(db_path: &Path) {
         "INSERT INTO peer_grants (id, link_id, run_as_user_id, access, token_hash, created_by, created_at, revoked_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
         params![
-            "grant-out-1",
+            "grant-in-1",
             "link-media-2",
             42,
             access_json,
-            TEST_OUTGOING_HASH,
+            TEST_INBOUND_GRANT_HASH,
             "admin",
             "2026-11-21T10:00:00Z"
         ],
@@ -301,7 +303,7 @@ fn create_cluster_test_db(db_path: &Path) {
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
         params![
             "link-media-2",
-            "grant-in-9",
+            "grant-out-9",
             1001,
             access_json,
             "remote-admin",
@@ -361,13 +363,44 @@ fn create_cluster_test_db(db_path: &Path) {
         params![
             "mnt-2",
             "link-media-2",
-            "/srv/media/cache",
-            "/mnt/af-peers/media-2/cache",
-            "mnt-af\\x2dpeers-media\\x2d2-cache.mount",
+            "/srv/media/tv",
+            "/mnt/af-peers/media-2/tv",
+            "mnt-af\\x2dpeers-media\\x2d2-tv.mount",
+            1,
+            "media",
+            "degraded",
+            format!("nfs timeout with token_hash={TEST_INBOUND_GRANT_HASH}")
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO peer_mounts (id, link_id, remote_path, mount_path, unit_name, writable, purpose, state, last_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            "mnt-3",
+            "link-media-2",
+            "/var/cache/jellyfin",
+            "/var/cache/jellyfin",
+            "var-cache-jellyfin.mount",
             1,
             "transcode",
-            "degraded",
-            format!("nfs timeout with token_hash={TEST_OUTGOING_HASH}")
+            "mounted",
+            format!("cached sync note token_hash={TEST_INBOUND_GRANT_HASH}")
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO peer_mounts (id, link_id, remote_path, mount_path, unit_name, writable, purpose, state, last_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+        params![
+            "mnt-4",
+            "link-media-2",
+            "/mnt/af-peers/media-2/movies",
+            "/srv/media/movies",
+            "srv-media-movies.mount",
+            0,
+            "transcode_bind",
+            "mounted"
         ],
     )
     .unwrap();
@@ -424,7 +457,7 @@ fn create_cluster_test_db(db_path: &Path) {
                 "peer_link",
                 "link-media-2",
                 format!(
-                    "reconciled link inbound_token_hash={TEST_INBOUND_HASH} outgoing={TEST_OUTGOING_HASH} cred={TEST_CREDENTIAL_ID} X-AF-Grant-Token: secret-grant-1234 PrivateKey={TEST_PRIVATE_KEY}"
+                    "reconciled link inbound_token_hash={TEST_INBOUND_LINK_HASH} grant_hash={TEST_INBOUND_GRANT_HASH} cred={TEST_CREDENTIAL_ID} X-AF-Grant-Token: secret-grant-1234 PrivateKey={TEST_PRIVATE_KEY}"
                 ),
             )
         } else if idx % 3 == 0 {
@@ -438,8 +471,8 @@ fn create_cluster_test_db(db_path: &Path) {
             (
                 "admin",
                 "peer_grant",
-                "grant-out-1",
-                format!("updated outgoing grant #{idx}"),
+                "grant-in-1",
+                format!("updated inbound grant #{idx}"),
             )
         } else {
             (
@@ -516,10 +549,10 @@ fn live_mock_transport() -> MockClusterTransport {
         }),
     );
     states.insert(
-        "/mnt/af-peers/media-2/cache".to_string(),
+        "/mnt/af-peers/media-2/tv".to_string(),
         Ok(PeerMountStateResponse {
-            unit_name: "mnt-af\\x2dpeers-media\\x2d2-cache.mount".to_string(),
-            mount_path: "/mnt/af-peers/media-2/cache".to_string(),
+            unit_name: "mnt-af\\x2dpeers-media\\x2d2-tv.mount".to_string(),
+            mount_path: "/mnt/af-peers/media-2/tv".to_string(),
             exists: true,
             active: false,
             unit_state: "failed".to_string(),
@@ -539,10 +572,10 @@ fn live_mock_transport() -> MockClusterTransport {
         }),
     );
     probes.insert(
-        "/mnt/af-peers/media-2/cache".to_string(),
+        "/mnt/af-peers/media-2/tv".to_string(),
         Ok(PeerSentinelProbeResponse {
-            mount_path: "/mnt/af-peers/media-2/cache".to_string(),
-            sentinel_path: "/mnt/af-peers/media-2/cache/.af-peer-sentinel".to_string(),
+            mount_path: "/mnt/af-peers/media-2/tv".to_string(),
+            sentinel_path: "/mnt/af-peers/media-2/tv/.af-peer-sentinel".to_string(),
             healthy: false,
             timed_out: true,
             error: Some("sentinel timed out X-AF-Link-Token: raw-link-tok-9999".to_string()),
@@ -609,6 +642,13 @@ fn cluster_cli_parser_and_help_surface() {
         assert_eq!(resp.status, "ok");
         assert!(resp.message.contains("af cluster diagnose <link>"));
         assert!(resp.message.contains("--db <path>"));
+        assert!(resp.message.contains("--json"));
+        assert!(resp.message.contains("--socket <path>"));
+        assert!(resp.message.contains("--root <dir>"));
+        assert!(resp.message.contains("--dry-run"));
+        assert!(resp.message.contains("Inbound (this server -> peer)"));
+        assert!(resp.message.contains("outbound (peer -> this server)"));
+        assert!(!resp.message.contains("Outgoing and incoming"));
     }
 
     let general_help = render_help_text(HelpTopic::General);
@@ -651,7 +691,9 @@ fn cluster_diagnose_full_report_json_and_human_and_secret_redaction() {
         let data = env.data.as_ref().expect("structured diagnose payload");
         assert_eq!(data["link"]["id"], "link-media-2");
         assert_eq!(data["link"]["name"], "media-2");
-        assert_eq!(data["link"]["state"], "online");
+        assert_eq!(data["link"]["state"], "active");
+        assert_eq!(data["link"]["internal_state"], "active_unowned");
+        assert_eq!(data["link"]["wg_peer_owned"], false);
         assert_eq!(data["link"]["tunnel_ip"], "10.231.0.2");
         assert_eq!(data["link"]["wg_port"], 51821);
         assert_eq!(
@@ -669,17 +711,21 @@ fn cluster_diagnose_full_report_json_and_human_and_secret_redaction() {
         assert_eq!(data["wireguard"]["rx_bytes"], 123456);
         assert_eq!(data["wireguard"]["tx_bytes"], 654321);
 
-        assert_eq!(data["grants"]["outgoing"]["id"], "grant-out-1");
-        assert_eq!(data["grants"]["outgoing"]["active"], true);
-        assert_eq!(data["grants"]["outgoing"]["run_as_user_id"], 42);
-        assert_eq!(data["grants"]["outgoing"]["access"]["services"], "write");
-        assert_eq!(data["grants"]["outgoing"]["access"]["transcoding"], "write");
-        assert!(data["grants"]["outgoing"].get("token_hash").is_none());
+        // Canonical grant direction keys: inbound = peer_grants (this server -> peer),
+        // outbound = peer_received_grants (peer -> this server).
+        assert!(data["grants"].get("outgoing").is_none());
+        assert!(data["grants"].get("incoming").is_none());
+        assert_eq!(data["grants"]["inbound"]["id"], "grant-in-1");
+        assert_eq!(data["grants"]["inbound"]["active"], true);
+        assert_eq!(data["grants"]["inbound"]["run_as_user_id"], 42);
+        assert_eq!(data["grants"]["inbound"]["access"]["services"], "write");
+        assert_eq!(data["grants"]["inbound"]["access"]["transcoding"], "write");
+        assert!(data["grants"]["inbound"].get("token_hash").is_none());
 
-        assert_eq!(data["grants"]["incoming"]["grant_id"], "grant-in-9");
-        assert_eq!(data["grants"]["incoming"]["active"], true);
-        assert_eq!(data["grants"]["incoming"]["generation"], 3);
-        assert!(data["grants"]["incoming"].get("credential_id").is_none());
+        assert_eq!(data["grants"]["outbound"]["grant_id"], "grant-out-9");
+        assert_eq!(data["grants"]["outbound"]["active"], true);
+        assert_eq!(data["grants"]["outbound"]["generation"], 3);
+        assert!(data["grants"]["outbound"].get("credential_id").is_none());
 
         let exports = data["exports"].as_array().unwrap();
         assert_eq!(exports.len(), 2);
@@ -689,24 +735,76 @@ fn cluster_diagnose_full_report_json_and_human_and_secret_redaction() {
         assert_eq!(exports[1]["writable"], true);
 
         let mounts = data["mounts"].as_array().unwrap();
-        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts.len(), 4);
+
+        // Only purpose == "media" mounts may invoke /v1/peer-storage MountStatus/ProbeSentinel.
+        assert_eq!(
+            *transport.mount_status_calls.lock().unwrap(),
+            vec![
+                "/mnt/af-peers/media-2/movies".to_string(),
+                "/mnt/af-peers/media-2/tv".to_string(),
+            ]
+        );
+        assert_eq!(
+            *transport.sentinel_probe_calls.lock().unwrap(),
+            vec![
+                "/mnt/af-peers/media-2/movies".to_string(),
+                "/mnt/af-peers/media-2/tv".to_string(),
+            ]
+        );
+
         let movies_mount = mounts
             .iter()
             .find(|m| m["mount_path"] == "/mnt/af-peers/media-2/movies")
             .expect("movies mount present");
+        assert_eq!(movies_mount["purpose"], "media");
         assert_eq!(movies_mount["live_active"], true);
         assert_eq!(movies_mount["probe"]["ok"], true);
         assert_eq!(
             movies_mount["probe"]["checked_path"],
             "/mnt/af-peers/media-2/movies/.af-peer-sentinel"
         );
-        let cache_mount = mounts
+        assert!(movies_mount.get("probe_skipped_reason").is_none());
+
+        let tv_mount = mounts
             .iter()
-            .find(|m| m["mount_path"] == "/mnt/af-peers/media-2/cache")
-            .expect("cache mount present");
-        assert_eq!(cache_mount["live_active"], false);
-        assert_eq!(cache_mount["probe"]["ok"], false);
-        assert_eq!(cache_mount["probe"]["timed_out"], true);
+            .find(|m| m["mount_path"] == "/mnt/af-peers/media-2/tv")
+            .expect("tv mount present");
+        assert_eq!(tv_mount["purpose"], "media");
+        assert_eq!(tv_mount["live_active"], false);
+        assert_eq!(tv_mount["probe"]["ok"], false);
+        assert_eq!(tv_mount["probe"]["timed_out"], true);
+        assert!(tv_mount.get("probe_skipped_reason").is_none());
+
+        let transcode_mount = mounts
+            .iter()
+            .find(|m| m["mount_path"] == "/var/cache/jellyfin")
+            .expect("transcode mount present");
+        assert_eq!(transcode_mount["purpose"], "transcode");
+        assert!(transcode_mount["live_exists"].is_null());
+        assert!(transcode_mount["live_active"].is_null());
+        assert!(transcode_mount["live_unit_state"].is_null());
+        assert!(transcode_mount.get("live_error").is_none());
+        assert!(transcode_mount["probe"].is_null());
+        assert!(transcode_mount["probe_skipped_reason"]
+            .as_str()
+            .expect("probe_skipped_reason on transcode mount")
+            .contains("transcode"));
+
+        let transcode_bind_mount = mounts
+            .iter()
+            .find(|m| m["mount_path"] == "/srv/media/movies")
+            .expect("transcode_bind mount present");
+        assert_eq!(transcode_bind_mount["purpose"], "transcode_bind");
+        assert!(transcode_bind_mount["live_exists"].is_null());
+        assert!(transcode_bind_mount["live_active"].is_null());
+        assert!(transcode_bind_mount["live_unit_state"].is_null());
+        assert!(transcode_bind_mount.get("live_error").is_none());
+        assert!(transcode_bind_mount["probe"].is_null());
+        assert!(transcode_bind_mount["probe_skipped_reason"]
+            .as_str()
+            .expect("probe_skipped_reason on transcode_bind mount")
+            .contains("transcode_bind"));
 
         assert_eq!(data["transcode_worker"]["configured"], true);
         assert_eq!(data["transcode_worker"]["enabled"], true);
@@ -741,8 +839,8 @@ fn cluster_diagnose_full_report_json_and_human_and_secret_redaction() {
         // Verify zero secret leakage across BOTH JSON serialization and human text output.
         let serialized_json = serde_json::to_string(&env).unwrap();
         for forbidden in [
-            TEST_INBOUND_HASH,
-            TEST_OUTGOING_HASH,
+            TEST_INBOUND_LINK_HASH,
+            TEST_INBOUND_GRANT_HASH,
             TEST_CREDENTIAL_ID,
             TEST_PRIVATE_KEY,
             "raw-link-tok-9999",
@@ -760,10 +858,19 @@ fn cluster_diagnose_full_report_json_and_human_and_secret_redaction() {
         }
         assert!(env.message.contains("[REDACTED]"));
         assert!(env.message.contains("[Link Health]"));
+        assert!(env.message.contains(
+            "State:                active (internal: active_unowned, wg_peer_owned: false)"
+        ));
         assert!(env.message.contains("[WireGuard (afpeer0)]"));
         assert!(env.message.contains("[Grants]"));
+        assert!(env.message.contains("Inbound grant (this server -> peer)"));
+        assert!(env.message.contains("Outbound grant (peer -> this server)"));
+        assert!(!env.message.contains("  Outgoing:"));
+        assert!(!env.message.contains("  Incoming:"));
         assert!(env.message.contains("[Exports (2)]"));
-        assert!(env.message.contains("[Mounts (2)]"));
+        assert!(env.message.contains("[Mounts (4)]"));
+        assert!(env.message.contains("Live: skipped (transcode mount)"));
+        assert!(env.message.contains("Live: skipped (transcode_bind mount)"));
         assert!(env.message.contains("[Transcode Worker]"));
         assert!(env.message.contains("[Audit Trail (last 20 entries)]"));
     }
@@ -772,7 +879,7 @@ fn cluster_diagnose_full_report_json_and_human_and_secret_redaction() {
 #[test]
 fn cluster_diagnose_degrades_gracefully_when_runner_is_offline() {
     let tmp = TempTestDir::new("cluster-diagnose-offline");
-    let db_path = tmp.path().join("aetherflow.db");
+    let db_path = tmp.path().join("aetherflow.sqlite");
     create_cluster_test_db(&db_path);
     let db_str = db_path.to_string_lossy().to_string();
 
@@ -786,6 +893,9 @@ fn cluster_diagnose_degrades_gracefully_when_runner_is_offline() {
     assert_eq!(env.exit_code, 0);
     let data = env.data.as_ref().unwrap();
     assert_eq!(data["link"]["id"], "link-media-2");
+    assert_eq!(data["link"]["state"], "active");
+    assert_eq!(data["link"]["internal_state"], "active_unowned");
+    assert_eq!(data["link"]["wg_peer_owned"], false);
     assert_eq!(data["wireguard"]["available"], false);
     assert_eq!(data["wireguard"]["interface_state"], "unavailable");
     assert!(data["wireguard"]["error"]
@@ -793,19 +903,39 @@ fn cluster_diagnose_degrades_gracefully_when_runner_is_offline() {
         .unwrap()
         .contains("connection refused"));
 
+    // Only the 2 media mounts attempted runner IPC; transcode / transcode_bind were skipped cleanly.
+    assert_eq!(
+        offline_transport.mount_status_calls.lock().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        offline_transport.sentinel_probe_calls.lock().unwrap().len(),
+        2
+    );
+
     let mounts = data["mounts"].as_array().unwrap();
-    assert_eq!(mounts.len(), 2);
+    assert_eq!(mounts.len(), 4);
     for mount in mounts {
-        assert!(mount["live_active"].is_null());
-        assert!(mount["live_error"]
-            .as_str()
-            .unwrap()
-            .contains("runner offline"));
-        assert_eq!(mount["probe"]["ok"], false);
-        assert!(mount["probe"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("runner offline"));
+        if mount["purpose"] == "media" {
+            assert!(mount["live_active"].is_null());
+            assert!(mount["live_error"]
+                .as_str()
+                .unwrap()
+                .contains("runner offline"));
+            assert_eq!(mount["probe"]["ok"], false);
+            assert!(mount["probe"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("runner offline"));
+            assert!(mount.get("probe_skipped_reason").is_none());
+        } else {
+            assert!(mount["live_exists"].is_null());
+            assert!(mount["live_active"].is_null());
+            assert!(mount["live_unit_state"].is_null());
+            assert!(mount.get("live_error").is_none());
+            assert!(mount["probe"].is_null());
+            assert!(mount["probe_skipped_reason"].as_str().is_some());
+        }
     }
     assert_eq!(data["exports"].as_array().unwrap().len(), 2);
     assert_eq!(data["audit"].as_array().unwrap().len(), 20);
@@ -813,12 +943,73 @@ fn cluster_diagnose_degrades_gracefully_when_runner_is_offline() {
 }
 
 #[test]
-fn cluster_diagnose_handles_missing_link_missing_db_dry_run_readonly_and_root() {
-    let tmp = TempTestDir::new("cluster-diagnose-edge");
-    let db_path = tmp.path().join("var/lib/aetherflow/aetherflow.sqlite");
+fn cluster_diagnose_projects_all_internal_link_states_and_ownership() {
+    use crate::commands::cluster::{is_wg_peer_owned, public_link_state};
+
+    let cases = [
+        ("pending", "pending", false),
+        ("pending_owned", "pending", true),
+        ("active", "active", true),
+        ("active_unowned", "active", false),
+        ("down", "down", true),
+        ("down_unowned", "down", false),
+        ("revoking", "revoked", true),
+        ("revoking_unowned", "revoked", false),
+        ("revoked", "revoked", true),
+        ("revoked_unowned", "revoked", false),
+        ("unexpected_state", "unknown", false),
+    ];
+
+    for (internal, expected_public, expected_owned) in cases {
+        assert_eq!(
+            public_link_state(internal),
+            expected_public,
+            "public_link_state({internal:?})"
+        );
+        assert_eq!(
+            is_wg_peer_owned(internal),
+            expected_owned,
+            "is_wg_peer_owned({internal:?})"
+        );
+    }
+
+    let tmp = TempTestDir::new("cluster-diagnose-states");
+    let db_path = tmp.path().join("aetherflow.sqlite");
     create_cluster_test_db(&db_path);
     let db_str = db_path.to_string_lossy().to_string();
-    let root_str = tmp.path().to_string_lossy().to_string();
+    let transport = MockClusterTransport::default();
+
+    for (internal, expected_public, expected_owned) in cases {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE peer_links SET state = ?1 WHERE id = 'link-media-2'",
+            params![internal],
+        )
+        .unwrap();
+        drop(conn);
+
+        let inv =
+            parse_cli_args(["--json", "cluster", "diagnose", "media-2", "--db", &db_str]).unwrap();
+        let env = execute_invocation(&inv, &transport);
+        assert_eq!(env.status, "ok", "state={internal}: {}", env.message);
+        let data = env.data.as_ref().unwrap();
+        assert_eq!(data["link"]["state"], expected_public);
+        assert_eq!(data["link"]["internal_state"], internal);
+        assert_eq!(data["link"]["wg_peer_owned"], expected_owned);
+        assert!(env.message.contains(&format!(
+            "State:                {expected_public} (internal: {internal}, wg_peer_owned: {expected_owned})"
+        )));
+    }
+}
+
+#[test]
+fn cluster_diagnose_handles_missing_link_missing_db_dry_run_readonly_and_root() {
+    let tmp = TempTestDir::new("cluster-diagnose-edge");
+    let root_dir = tmp.path().join("isolated-root");
+    let db_path = root_dir.join("var/lib/aetherflow/aetherflow.sqlite");
+    create_cluster_test_db(&db_path);
+    let db_str = db_path.to_string_lossy().to_string();
+    let root_str = root_dir.to_string_lossy().to_string();
 
     let transport = MockClusterTransport::default();
 
@@ -838,7 +1029,7 @@ fn cluster_diagnose_handles_missing_link_missing_db_dry_run_readonly_and_root() 
     assert!(unknown_env.message.contains("does-not-exist"));
 
     // 2. Missing DB returns clean error
-    let missing_db = tmp.path().join("nope.db");
+    let missing_db = root_dir.join("nope.sqlite");
     let missing_inv = parse_cli_args([
         "--json",
         "cluster",
@@ -868,52 +1059,206 @@ fn cluster_diagnose_handles_missing_link_missing_db_dry_run_readonly_and_root() 
     assert!(dry_env.message.contains("[DRY-RUN]"));
     assert_eq!(*transport.network_calls.lock().unwrap(), 0);
 
-    // 4. --root resolves <root>/var/lib/aetherflow/aetherflow.sqlite when env vars are unset
+    // 4. --root resolves via af_models helpers and strictly confines explicit/env DB paths
     {
-        let _guard = ENV_TEST_LOCK.lock().unwrap();
-        let saved: Vec<(&str, Option<String>)> = ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"]
-            .into_iter()
-            .map(|k| {
-                let prev = std::env::var(k).ok();
-                std::env::remove_var(k);
-                (k, prev)
-            })
-            .collect();
+        struct EnvRestoreGuard(Vec<(&'static str, Option<String>)>);
+        impl Drop for EnvRestoreGuard {
+            fn drop(&mut self) {
+                for (k, prev) in &self.0 {
+                    if let Some(val) = prev {
+                        std::env::set_var(k, val);
+                    } else {
+                        std::env::remove_var(k);
+                    }
+                }
+            }
+        }
 
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env_keys = [
+            "AF_DB_PATH",
+            "DB_PATH",
+            "AETHERFLOW_DB_PATH",
+            "DATA_DIR",
+            "STATE_DIRECTORY",
+            "AETHERFLOW_ENV_FILE",
+            "AETHERFLOW_BACKUP_ISOLATED_ROOT",
+            "AETHERFLOW_RELEASE_ROOT",
+            "AETHERFLOW_DISABLE_HOST_ENV_FILE",
+        ];
+        let restore = EnvRestoreGuard(
+            env_keys
+                .into_iter()
+                .map(|k| {
+                    let prev = std::env::var(k).ok();
+                    std::env::remove_var(k);
+                    (k, prev)
+                })
+                .collect(),
+        );
+        std::env::set_var("AETHERFLOW_DISABLE_HOST_ENV_FILE", "1");
+
+        // 4a. Default --root resolves <root>/var/lib/aetherflow/aetherflow.sqlite
         let root_inv = parse_cli_args([
             "--json", "--root", &root_str, "cluster", "diagnose", "media-2",
         ])
         .unwrap();
         let root_env = execute_invocation(&root_inv, &transport);
 
-        // Also test fallback to aetherflow.db when aetherflow.sqlite is moved aside
-        let fallback_db = tmp.path().join("var/lib/aetherflow/aetherflow.db");
-        fs::rename(&db_path, &fallback_db).unwrap();
-        let fallback_env = execute_invocation(&root_inv, &transport);
+        // 4b. Explicit in-root --db is accepted
+        let custom_in_root = root_dir.join("srv/custom/aetherflow.sqlite");
+        create_cluster_test_db(&custom_in_root);
+        let in_root_inv = parse_cli_args([
+            "--json",
+            "--root",
+            &root_str,
+            "cluster",
+            "diagnose",
+            "media-2",
+            "--db",
+            custom_in_root.to_str().unwrap(),
+        ])
+        .unwrap();
+        let in_root_env = execute_invocation(&in_root_inv, &transport);
 
-        for (k, prev) in saved {
-            if let Some(val) = prev {
-                std::env::set_var(k, val);
-            }
-        }
+        // 4c. Out-of-root absolute --db is rejected with CliExitCode::UsageOrValidation
+        let outside_db = tmp.path().join("outside/escape.sqlite");
+        create_cluster_test_db(&outside_db);
+        let outside_inv = parse_cli_args([
+            "--json",
+            "--root",
+            &root_str,
+            "cluster",
+            "diagnose",
+            "media-2",
+            "--db",
+            outside_db.to_str().unwrap(),
+        ])
+        .unwrap();
+        let outside_env = execute_invocation(&outside_inv, &transport);
+
+        // 4d. Parent traversal --db escape is rejected with CliExitCode::UsageOrValidation
+        let traversal_path = format!("{root_str}/var/../../outside/escape.sqlite");
+        let traversal_inv = parse_cli_args([
+            "--json",
+            "--root",
+            &root_str,
+            "cluster",
+            "diagnose",
+            "media-2",
+            "--db",
+            &traversal_path,
+        ])
+        .unwrap();
+        let traversal_env = execute_invocation(&traversal_inv, &transport);
+
+        // 4e. Relative --db when --root is active is rejected by validate_path_within_isolated_root
+        let relative_inv = parse_cli_args([
+            "--json",
+            "--root",
+            &root_str,
+            "cluster",
+            "diagnose",
+            "media-2",
+            "--db",
+            "var/lib/aetherflow/aetherflow.sqlite",
+        ])
+        .unwrap();
+        let relative_env = execute_invocation(&relative_inv, &transport);
+
+        // 4f. Out-of-root AF_DB_PATH env override under --root is rejected
+        std::env::set_var("AF_DB_PATH", outside_db.to_str().unwrap());
+        let env_outside_env = execute_invocation(&root_inv, &transport);
+
+        // 4g. Valid in-root AF_DB_PATH env override under --root succeeds
+        std::env::set_var("AF_DB_PATH", custom_in_root.to_str().unwrap());
+        let env_in_root_env = execute_invocation(&root_inv, &transport);
+
+        // 4h. Conflicting AF_DB_PATH vs DB_PATH fails with CliExitCode::UsageOrValidation
+        std::env::set_var("DB_PATH", db_path.to_str().unwrap());
+        let env_conflict_env = execute_invocation(&root_inv, &transport);
+
+        // 4i. Env file inside isolated root (<root>/etc/aetherflow/aetherflow.env) is respected
+        std::env::remove_var("AF_DB_PATH");
+        std::env::remove_var("DB_PATH");
+        let env_file = root_dir.join("etc/aetherflow/aetherflow.env");
+        fs::create_dir_all(env_file.parent().unwrap()).unwrap();
+        fs::write(
+            &env_file,
+            format!("AF_DB_PATH={}\n", custom_in_root.display()),
+        )
+        .unwrap();
+        let env_file_res = execute_invocation(&root_inv, &transport);
+        let _ = fs::remove_file(&env_file);
+        drop(restore);
 
         assert_eq!(root_env.status, "ok", "{}", root_env.message);
         assert_eq!(
             root_env.data.as_ref().unwrap()["db_path"],
             db_path.to_string_lossy().as_ref()
         );
-        assert_eq!(fallback_env.status, "ok", "{}", fallback_env.message);
+        assert_eq!(in_root_env.status, "ok", "{}", in_root_env.message);
         assert_eq!(
-            fallback_env.data.as_ref().unwrap()["db_path"],
-            fallback_db.to_string_lossy().as_ref()
+            in_root_env.data.as_ref().unwrap()["db_path"],
+            custom_in_root.to_string_lossy().as_ref()
+        );
+        assert_eq!(outside_env.status, "error");
+        assert_eq!(
+            outside_env.exit_code,
+            CliExitCode::UsageOrValidation.as_i32()
+        );
+        assert!(outside_env.message.contains("outside active isolated root"));
+
+        assert_eq!(traversal_env.status, "error");
+        assert_eq!(
+            traversal_env.exit_code,
+            CliExitCode::UsageOrValidation.as_i32()
+        );
+        assert!(traversal_env.message.contains("parent traversal"));
+
+        assert_eq!(relative_env.status, "error");
+        assert_eq!(
+            relative_env.exit_code,
+            CliExitCode::UsageOrValidation.as_i32()
+        );
+        assert!(relative_env.message.contains("must be an absolute path"));
+
+        assert_eq!(env_outside_env.status, "error");
+        assert_eq!(
+            env_outside_env.exit_code,
+            CliExitCode::UsageOrValidation.as_i32()
+        );
+        assert!(env_outside_env
+            .message
+            .contains("outside active isolated root"));
+
+        assert_eq!(env_in_root_env.status, "ok", "{}", env_in_root_env.message);
+        assert_eq!(
+            env_in_root_env.data.as_ref().unwrap()["db_path"],
+            custom_in_root.to_string_lossy().as_ref()
+        );
+
+        assert_eq!(env_conflict_env.status, "error");
+        assert_eq!(
+            env_conflict_env.exit_code,
+            CliExitCode::UsageOrValidation.as_i32()
+        );
+        assert!(env_conflict_env
+            .message
+            .contains("conflicting database path overrides"));
+
+        assert_eq!(env_file_res.status, "ok", "{}", env_file_res.message);
+        assert_eq!(
+            env_file_res.data.as_ref().unwrap()["db_path"],
+            custom_in_root.to_string_lossy().as_ref()
         );
 
         // 5. Read-only guarantee: DB file bytes unchanged and works with 0o444 permissions
-        let before = fs::read(&fallback_db).unwrap();
+        let before = fs::read(&db_path).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&fallback_db, fs::Permissions::from_mode(0o444)).unwrap();
+            fs::set_permissions(&db_path, fs::Permissions::from_mode(0o444)).unwrap();
         }
         let ro_inv = parse_cli_args([
             "--json",
@@ -921,17 +1266,17 @@ fn cluster_diagnose_handles_missing_link_missing_db_dry_run_readonly_and_root() 
             "diagnose",
             "media-2",
             "--db",
-            fallback_db.to_str().unwrap(),
+            db_path.to_str().unwrap(),
         ])
         .unwrap();
         let ro_env = execute_invocation(&ro_inv, &transport);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&fallback_db, fs::Permissions::from_mode(0o644)).unwrap();
+            fs::set_permissions(&db_path, fs::Permissions::from_mode(0o644)).unwrap();
         }
         assert_eq!(ro_env.status, "ok", "{}", ro_env.message);
-        assert_eq!(fs::read(&fallback_db).unwrap(), before);
+        assert_eq!(fs::read(&db_path).unwrap(), before);
     }
 }
 
@@ -941,7 +1286,7 @@ fn cluster_unix_socket_client_dispatches_peer_network_and_peer_storage_requests(
     use std::io::{Read, Write};
 
     let tmp = TempTestDir::new("cluster-uds");
-    let db_path = tmp.path().join("aetherflow.db");
+    let db_path = tmp.path().join("aetherflow.sqlite");
     create_cluster_test_db(&db_path);
 
     let dir_name = format!("c-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
@@ -952,7 +1297,8 @@ fn cluster_unix_socket_client_dispatches_peer_network_and_peer_storage_requests(
     let socket = sock_root.path().join("runner.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
 
-    // Expect 5 HTTP requests: 1x /v1/peer-network + 2 mounts * (mount_status + probe_sentinel).
+    // Expect EXACTLY 5 HTTP requests: 1x /v1/peer-network + 2 media mounts * (mount_status + probe_sentinel).
+    // The transcode (/var/cache/jellyfin) and transcode_bind (/srv/media/movies) rows must NEVER hit /v1/peer-storage.
     let server = std::thread::spawn(move || {
         for _ in 0..5 {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1024,6 +1370,10 @@ fn cluster_unix_socket_client_dispatches_peer_network_and_peer_storage_requests(
                 .unwrap()
             } else if first_line.contains("/v1/peer-storage") {
                 let mount_path = body_json["mount_path"].as_str().unwrap().to_string();
+                assert!(
+                    mount_path.starts_with("/mnt/af-peers/media-2/"),
+                    "non-media mount path must not be sent to /v1/peer-storage: {mount_path}"
+                );
                 match body_json["action"].as_str().unwrap() {
                     "mount_status" => serde_json::to_string(&PeerMountStateResponse {
                         unit_name: "mnt-test.mount".to_string(),
@@ -1085,8 +1435,17 @@ fn cluster_unix_socket_client_dispatches_peer_network_and_peer_storage_requests(
     assert_eq!(data["wireguard"]["rx_bytes"], 4096);
     assert_eq!(data["wireguard"]["tx_bytes"], 8192);
     let mounts = data["mounts"].as_array().unwrap();
-    assert_eq!(mounts.len(), 2);
-    assert!(mounts
-        .iter()
-        .all(|m| m["live_active"] == true && m["probe"]["ok"] == true));
+    assert_eq!(mounts.len(), 4);
+    for m in mounts {
+        if m["purpose"] == "media" {
+            assert_eq!(m["live_active"], true);
+            assert_eq!(m["probe"]["ok"], true);
+            assert!(m.get("probe_skipped_reason").is_none());
+        } else {
+            assert!(m["live_active"].is_null());
+            assert!(m.get("live_error").is_none());
+            assert!(m["probe"].is_null());
+            assert!(m["probe_skipped_reason"].as_str().is_some());
+        }
+    }
 }

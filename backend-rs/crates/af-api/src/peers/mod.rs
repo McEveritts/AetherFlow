@@ -209,6 +209,7 @@ impl ProductionPublicPairingTransport {
 pub(crate) fn build_strict_public_pairing_client() -> reqwest::Client {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(20))
         .build()
@@ -225,8 +226,49 @@ impl PublicPairingTransport for ProductionPublicPairingTransport {
             if url.scheme() != "https" {
                 return Err("Public pairing endpoint must use https://".to_string());
             }
-            let resp = self
-                .client
+            let allow_private = pairing::allow_private_pairing_urls();
+            pairing::validate_pairing_url_host(&url, allow_private)?;
+
+            let client = match url.host() {
+                Some(url::Host::Domain(domain)) => {
+                    let port = url.port_or_known_default().unwrap_or(443);
+                    let resolved_iter = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        tokio::net::lookup_host((domain, port)),
+                    )
+                    .await
+                    .map_err(|_| "Timed out resolving public pairing target hostname".to_string())?
+                    .map_err(|err| {
+                        redact_sensitive_text(&format!(
+                            "Failed resolving public pairing target hostname: {err}"
+                        ))
+                    })?;
+                    let resolved_addrs: Vec<SocketAddr> = resolved_iter.collect();
+                    if resolved_addrs.is_empty() {
+                        return Err(
+                            "Public pairing target hostname did not resolve to any IP address"
+                                .to_string(),
+                        );
+                    }
+                    for addr in &resolved_addrs {
+                        pairing::validate_pairing_ip(addr.ip(), allow_private)?;
+                    }
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .no_proxy()
+                        .connect_timeout(Duration::from_secs(10))
+                        .timeout(Duration::from_secs(20))
+                        .resolve_to_addrs(domain, &resolved_addrs)
+                        .build()
+                        .map_err(|err| redact_sensitive_text(&err.to_string()))?
+                }
+                Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => self.client.clone(),
+                None => {
+                    return Err("Public pairing endpoint is missing a hostname".to_string());
+                }
+            };
+
+            let resp = client
                 .post(url)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body)
@@ -520,14 +562,38 @@ pub(crate) enum TunnelTransportBinding {
 pub(crate) struct TunnelClientBindingKey {
     pub(crate) local_ip: IpAddr,
     pub(crate) interface: Option<String>,
+    pub(crate) interface_index: Option<u32>,
 }
 
 pub(crate) struct ListenerHandle {
     pub(crate) tunnel_ip: IpAddr,
     pub(crate) interface: Option<String>,
+    pub(crate) interface_index: Option<u32>,
     pub(crate) bound_addr: SocketAddr,
     pub(crate) shutdown_tx: watch::Sender<bool>,
     pub(crate) task: tokio::task::JoinHandle<()>,
+}
+
+/// Resolves the kernel interface index (`ifindex`) for `interface` via `if_nametoindex(3)`.
+/// Returns `None` when `interface` is `None` or the interface does not exist (`0`).
+pub(crate) fn resolve_interface_index(interface: Option<&str>) -> Option<u32> {
+    let name = interface?;
+    #[cfg(unix)]
+    {
+        let c_name = std::ffi::CString::new(name).ok()?;
+        // SAFETY: `c_name` is a valid NUL-terminated C string.
+        let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+        if idx == 0 {
+            None
+        } else {
+            Some(idx)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = name;
+        None
+    }
 }
 
 /// Errors produced when executing an outbound HTTP request over the WireGuard tunnel.
@@ -615,6 +681,8 @@ pub struct PeerRuntime {
     pub(crate) management_router_override: Option<Router>,
     #[cfg(test)]
     pub(crate) allowed_fs_roots_override: Option<Vec<std::path::PathBuf>>,
+    #[cfg(test)]
+    pub(crate) interface_index_override: RwLock<Option<u32>>,
 }
 
 static GLOBAL_RUNTIME: Lazy<Arc<PeerRuntime>> = Lazy::new(|| Arc::new(PeerRuntime::production()));
@@ -670,7 +738,39 @@ impl PeerRuntime {
             management_router_override: None,
             #[cfg(test)]
             allowed_fs_roots_override: None,
+            #[cfg(test)]
+            interface_index_override: RwLock::new(None),
         }
+    }
+
+    pub(crate) fn current_interface_index(&self, interface: Option<&str>) -> Option<u32> {
+        #[cfg(test)]
+        {
+            if let Ok(guard) = self.interface_index_override.read() {
+                if let Some(idx) = *guard {
+                    return Some(idx);
+                }
+            }
+        }
+        resolve_interface_index(interface)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_interface_index_override(&self, idx: Option<u32>) {
+        if let Ok(mut guard) = self.interface_index_override.write() {
+            *guard = idx;
+        }
+    }
+
+    pub(crate) fn clear_tunnel_clients(&self) {
+        self.tunnel_clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.proxy_tunnel_clients
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     pub(crate) fn now(&self) -> DateTime<Utc> {
@@ -910,6 +1010,7 @@ impl PeerRuntime {
                 Ok(TunnelClientBindingKey {
                     local_ip,
                     interface: Some(iface.clone()),
+                    interface_index: self.current_interface_index(Some(iface.as_str())),
                 })
             }
             #[cfg(test)]
@@ -941,6 +1042,7 @@ impl PeerRuntime {
                 Ok(TunnelClientBindingKey {
                     local_ip,
                     interface: None,
+                    interface_index: self.current_interface_index(None),
                 })
             }
         }
@@ -1010,6 +1112,11 @@ impl PeerRuntime {
             .tunnel_clients
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        map.retain(|k, _| {
+            !(k.local_ip == binding.local_ip
+                && k.interface == binding.interface
+                && k.interface_index != binding.interface_index)
+        });
         if let Some(existing) = map.get(binding) {
             return Ok(existing.clone());
         }
@@ -1055,6 +1162,11 @@ impl PeerRuntime {
             .proxy_tunnel_clients
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        map.retain(|k, _| {
+            !(k.local_ip == binding.local_ip
+                && k.interface == binding.interface
+                && k.interface_index != binding.interface_index)
+        });
         if let Some(existing) = map.get(binding) {
             return Ok(existing.clone());
         }
@@ -1234,16 +1346,31 @@ impl PeerRuntime {
             .validate_tunnel_binding_for(tunnel_ip, None)
             .map_err(|err| PeerError::internal(&server, "peer_listener_start", err.message()))?;
 
+        let current_ifindex = self.current_interface_index(binding.interface.as_deref());
         let mut guard = self.listener_state.lock().await;
         if let Some(existing) = guard.as_ref() {
             if existing.tunnel_ip == binding.local_ip
                 && existing.interface == binding.interface
+                && existing.interface_index == current_ifindex
                 && !existing.task.is_finished()
             {
                 return Ok(Some(existing.bound_addr));
             }
         }
         if let Some(stale) = guard.take() {
+            if stale.interface_index != current_ifindex
+                || stale.tunnel_ip != binding.local_ip
+                || stale.interface != binding.interface
+            {
+                tracing::info!(
+                    old_ip = %stale.tunnel_ip,
+                    new_ip = %binding.local_ip,
+                    old_ifindex = ?stale.interface_index,
+                    new_ifindex = ?current_ifindex,
+                    "Peer tunnel interface binding changed; recycling tunnel listener and outbound HTTP client pools"
+                );
+            }
+            self.clear_tunnel_clients();
             let _ = stale.shutdown_tx.send(true);
             let _ = tokio::time::timeout(Duration::from_secs(2), stale.task).await;
         }
@@ -1471,36 +1598,62 @@ pub async fn shutdown() {
     PeerRuntime::global().shutdown_all().await;
 }
 
+pub(crate) fn parse_peer_env_value_or_warn<T, F>(
+    var_name: &str,
+    raw: Option<&str>,
+    default_val: T,
+    validate: F,
+) -> T
+where
+    T: std::str::FromStr + std::fmt::Display + Copy,
+    F: FnOnce(T) -> bool,
+{
+    let Some(raw) = raw else {
+        return default_val;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return default_val;
+    }
+    match trimmed.parse::<T>() {
+        Ok(parsed) if validate(parsed) => parsed,
+        _ => {
+            tracing::warn!(
+                var = var_name,
+                raw = trimmed,
+                default = %default_val,
+                "Invalid peer environment variable; falling back to default"
+            );
+            default_val
+        }
+    }
+}
+
+fn parse_peer_env_or_warn<T, F>(var_name: &str, default_val: T, validate: F) -> T
+where
+    T: std::str::FromStr + std::fmt::Display + Copy,
+    F: FnOnce(T) -> bool,
+{
+    let raw = env::var(var_name).ok();
+    parse_peer_env_value_or_warn(var_name, raw.as_deref(), default_val, validate)
+}
+
 pub(crate) fn configured_peer_listen_port() -> u16 {
-    env::var("AF_PEER_LISTEN_PORT")
-        .ok()
-        .and_then(|v| v.trim().parse::<u16>().ok())
-        .filter(|&p| p > 0)
-        .unwrap_or(DEFAULT_PEER_LISTEN_PORT)
+    parse_peer_env_or_warn("AF_PEER_LISTEN_PORT", DEFAULT_PEER_LISTEN_PORT, |p| p > 0)
 }
 
 pub(crate) fn configured_peer_max_conn() -> usize {
-    env::var("AF_PEER_MAX_CONN")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_PEER_MAX_CONN)
+    parse_peer_env_or_warn("AF_PEER_MAX_CONN", DEFAULT_PEER_MAX_CONN, |n| n > 0)
 }
 
 pub(crate) fn configured_peer_max_ws() -> usize {
-    env::var("AF_PEER_MAX_WS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_PEER_MAX_WS)
+    parse_peer_env_or_warn("AF_PEER_MAX_WS", DEFAULT_PEER_MAX_WS, |n| n > 0)
 }
 
 pub(crate) fn configured_peer_rtt_warn_ms() -> f64 {
-    env::var("AF_PEER_RTT_WARN_MS")
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|&v| v.is_finite() && v > 0.0)
-        .unwrap_or(DEFAULT_PEER_RTT_WARN_MS)
+    parse_peer_env_or_warn("AF_PEER_RTT_WARN_MS", DEFAULT_PEER_RTT_WARN_MS, |v| {
+        v.is_finite() && v > 0.0
+    })
 }
 
 pub(crate) fn resolve_local_server_name() -> String {

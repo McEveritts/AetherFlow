@@ -206,6 +206,7 @@ fn build_runtime_with_mgmt_override(
         bind_listener_in_handlers: bind_listener,
         management_router_override: mgmt_router,
         allowed_fs_roots_override: None,
+        interface_index_override: RwLock::new(None),
     })
 }
 
@@ -1795,6 +1796,317 @@ async fn stale_revoke_and_stale_cleanup_retry_never_delete_newer_grant_generatio
         .credential(PeerCredentialSlot::LinkToken, &b_link_id)
         .unwrap();
     assert_grant_token_works_for_services_read(&rt_b, ip_a, &b_link_tok, &token_3).await;
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn health_loop_reconciles_offline_grant_revoke_without_breaking_legacy_peers() {
+    let (ip_a, ip_b) = next_loopback_pair();
+    let clock = FakeClock::new(1_805_100_000);
+    let pk_a = fixture_wg_pubkey(246);
+    let pk_b = fixture_wg_pubkey(247);
+
+    let runner_a = FakePeerRunner::new(pk_a.clone(), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(pk_b.clone(), ip_b, 51821);
+    let db_a = open_isolated_peer_db();
+    let db_b = open_isolated_peer_db();
+
+    let rt_b = build_runtime_with_mgmt_override(
+        "reconcile-b",
+        Arc::clone(&db_b),
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        true,
+        None,
+    );
+    let rt_a = build_runtime_with_mgmt_override(
+        "reconcile-a",
+        Arc::clone(&db_a),
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 77], 45300)),
+        }),
+        &clock,
+        true,
+        Some(stub_services_management_router()),
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "reconcile-b").await;
+
+    // Issue active grant A -> B so B holds an active `peer_received_grants` row + GrantToken.
+    let mut read_services = af_db::peers::AccessMap::none();
+    read_services.services = af_db::peers::AccessLevel::Read;
+    let (st, _) = call_admin(
+        &rt_a,
+        Method::PUT,
+        &format!("/{a_link_id}/grant"),
+        Some(json!({ "access": read_services })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let (rec_before, _) = read_committed_received_grant_token(&rt_b, &b_link_id)
+        .await
+        .unwrap()
+        .expect("B holds active received grant before offline revoke");
+    let held_slot = committed_received_grant_credential_id(&rec_before).to_string();
+    assert!(runner_b
+        .credential(PeerCredentialSlot::GrantToken, &held_slot)
+        .is_some());
+
+    // Replace A's listener endpoint with a controllable stub `/health` server so we can verify
+    // all 3 `inbound_grant_generation` wire cases: absent (legacy peer), integer, and explicit null.
+    rt_a.shutdown_all().await;
+    let mode = Arc::new(AtomicUsize::new(0)); // 0 = absent, 1 = Some(1), 2 = null
+    let mode_handler = Arc::clone(&mode);
+    let stub_listener = tokio::net::TcpListener::bind(SocketAddr::new(ip_a, 0))
+        .await
+        .unwrap();
+    let stub_port = stub_listener.local_addr().unwrap().port();
+    rt_b.tunnel_port_overrides
+        .write()
+        .unwrap()
+        .insert(ip_a, stub_port);
+    let (stub_tx, mut stub_rx) = tokio::sync::watch::channel(false);
+    let stub_app = axum::Router::new().route(
+        "/health",
+        axum::routing::get(move || {
+            let m = mode_handler.load(Ordering::SeqCst);
+            async move {
+                match m {
+                    0 => Json(json!({
+                        "status": "ok",
+                        "version": "4.0.0-legacy",
+                        "peer_protocol": 1,
+                        "capabilities": ["links", "grants"]
+                    })),
+                    1 => Json(json!({
+                        "status": "ok",
+                        "version": "4.0.0",
+                        "peer_protocol": 1,
+                        "capabilities": ["links", "grants", "storage", "transcode"],
+                        "inbound_grant_generation": 1
+                    })),
+                    _ => Json(json!({
+                        "status": "ok",
+                        "version": "4.0.0",
+                        "peer_protocol": 1,
+                        "capabilities": ["links", "grants", "storage", "transcode"],
+                        "inbound_grant_generation": null
+                    })),
+                }
+            }
+        }),
+    );
+    let stub_task = tokio::spawn(async move {
+        let _ = axum::serve(stub_listener, stub_app)
+            .with_graceful_shutdown(async move {
+                while !*stub_rx.borrow() {
+                    if stub_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
+    });
+
+    runner_b.set_peer_live_state(&pk_a, true, Some(5));
+    let mut rev_rx = rt_b.subscribe_revocations();
+
+    // Case 1: Absent key (legacy peer) -> must NOT delete B's received grant.
+    mode.store(0, Ordering::SeqCst);
+    run_health_tick(&rt_b).await;
+    assert!(
+        db_peers::get_active_peer_received_grant_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .is_some(),
+        "legacy peer omitting inbound_grant_generation must not clear received grant"
+    );
+
+    // Case 2: Active generation integer -> must NOT delete B's received grant.
+    mode.store(1, Ordering::SeqCst);
+    run_health_tick(&rt_b).await;
+    assert!(
+        db_peers::get_active_peer_received_grant_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .is_some(),
+        "matching active inbound_grant_generation must keep received grant"
+    );
+
+    // Case 3: Explicit `null` (A revoked grant while B was offline) -> B reconciles immediately!
+    mode.store(2, Ordering::SeqCst);
+    run_health_tick(&rt_b).await;
+
+    assert!(
+        db_peers::get_peer_received_grant(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .is_none(),
+        "explicit inbound_grant_generation: null must clear stale peer_received_grants row"
+    );
+    assert!(
+        runner_b
+            .credential(PeerCredentialSlot::GrantToken, &held_slot)
+            .is_none(),
+        "stale GrantToken must be cleaned up via peer_received_grant_cleanups"
+    );
+    assert!(
+        db_peers::list_peer_received_grant_cleanups_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .is_empty(),
+        "cleanup queue must drain after runner deletion succeeds"
+    );
+    let event = rev_rx
+        .try_recv()
+        .expect("expected RevocationEvent::GrantRevoked");
+    assert!(matches!(
+        event,
+        RevocationEvent::GrantRevoked { ref link_id, .. } if link_id == &b_link_id
+    ));
+    assert!(
+        audit_entries_text(&db_b).contains("peer_grant_revoked_by_remote"),
+        "expected audit log for health-reconciled grant revocation"
+    );
+
+    let _ = stub_tx.send(true);
+    let _ = stub_task.await;
+    rt_b.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn worker_transcode_mounts_are_torn_down_on_transcoding_grant_downgrade_and_revoke() {
+    let (ip_a, ip_b) = next_loopback_pair();
+    let clock = FakeClock::new(1_805_200_000);
+    let pk_a = fixture_wg_pubkey(248);
+    let pk_b = fixture_wg_pubkey(249);
+
+    let runner_a = FakePeerRunner::new(pk_a.clone(), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(pk_b.clone(), ip_b, 51821);
+    let db_a = open_isolated_peer_db();
+    let db_b = open_isolated_peer_db();
+
+    let rt_b = build_runtime_with_mgmt_override(
+        "tc-worker-b",
+        Arc::clone(&db_b),
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+        true,
+        None,
+    );
+    let rt_a = build_runtime_with_mgmt_override(
+        "tc-ctrl-a",
+        Arc::clone(&db_a),
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 78], 45301)),
+        }),
+        &clock,
+        true,
+        None,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "tc-worker-b").await;
+
+    // 1. Establish `transcoding: write` grant from A -> B, and seed worker transcode mounts on
+    //    both sides so both issuer-side (`PUT`/`DELETE /grant`) and receiver-side
+    //    (`/peer/v1/grant-token` downgrade + `/peer/v1/grant-revoke`) teardown paths are verified.
+    let mut write_tc = af_db::peers::AccessMap::none();
+    write_tc.transcoding = af_db::peers::AccessLevel::Write;
+    let (st, _) = call_admin(
+        &rt_a,
+        Method::PUT,
+        &format!("/{a_link_id}/grant"),
+        Some(json!({ "access": write_tc })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    let seed_worker_mounts = |db: &Arc<StdMutex<Connection>>, link_id: &str, suffix: &str| {
+        let conn = db.lock().unwrap();
+        db_peers::insert_peer_mount(
+            &conn,
+            &db_peers::PeerMount {
+                id: format!("mnt-tc-bind-{suffix}"),
+                link_id: link_id.to_string(),
+                remote_path: "/var/lib/jellyfin/transcodes".to_string(),
+                mount_path: format!("/var/lib/jellyfin/transcodes-{suffix}"),
+                unit_name: format!("var-lib-jellyfin-transcodes-{suffix}.mount"),
+                writable: true,
+                purpose: "transcode_bind".to_string(),
+                state: "mounted".to_string(),
+                last_error: None,
+            },
+        )
+        .unwrap();
+        db_peers::insert_peer_mount(
+            &conn,
+            &db_peers::PeerMount {
+                id: format!("mnt-tc-cache-{suffix}"),
+                link_id: link_id.to_string(),
+                remote_path: "/var/lib/jellyfin/transcodes".to_string(),
+                mount_path: format!("/mnt/af-peers/tc-{suffix}/transcodes"),
+                unit_name: format!("mnt-af\\x2dpeers-tc\\x2d{suffix}-transcodes.mount"),
+                writable: true,
+                purpose: "transcode".to_string(),
+                state: "mounted".to_string(),
+                last_error: None,
+            },
+        )
+        .unwrap();
+    };
+    seed_worker_mounts(&db_a, &a_link_id, "dg-a");
+    seed_worker_mounts(&db_b, &b_link_id, "dg-b");
+
+    // 2. Downgrade `transcoding` from `write` -> `read`: both issuer and receiver tear down
+    //    their worker transcode mounts cleanly without failing the grant update.
+    let mut read_tc = af_db::peers::AccessMap::none();
+    read_tc.transcoding = af_db::peers::AccessLevel::Read;
+    let (st_dg, _) = call_admin(
+        &rt_a,
+        Method::PUT,
+        &format!("/{a_link_id}/grant"),
+        Some(json!({ "access": read_tc })),
+    )
+    .await;
+    assert_eq!(st_dg, StatusCode::OK);
+    assert!(
+        db_peers::list_peer_mounts_for_link(&db_a.lock().unwrap(), &a_link_id)
+            .unwrap()
+            .is_empty(),
+        "issuer must tear down worker transcode mounts on transcoding:write downgrade"
+    );
+    assert!(
+        db_peers::list_peer_mounts_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .is_empty(),
+        "receiver must tear down worker transcode mounts on transcoding:write downgrade"
+    );
+
+    // 3. Re-seed mounts and revoke the grant completely: both issuer (`DELETE /grant`) and
+    //    receiver (`/peer/v1/grant-revoke`) tear down worker transcode mounts.
+    seed_worker_mounts(&db_a, &a_link_id, "rev-a");
+    seed_worker_mounts(&db_b, &b_link_id, "rev-b");
+    let (st_rev, _) = call_admin(&rt_a, Method::DELETE, &format!("/{a_link_id}/grant"), None).await;
+    assert_eq!(st_rev, StatusCode::OK);
+    assert!(
+        db_peers::list_peer_mounts_for_link(&db_a.lock().unwrap(), &a_link_id)
+            .unwrap()
+            .is_empty(),
+        "issuer must tear down worker transcode mounts on DELETE /grant"
+    );
+    assert!(
+        db_peers::list_peer_mounts_for_link(&db_b.lock().unwrap(), &b_link_id)
+            .unwrap()
+            .is_empty(),
+        "receiver must tear down worker transcode mounts on /peer/v1/grant-revoke"
+    );
 
     rt_a.shutdown_all().await;
     rt_b.shutdown_all().await;

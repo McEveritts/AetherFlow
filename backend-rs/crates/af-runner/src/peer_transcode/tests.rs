@@ -268,8 +268,18 @@ fn serde_shapes_match_p9_contract() {
                 from: "/srv/media/movies".to_string(),
                 to: "/mnt/af-peers/media-2/movies".to_string(),
                 writable: false,
+                calling_link_segment: None,
             },
             r#"{"action":"bind_media","from":"/srv/media/movies","to":"/mnt/af-peers/media-2/movies","writable":false}"#,
+        ),
+        (
+            PeerTranscodeRequest::BindMedia {
+                from: "/srv/media/movies".to_string(),
+                to: "/mnt/af-peers/media-2/movies".to_string(),
+                writable: true,
+                calling_link_segment: Some("media-2".to_string()),
+            },
+            r#"{"action":"bind_media","from":"/srv/media/movies","to":"/mnt/af-peers/media-2/movies","writable":true,"calling_link_segment":"media-2"}"#,
         ),
         (
             PeerTranscodeRequest::RemoveBindMedia {
@@ -287,7 +297,7 @@ fn serde_shapes_match_p9_contract() {
         assert_eq!(decoded, req);
     }
 
-    // BindMedia defaults writable to false and denies unknown fields.
+    // BindMedia defaults writable to false, calling_link_segment to None, and denies unknown fields.
     let bind_default: PeerTranscodeRequest =
         serde_json::from_str(r#"{"action":"bind_media","from":"/srv/a","to":"/mnt/af-peers/l/e"}"#)
             .expect("default writable");
@@ -297,6 +307,7 @@ fn serde_shapes_match_p9_contract() {
             from: "/srv/a".to_string(),
             to: "/mnt/af-peers/l/e".to_string(),
             writable: false,
+            calling_link_segment: None,
         }
     );
     assert!(serde_json::from_str::<PeerTranscodeRequest>(
@@ -1472,6 +1483,7 @@ async fn execute_dispatches_all_request_variants_and_client_timeouts() {
             from: "/srv/media/movies".to_string(),
             to: "/mnt/af-peers/media-2/movies".to_string(),
             writable: false,
+            calling_link_segment: Some("media-2".to_string()),
         },
         PeerTranscodeRequest::RemoveBindMedia {
             to: "/mnt/af-peers/media-2/movies".to_string(),
@@ -1514,19 +1526,28 @@ async fn schedule_api_restart_and_api_restart_required_flag_work_and_cleanup_par
     let second = mgr.ensure_dispatcher_dir().await.unwrap();
     assert!(!second.api_restart_required);
 
-    // 2. ScheduleApiRestart invokes argv-only systemd-run targeting aetherflow-api.service.
+    // 2. ScheduleApiRestart probes is-active and invokes argv-only systemd-run with fixed unit name.
     fx.runner.clear_calls();
     let restart_rep = mgr.schedule_api_restart().await.unwrap();
     assert!(restart_rep.changed);
     let calls = fx.runner.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].program, "systemd-run");
-    assert!(calls[0]
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].program, "systemctl");
+    assert_eq!(
+        calls[0].args,
+        vec![
+            "is-active".to_string(),
+            format!("{TRANSCODE_API_RESTART_UNIT}.timer"),
+            format!("{TRANSCODE_API_RESTART_UNIT}.service"),
+        ]
+    );
+    assert_eq!(calls[1].program, "systemd-run");
+    assert!(calls[1]
         .args
         .iter()
-        .any(|a| a.starts_with("--unit=aetherflow-api-transcode-restart-")));
+        .any(|a| a == &format!("--unit={TRANSCODE_API_RESTART_UNIT}")));
     assert_eq!(
-        &calls[0].args[calls[0].args.len() - 4..],
+        &calls[1].args[calls[1].args.len() - 4..],
         &["--", "systemctl", "restart", API_SERVICE_UNIT]
     );
 
@@ -1617,4 +1638,1060 @@ fn sandbox_policy_exempts_transcode_worker_unit() {
         apply_sandbox_dropins_in_dir(&root, &[unit.to_string()], "native", &[]).unwrap();
     }
     assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn mount_and_remove_transcode_dirs_enforce_worker_jellyfin_allowlist() {
+    let fx = TranscodeFixture::new();
+    let mgr = fx.manager();
+
+    // Paths outside the worker Jellyfin cache/transcode allowlist MUST be rejected on both
+    // MountTranscodeDirs and RemoveTranscodeMounts.
+    for bad_path in [
+        "/home/admin/.ssh",
+        "/var/spool/cron/crontabs",
+        "/srv/media/movies",
+        "/var/cache/jellyfin-evil",
+        "/var/cache/jellyfin/nested/deep",
+        "/tmp/transcodes",
+        "/var/cache/jellyfin/../etc",
+    ] {
+        let mount_err = mgr
+            .mount_transcode_dirs("seedbox-1", "10.231.0.1", &[bad_path.to_string()])
+            .await
+            .unwrap_err();
+        assert!(
+            mount_err.is_invalid_input(),
+            "expected InvalidInput on mount for '{bad_path}', got {mount_err:?}"
+        );
+        let remove_err = mgr
+            .remove_transcode_mounts("seedbox-1", &[bad_path.to_string()])
+            .await
+            .unwrap_err();
+        assert!(
+            remove_err.is_invalid_input(),
+            "expected InvalidInput on remove for '{bad_path}', got {remove_err:?}"
+        );
+    }
+
+    // Symlink inside `/var/cache/jellyfin/` MUST be rejected.
+    let cache_dir = fx.create_dir("/var/cache/jellyfin");
+    let escape_target = fx.create_dir("/srv/escape");
+    symlink(&escape_target, cache_dir.join("sym-sub")).unwrap();
+    let sym_err = mgr
+        .mount_transcode_dirs(
+            "seedbox-1",
+            "10.231.0.1",
+            &["/var/cache/jellyfin/sym-sub".to_string()],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        sym_err.is_invalid_input(),
+        "expected InvalidInput for symlinked mountpoint, got {sym_err:?}"
+    );
+
+    // Direct subdirectory inside `/var/cache/jellyfin/` and custom inspected `<TranscodingTempPath>`
+    // are allowed on both mount and remove.
+    fx.write_encoding_xml(
+        r#"<?xml version="1.0"?><EncodingOptions><TranscodingTempPath>/srv/jf/custom-tc</TranscodingTempPath></EncodingOptions>"#,
+    );
+    let allowed = vec![
+        "/var/cache/jellyfin".to_string(),
+        "/var/cache/jellyfin/transcodes".to_string(),
+        "/var/cache/jellyfin/af-tmp".to_string(),
+        "/var/cache/jellyfin/direct-sub".to_string(),
+        "/srv/jf/custom-tc".to_string(),
+    ];
+    let mounted = mgr
+        .mount_transcode_dirs("seedbox-1", "10.231.0.1", &allowed)
+        .await
+        .unwrap();
+    assert!(mounted.changed);
+    assert_eq!(mounted.paths.len(), 5);
+
+    // Sibling path outside inspected `<TranscodingTempPath>` is still rejected.
+    assert!(mgr
+        .mount_transcode_dirs(
+            "seedbox-1",
+            "10.231.0.1",
+            &["/srv/jf/other-dir".to_string()],
+        )
+        .await
+        .unwrap_err()
+        .is_invalid_input());
+
+    let removed = mgr
+        .remove_transcode_mounts("seedbox-1", &allowed)
+        .await
+        .unwrap();
+    assert!(removed.changed);
+    assert_eq!(removed.paths.len(), 5);
+}
+
+#[tokio::test]
+async fn bind_media_enforces_bidirectional_allowlists_link_confinement_empty_dir_and_conditional_bindsto(
+) {
+    let _env_guard = ENV_TEST_MUTEX.lock().await;
+    let prev_allowed = env::var_os("AF_ALLOWED_FS_ROOTS");
+    env::remove_var("AF_ALLOWED_FS_ROOTS");
+
+    let fx = TranscodeFixture::new();
+    let mgr = fx.manager();
+    fx.create_dir("/home/alice/movies");
+    fx.create_dir("/home/admin/.ssh");
+    fx.create_dir("/var/spool/cron");
+    fx.create_dir("/mnt/af-peers/link1/movies/sub/4k");
+    fx.create_dir("/mnt/af-peers/link10/movies");
+
+    // 1. Worker-holds-media (`to` under `/mnt/af-peers/`):
+    //    calling_link_segment enforces exact component equality (rejects link1 vs link10 prefix overlap).
+    assert!(mgr
+        .bind_media_with_link(
+            "/home/alice/movies",
+            "/mnt/af-peers/link10/movies",
+            false,
+            Some("link1"),
+        )
+        .await
+        .unwrap_err()
+        .is_invalid_input());
+    assert!(mgr
+        .bind_media_with_link(
+            "/home/alice/movies",
+            "/mnt/af-peers/link2/movies",
+            false,
+            Some("link1"),
+        )
+        .await
+        .unwrap_err()
+        .is_invalid_input());
+    // Rejects `from` inside `/mnt/af-peers/` or sensitive system/user dirs.
+    for bad_from in [
+        "/mnt/af-peers/link10/movies",
+        "/etc/ssh",
+        "/root/media",
+        "/var/spool/cron",
+        "/home/admin/.ssh",
+        "/run/aetherflow",
+        "/usr/local",
+    ] {
+        assert!(
+            mgr.bind_media_with_link(bad_from, "/mnt/af-peers/link1/movies", false, Some("link1"),)
+                .await
+                .unwrap_err()
+                .is_invalid_input(),
+            "expected InvalidInput for bad_from={bad_from}"
+        );
+    }
+
+    // Valid worker-holds-media bind MUST NOT include BindsTo= or extra After= for local `from`.
+    let worker_rep = mgr
+        .bind_media_with_link(
+            "/home/alice/movies",
+            "/mnt/af-peers/link1/local-movies",
+            false,
+            Some("link1"),
+        )
+        .await
+        .unwrap();
+    assert!(worker_rep.changed);
+    let worker_unit_text = fs::read_to_string(
+        fx.root
+            .join("etc/systemd/system")
+            .join(&worker_rep.units[0]),
+    )
+    .unwrap();
+    assert!(!worker_unit_text.contains("BindsTo="));
+    assert_eq!(worker_unit_text.matches("After=").count(), 1);
+    assert!(worker_unit_text.contains("After=local-fs.target\n"));
+
+    // 2. Neither under `/mnt/af-peers/` is rejected.
+    assert!(mgr
+        .bind_media_with_link("/home/alice/movies", "/srv/media/local-only", false, None)
+        .await
+        .unwrap_err()
+        .is_invalid_input());
+
+    // 3. Controller-holds-media (`from` under `/mnt/af-peers/`, `to` outside `/mnt/af-peers/`):
+    //    calling_link_segment enforces exact component equality on `from`.
+    assert!(mgr
+        .bind_media_with_link(
+            "/mnt/af-peers/link10/movies",
+            "/srv/media/movies",
+            false,
+            Some("link1"),
+        )
+        .await
+        .unwrap_err()
+        .is_invalid_input());
+
+    // Enforce explicit allowlist on `to` (rejects `/etc`, `/home/*/.ssh`, `/home/*`, `/root`,
+    // `/var/spool`, `/tmp`, `/usr`, `/var/lib/aetherflow`, exact `/var/lib/jellyfin`, prefix overlap).
+    for bad_to in [
+        "/etc/movies",
+        "/home/admin/.ssh",
+        "/home/admin/movies",
+        "/root/movies",
+        "/var/spool/cron",
+        "/tmp/movies",
+        "/usr/share/movies",
+        "/var/lib/aetherflow/data",
+        "/var/lib/jellyfin",
+        "/var/lib/jellyfin-evil/movies",
+    ] {
+        assert!(
+            mgr.bind_media_with_link(
+                "/mnt/af-peers/link1/movies/sub/4k",
+                bad_to,
+                false,
+                Some("link1"),
+            )
+            .await
+            .unwrap_err()
+            .is_invalid_input(),
+            "expected InvalidInput for disallowed controller bind target {bad_to}"
+        );
+    }
+
+    // Valid controller-holds-media bind adds conditional BindsTo=/After= on the backing 4-component
+    // NFS mount unit (`/mnt/af-peers/link1/movies` -> `mnt-af\x2dpeers-link1-movies.mount`).
+    let ctrl_rep = mgr
+        .bind_media_with_link(
+            "/mnt/af-peers/link1/movies/sub/4k",
+            "/srv/media/movies_4k",
+            false,
+            Some("link1"),
+        )
+        .await
+        .unwrap();
+    assert!(ctrl_rep.changed);
+    let ctrl_unit_text =
+        fs::read_to_string(fx.root.join("etc/systemd/system").join(&ctrl_rep.units[0])).unwrap();
+    let expected_backing = r"mnt-af\x2dpeers-link1-movies.mount";
+    assert!(
+        ctrl_unit_text.contains(&format!("BindsTo={expected_backing}\n")),
+        "missing conditional BindsTo in:\n{ctrl_unit_text}"
+    );
+    assert!(
+        ctrl_unit_text.contains(&format!("After={expected_backing}\n")),
+        "missing conditional After in:\n{ctrl_unit_text}"
+    );
+
+    // Other default media roots are accepted.
+    for good_to in [
+        "/mnt/storage/movies",
+        "/media/tv",
+        "/downloads/done",
+        "/data/library",
+        "/var/lib/jellyfin/media",
+    ] {
+        let rep = mgr
+            .bind_media_with_link(
+                "/mnt/af-peers/link1/movies/sub/4k",
+                good_to,
+                false,
+                Some("link1"),
+            )
+            .await
+            .unwrap();
+        assert!(rep.changed);
+    }
+
+    // 4. Empty-directory check on `to`:
+    //    Non-empty existing local directory MUST be rejected with Conflict.
+    let occupied = fx.create_dir("/srv/media/occupied");
+    fs::write(occupied.join("existing-movie.mkv"), b"data").unwrap();
+    let conflict_err = mgr
+        .bind_media_with_link(
+            "/mnt/af-peers/link1/movies/sub/4k",
+            "/srv/media/occupied",
+            false,
+            Some("link1"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        conflict_err.is_conflict(),
+        "expected Conflict for non-empty target dir, got {conflict_err:?}"
+    );
+
+    // Non-empty directory with an INACTIVE managed bind unit MUST still be rejected with Conflict.
+    let srv_movies_dir = fx.create_dir("/srv/media/movies_4k");
+    fs::write(srv_movies_dir.join("file.mkv"), b"data").unwrap();
+    fx.runner.push_rule(|prog, args| {
+        assert_eq!(prog, "systemctl");
+        assert_eq!(args[0], "is-active");
+        Ok(CommandOutput {
+            exit_code: 3,
+            stdout: "inactive\n".to_string(),
+            stderr: String::new(),
+        })
+    });
+    assert!(mgr
+        .bind_media_with_link(
+            "/mnt/af-peers/link1/movies/sub/4k",
+            "/srv/media/movies_4k",
+            true,
+            Some("link1"),
+        )
+        .await
+        .unwrap_err()
+        .is_conflict());
+
+    // Non-empty directory that IS an active managed bind mountpoint for the same unit IS allowed!
+    fx.runner.push_rule(|prog, args| {
+        assert_eq!(prog, "systemctl");
+        assert_eq!(args[0], "is-active");
+        Ok(CommandOutput {
+            exit_code: 0,
+            stdout: "active\n".to_string(),
+            stderr: String::new(),
+        })
+    });
+    let rebind_rep = mgr
+        .bind_media_with_link(
+            "/mnt/af-peers/link1/movies/sub/4k",
+            "/srv/media/movies_4k",
+            true,
+            Some("link1"),
+        )
+        .await
+        .unwrap();
+    assert!(rebind_rep.changed);
+
+    // 5. Configured `extra_bind_media_roots` and `AF_ALLOWED_FS_ROOTS` allow custom roots while
+    //    still rejecting restricted system paths.
+    let mut custom_cfg = fx.config();
+    custom_cfg
+        .extra_bind_media_roots
+        .push(PathBuf::from("/custom-fixture-media"));
+    let custom_mgr = PeerTranscodeManager::new(custom_cfg, fx.runner.clone()).unwrap();
+    assert!(custom_mgr
+        .bind_media_with_link(
+            "/mnt/af-peers/link1/movies/sub/4k",
+            "/custom-fixture-media/anime",
+            false,
+            Some("link1"),
+        )
+        .await
+        .is_ok());
+
+    env::set_var("AF_ALLOWED_FS_ROOTS", "/tank/library,/etc");
+    assert!(mgr
+        .bind_media_with_link(
+            "/mnt/af-peers/link1/movies/sub/4k",
+            "/tank/library/films",
+            false,
+            Some("link1"),
+        )
+        .await
+        .is_ok());
+    // `/etc` stays rejected even if present in AF_ALLOWED_FS_ROOTS!
+    assert!(mgr
+        .bind_media_with_link(
+            "/mnt/af-peers/link1/movies/sub/4k",
+            "/etc/films",
+            false,
+            Some("link1"),
+        )
+        .await
+        .unwrap_err()
+        .is_invalid_input());
+
+    if let Some(prev) = prev_allowed {
+        env::set_var("AF_ALLOWED_FS_ROOTS", prev);
+    } else {
+        env::remove_var("AF_ALLOWED_FS_ROOTS");
+    }
+}
+
+#[tokio::test]
+async fn mount_transcode_dirs_atomic_rollback_removes_units_and_empty_newly_created_dirs() {
+    let fx = TranscodeFixture::new();
+    let mgr = fx.manager();
+
+    // `/var/cache/jellyfin` pre-exists; child mount dirs do NOT exist beforehand.
+    let preexisting_parent = fx.create_dir("/var/cache/jellyfin");
+    let created_tmp = fx.root.join("var/cache/jellyfin/af-tmp");
+    let created_tc = fx.root.join("var/cache/jellyfin/transcodes");
+    assert!(!created_tmp.exists());
+    assert!(!created_tc.exists());
+
+    let created_tmp_c = created_tmp.clone();
+    let created_tc_c = created_tc.clone();
+
+    // 1: daemon-reload OK
+    fx.runner.push_rule(|prog, args| {
+        assert_eq!(prog, "systemctl");
+        assert_eq!(args, &["daemon-reload".to_string()]);
+        Ok(CommandOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    });
+    // 2: start var-cache-jellyfin.mount OK
+    fx.runner.push_rule(|prog, args| {
+        assert_eq!(prog, "systemctl");
+        assert_eq!(
+            args,
+            &["start".to_string(), "var-cache-jellyfin.mount".to_string()]
+        );
+        Ok(CommandOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    });
+    // 3: start var-cache-jellyfin-af\x2dtmp.mount creates empty dir and succeeds
+    fx.runner.push_rule(move |prog, args| {
+        assert_eq!(prog, "systemctl");
+        assert_eq!(
+            args,
+            &[
+                "start".to_string(),
+                r"var-cache-jellyfin-af\x2dtmp.mount".to_string()
+            ]
+        );
+        fs::create_dir_all(&created_tmp_c).unwrap();
+        Ok(CommandOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    });
+    // 4: start var-cache-jellyfin-transcodes.mount creates empty dir then fails
+    fx.runner.push_rule(move |prog, args| {
+        assert_eq!(prog, "systemctl");
+        assert_eq!(
+            args,
+            &[
+                "start".to_string(),
+                "var-cache-jellyfin-transcodes.mount".to_string()
+            ]
+        );
+        fs::create_dir_all(&created_tc_c).unwrap();
+        Ok(CommandOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "simulated nfs mount timeout".to_string(),
+        })
+    });
+
+    let err = mgr
+        .mount_transcode_dirs(
+            "seedbox-1",
+            "10.231.0.1",
+            &[
+                "/var/cache/jellyfin".to_string(),
+                "/var/cache/jellyfin/af-tmp".to_string(),
+                "/var/cache/jellyfin/transcodes".to_string(),
+            ],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PeerTranscodeError::Runtime(_)));
+
+    // Verify already-started units were stopped in reverse order and daemon-reload ran.
+    let calls = fx.runner.calls();
+    let stop_pos_tmp = calls
+        .iter()
+        .position(|c| {
+            c.program == "systemctl"
+                && c.args
+                    == vec![
+                        "stop".to_string(),
+                        r"var-cache-jellyfin-af\x2dtmp.mount".to_string(),
+                    ]
+        })
+        .expect("af-tmp unit stopped");
+    let stop_pos_parent = calls
+        .iter()
+        .position(|c| {
+            c.program == "systemctl"
+                && c.args == vec!["stop".to_string(), "var-cache-jellyfin.mount".to_string()]
+        })
+        .expect("parent unit stopped");
+    assert!(stop_pos_tmp < stop_pos_parent);
+    assert_eq!(
+        calls.last().unwrap(),
+        &RecordedCall {
+            program: "systemctl".to_string(),
+            args: vec!["daemon-reload".to_string()],
+        }
+    );
+
+    // All newly created units and worker paths drop-in are cleaned up.
+    assert!(!fx
+        .root
+        .join("etc/systemd/system/var-cache-jellyfin.mount")
+        .exists());
+    assert!(!fx
+        .root
+        .join(r"etc/systemd/system/var-cache-jellyfin-af\x2dtmp.mount")
+        .exists());
+    assert!(!fx
+        .root
+        .join("etc/systemd/system/var-cache-jellyfin-transcodes.mount")
+        .exists());
+    assert!(!fx
+        .root
+        .join("etc/systemd/system/af-transcode-worker.service.d/30-aetherflow-transcode-paths.conf")
+        .exists());
+
+    // Newly created empty mount dirs were removed, while pre-existing parent dir was preserved!
+    assert!(!created_tmp.exists());
+    assert!(!created_tc.exists());
+    assert!(preexisting_parent.exists());
+}
+
+#[tokio::test]
+async fn export_transcode_dirs_prunes_same_st_dev_children_and_preserves_distinct_fs_children() {
+    // 1. Unit-test pure pruning semantics including prefix overlap and nested filesystem crossings.
+    let pruned_same = prune_same_device_descendant_exports(&[
+        ("/var/cache/jellyfin".to_string(), 100),
+        ("/var/cache/jellyfin/af-tmp".to_string(), 100),
+        ("/var/cache/jellyfin/transcodes".to_string(), 100),
+        ("/var/cache/jellyfin2".to_string(), 100),
+    ]);
+    assert_eq!(
+        pruned_same,
+        vec![
+            "/var/cache/jellyfin".to_string(),
+            "/var/cache/jellyfin2".to_string(),
+        ]
+    );
+
+    let pruned_mixed = prune_same_device_descendant_exports(&[
+        ("/var/cache/jellyfin".to_string(), 100),
+        ("/var/cache/jellyfin/af-tmp".to_string(), 100),
+        ("/var/cache/jellyfin/transcodes".to_string(), 200),
+        ("/var/cache/jellyfin/transcodes/inner".to_string(), 100),
+    ]);
+    assert_eq!(
+        pruned_mixed,
+        vec![
+            "/var/cache/jellyfin".to_string(),
+            "/var/cache/jellyfin/transcodes".to_string(),
+            "/var/cache/jellyfin/transcodes/inner".to_string(),
+        ]
+    );
+
+    // 2. End-to-end ExportTranscodeDirs on same real filesystem prunes strict descendants.
+    let fx = TranscodeFixture::new();
+    fx.create_dir("/var/cache/jellyfin");
+    fx.create_dir("/var/cache/jellyfin/af-tmp");
+    fx.create_dir("/var/cache/jellyfin/transcodes");
+    let mgr = fx.manager();
+
+    let all_three = vec![
+        "/var/cache/jellyfin".to_string(),
+        "/var/cache/jellyfin/af-tmp".to_string(),
+        "/var/cache/jellyfin/transcodes".to_string(),
+    ];
+    let rep_same = mgr
+        .export_transcode_dirs("media-2", "10.231.0.2", 108, 114, &all_three)
+        .await
+        .unwrap();
+    assert!(rep_same.changed);
+    let export_file = fx
+        .root
+        .join("etc/exports.d/aetherflow-peer-media-2-transcode.exports");
+    let text_same = fs::read_to_string(&export_file).unwrap();
+    assert!(text_same.contains("/var/cache/jellyfin 10.231.0.2("));
+    assert!(!text_same.contains("/var/cache/jellyfin/af-tmp"));
+    assert!(!text_same.contains("/var/cache/jellyfin/transcodes"));
+
+    // 3. End-to-end ExportTranscodeDirs with differing st_dev keeps separate-FS child export!
+    let mut dev_map = HashMap::new();
+    dev_map.insert("/var/cache/jellyfin".to_string(), 1001);
+    dev_map.insert("/var/cache/jellyfin/af-tmp".to_string(), 1001);
+    dev_map.insert("/var/cache/jellyfin/transcodes".to_string(), 2002);
+    let mgr_diff = fx.manager().with_st_dev_overrides(dev_map);
+
+    let rep_diff = mgr_diff
+        .export_transcode_dirs("media-2", "10.231.0.2", 108, 114, &all_three)
+        .await
+        .unwrap();
+    assert!(rep_diff.changed);
+    let text_diff = fs::read_to_string(&export_file).unwrap();
+    assert!(text_diff.contains("/var/cache/jellyfin 10.231.0.2("));
+    assert!(text_diff.contains("/var/cache/jellyfin/transcodes 10.231.0.2("));
+    assert!(!text_diff.contains("/var/cache/jellyfin/af-tmp"));
+}
+
+#[tokio::test]
+async fn transcode_env_file_is_0640_idempotent_secret_free_and_wired_to_all_four_units() {
+    let fx = TranscodeFixture::new();
+    let mgr = fx.manager();
+
+    // 1. Direct idempotent helper creates `0640` file documenting both env vars and never overwrites.
+    assert!(mgr.ensure_transcode_env_file().unwrap());
+    let env_path = fx.root.join("etc/aetherflow/transcode.env");
+    assert_eq!(
+        fs::metadata(&env_path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    let initial = fs::read_to_string(&env_path).unwrap();
+    assert!(initial.contains("AF_TRANSCODE_REAL_FFMPEG"));
+    assert!(initial.contains("AF_TRANSCODE_WORKER_MAX_JOBS"));
+    assert!(!initial.contains("AES_MASTER_KEY"));
+    assert!(!initial.contains("JWT_SECRET"));
+
+    // Simulate operator edit; subsequent calls MUST NOT overwrite.
+    let operator_content =
+        "# Operator tuned\nAF_TRANSCODE_WORKER_MAX_JOBS=12\nAF_TRANSCODE_REAL_FFMPEG=/opt/ffmpeg/bin/ffmpeg\n";
+    fs::write(&env_path, operator_content).unwrap();
+    assert!(!mgr.ensure_transcode_env_file().unwrap());
+
+    // 2. Provision all 4 consuming units and verify EnvironmentFile=-/etc/aetherflow/transcode.env.
+    mgr.ensure_dispatcher_dir().await.unwrap();
+    mgr.enable_jellyfin().await.unwrap();
+    mgr.install_worker_unit().await.unwrap();
+
+    // Operator edits remain completely untouched.
+    assert_eq!(fs::read_to_string(&env_path).unwrap(), operator_content);
+
+    let worker_unit = fs::read_to_string(
+        fx.root
+            .join("etc/systemd/system/af-transcode-worker.service"),
+    )
+    .unwrap();
+    let jellyfin_dropin = fs::read_to_string(
+        fx.root
+            .join("etc/systemd/system/jellyfin.service.d/20-aetherflow-transcode.conf"),
+    )
+    .unwrap();
+    let api_dropin = fs::read_to_string(
+        fx.root
+            .join("etc/systemd/system/aetherflow-api.service.d/20-aetherflow-transcode.conf"),
+    )
+    .unwrap();
+    let runner_dropin_path = fx
+        .root
+        .join("etc/systemd/system/aetherflow-runner.service.d/20-aetherflow-transcode.conf");
+    let runner_dropin = fs::read_to_string(&runner_dropin_path).unwrap();
+
+    let expected_env_line = format!("EnvironmentFile=-{DEFAULT_TRANSCODE_ENV_FILE}\n");
+    for (label, content) in [
+        ("worker", &worker_unit),
+        ("jellyfin", &jellyfin_dropin),
+        ("api", &api_dropin),
+        ("runner", &runner_dropin),
+    ] {
+        assert!(
+            content.starts_with(PEER_MANAGED_HEADER),
+            "{label} missing managed header"
+        );
+        assert!(
+            content.contains(&expected_env_line),
+            "{label} missing EnvironmentFile=-/etc/aetherflow/transcode.env:\n{content}"
+        );
+    }
+    // NEVER load `/etc/aetherflow/aetherflow.env` into worker or jellyfin!
+    assert!(!worker_unit.contains("aetherflow.env"));
+    assert!(!jellyfin_dropin.contains("aetherflow.env"));
+
+    // 3. Because dispatcher IS installed, RemoveWorkerUnit keeps the runner drop-in.
+    mgr.remove_worker_unit().await.unwrap();
+    assert!(runner_dropin_path.exists());
+
+    // 4. On a worker-only host (no dispatcher installed), RemoveWorkerUnit cleans up runner drop-in!
+    let fx_worker_only = TranscodeFixture::new();
+    let mgr_worker_only = fx_worker_only.manager();
+    mgr_worker_only.install_worker_unit().await.unwrap();
+    let worker_only_runner_dropin = fx_worker_only
+        .root
+        .join("etc/systemd/system/aetherflow-runner.service.d/20-aetherflow-transcode.conf");
+    assert!(worker_only_runner_dropin.exists());
+    mgr_worker_only.remove_worker_unit().await.unwrap();
+    assert!(!worker_only_runner_dropin.exists());
+}
+
+#[tokio::test]
+async fn worker_unit_hardening_and_dynamic_readwritepaths_dropin_lifecycle() {
+    let fx = TranscodeFixture::new();
+    let mgr = fx.manager();
+    fx.create_dir("/srv/media/movies");
+
+    mgr.install_worker_unit().await.unwrap();
+    let unit_text = fs::read_to_string(
+        fx.root
+            .join("etc/systemd/system/af-transcode-worker.service"),
+    )
+    .unwrap();
+    for expected in [
+        "PrivateNetwork=yes\n",
+        "RestrictAddressFamilies=AF_UNIX\n",
+        "ProtectSystem=strict\n",
+        "ProtectHome=read-only\n",
+        "WorkingDirectory=/run/aetherflow-transcode-worker\n",
+        "DevicePolicy=closed\n",
+        "DeviceAllow=char-drm rw\n",
+        "DeviceAllow=/dev/dri rw\n",
+        "DeviceAllow=char-nvidia-frontend rw\n",
+        "DeviceAllow=char-nvidia-uvm rw\n",
+        "DeviceAllow=char-nvidia-caps rw\n",
+        "DeviceAllow=/dev/nvidiactl rw\n",
+        "DeviceAllow=/dev/nvidia-modeset rw\n",
+        "DeviceAllow=/dev/nvidia-uvm rw\n",
+        "DeviceAllow=/dev/nvidia-uvm-tools rw\n",
+        "ReadWritePaths=-/run/aetherflow-transcode-worker -/var/cache/jellyfin\n",
+        "EnvironmentFile=-/etc/aetherflow/transcode.env\n",
+    ] {
+        assert!(
+            unit_text.contains(expected),
+            "missing hardening directive {expected:?} in:\n{unit_text}"
+        );
+    }
+    assert!(!unit_text.contains("aetherflow.env"));
+
+    let paths_dropin = fx.root.join(
+        "etc/systemd/system/af-transcode-worker.service.d/30-aetherflow-transcode-paths.conf",
+    );
+    assert!(!paths_dropin.exists());
+
+    // MountTranscodeDirs writes 30-aetherflow-transcode-paths.conf and restarts active worker.
+    fx.runner.clear_calls();
+    mgr.mount_transcode_dirs(
+        "seedbox-1",
+        "10.231.0.1",
+        &["/var/cache/jellyfin/transcodes".to_string()],
+    )
+    .await
+    .unwrap();
+    let text1 = fs::read_to_string(&paths_dropin).unwrap();
+    assert!(text1.starts_with(PEER_MANAGED_HEADER));
+    assert!(text1.contains("ReadWritePaths=-/var/cache/jellyfin/transcodes\n"));
+    assert!(fx.runner.calls().iter().any(|c| c.program == "systemctl"
+        && c.args
+            == vec![
+                "restart".to_string(),
+                PEER_TRANSCODE_WORKER_UNIT.to_string()
+            ]));
+
+    // Read-only BindMedia does NOT add to ReadWritePaths= and does NOT restart worker.
+    fx.runner.clear_calls();
+    mgr.bind_media_with_link(
+        "/srv/media/movies",
+        "/mnt/af-peers/seedbox-1/movies",
+        false,
+        Some("seedbox-1"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read_to_string(&paths_dropin).unwrap(), text1);
+    assert!(!fx.runner.calls().iter().any(|c| c.program == "systemctl"
+        && c.args
+            == vec![
+                "restart".to_string(),
+                PEER_TRANSCODE_WORKER_UNIT.to_string()
+            ]));
+
+    // Writable BindMedia adds path to 30-aetherflow-transcode-paths.conf and restarts active worker.
+    fx.runner.clear_calls();
+    mgr.bind_media_with_link(
+        "/srv/media/movies",
+        "/mnt/af-peers/seedbox-1/movies",
+        true,
+        Some("seedbox-1"),
+    )
+    .await
+    .unwrap();
+    let text2 = fs::read_to_string(&paths_dropin).unwrap();
+    assert!(text2.contains(
+        "ReadWritePaths=-/mnt/af-peers/seedbox-1/movies -/var/cache/jellyfin/transcodes\n"
+    ));
+    assert!(fx.runner.calls().iter().any(|c| c.program == "systemctl"
+        && c.args
+            == vec![
+                "restart".to_string(),
+                PEER_TRANSCODE_WORKER_UNIT.to_string()
+            ]));
+
+    // RemoveBindMedia removes bind path from drop-in and restarts active worker.
+    fx.runner.clear_calls();
+    mgr.remove_bind_media("/mnt/af-peers/seedbox-1/movies")
+        .await
+        .unwrap();
+    assert_eq!(fs::read_to_string(&paths_dropin).unwrap(), text1);
+    assert!(fx.runner.calls().iter().any(|c| c.program == "systemctl"
+        && c.args
+            == vec![
+                "restart".to_string(),
+                PEER_TRANSCODE_WORKER_UNIT.to_string()
+            ]));
+
+    // When worker is inactive, RemoveTranscodeMounts removes drop-in WITHOUT restarting worker.
+    fx.runner.set_worker_active(false);
+    fx.runner.clear_calls();
+    mgr.remove_transcode_mounts("seedbox-1", &["/var/cache/jellyfin/transcodes".to_string()])
+        .await
+        .unwrap();
+    assert!(!paths_dropin.exists());
+    assert!(!fx.runner.calls().iter().any(|c| c.program == "systemctl"
+        && c.args
+            == vec![
+                "restart".to_string(),
+                PEER_TRANSCODE_WORKER_UNIT.to_string()
+            ]));
+
+    // RemoveWorkerUnit deletes 30-aetherflow-transcode-paths.conf if still present.
+    mgr.mount_transcode_dirs(
+        "seedbox-1",
+        "10.231.0.1",
+        &["/var/cache/jellyfin/transcodes".to_string()],
+    )
+    .await
+    .unwrap();
+    assert!(paths_dropin.exists());
+    mgr.remove_worker_unit().await.unwrap();
+    assert!(!paths_dropin.exists());
+}
+
+#[tokio::test]
+async fn slow_systemctl_mount_start_does_not_starve_concurrent_inspect_cleanup_or_sibling_mount() {
+    struct BlockingMountRunner {
+        blocked_unit: String,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl CommandRunner for BlockingMountRunner {
+        fn run_command<'a>(
+            &'a self,
+            program: &'a str,
+            args: &'a [String],
+            _env_vars: &'a [(String, String)],
+            _cancel: &'a CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            let is_target = program == "systemctl"
+                && args.len() == 2
+                && args[0] == "start"
+                && args[1] == self.blocked_unit;
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                if is_target {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                Ok(CommandOutput {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            })
+        }
+    }
+
+    let fx = TranscodeFixture::new();
+    let tc_dir = fx.create_dir("/var/cache/jellyfin/transcodes");
+    fx.create_dir("/srv/media/movies");
+    let parity_name = ".af-parity-0123456789abcdef0123456789abcdef.ts";
+    fs::write(tc_dir.join(parity_name), b"mpegts").unwrap();
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let runner = Arc::new(BlockingMountRunner {
+        blocked_unit: "var-cache-jellyfin-transcodes.mount".to_string(),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+
+    let mut cfg = fx.config();
+    cfg.lock_timeout = Duration::from_millis(120);
+    let mgr = Arc::new(PeerTranscodeManager::new(cfg, runner).unwrap());
+
+    let mgr_mount = Arc::clone(&mgr);
+    let mount_task = tokio::spawn(async move {
+        mgr_mount
+            .mount_transcode_dirs(
+                "seedbox-1",
+                "10.231.0.1",
+                &["/var/cache/jellyfin/transcodes".to_string()],
+            )
+            .await
+    });
+
+    // Wait until `systemctl start var-cache-jellyfin-transcodes.mount` is actively blocked.
+    entered.notified().await;
+
+    // Concurrent InspectJellyfinPaths, CleanupParityFile, and sibling BindMedia MUST succeed
+    // without hitting 503 Busy while the slow mount start is in flight!
+    let inspected = mgr.inspect_jellyfin_paths().await.unwrap();
+    assert_eq!(
+        inspected.transcoding_temp_path,
+        DEFAULT_JELLYFIN_TRANSCODE_DIR
+    );
+
+    let parity = mgr
+        .cleanup_parity_file("/var/cache/jellyfin/transcodes", parity_name)
+        .await
+        .unwrap();
+    assert!(parity.removed);
+
+    let sibling = mgr
+        .bind_media_with_link(
+            "/srv/media/movies",
+            "/mnt/af-peers/seedbox-1/movies",
+            false,
+            Some("seedbox-1"),
+        )
+        .await
+        .unwrap();
+    assert!(sibling.changed);
+
+    // Concurrent operation targeting the SAME unit MUST serialize and return Busy on timeout.
+    let same_unit_err = mgr
+        .remove_transcode_mounts("seedbox-1", &["/var/cache/jellyfin/transcodes".to_string()])
+        .await
+        .unwrap_err();
+    assert!(
+        same_unit_err.is_busy(),
+        "expected Busy for conflicting operation on the same mount unit, got {same_unit_err:?}"
+    );
+
+    release.notify_one();
+    let mount_rep = mount_task.await.unwrap().unwrap();
+    assert!(mount_rep.changed);
+}
+
+#[tokio::test]
+async fn schedule_api_restart_debounces_deterministically_and_resets_failed_unit() {
+    let fx = TranscodeFixture::new();
+    let mgr = Arc::new(fx.manager());
+
+    // 1. When already active/queued, ScheduleApiRestart coalesces without invoking systemd-run.
+    fx.runner.clear_calls();
+    fx.runner.push_rule(|prog, args| {
+        assert_eq!(prog, "systemctl");
+        assert_eq!(
+            args,
+            &[
+                "is-active".to_string(),
+                format!("{TRANSCODE_API_RESTART_UNIT}.timer"),
+                format!("{TRANSCODE_API_RESTART_UNIT}.service"),
+            ]
+        );
+        Ok(CommandOutput {
+            exit_code: 3,
+            stdout: "active\ninactive\n".to_string(),
+            stderr: String::new(),
+        })
+    });
+    let debounced = mgr.schedule_api_restart().await.unwrap();
+    assert!(!debounced.changed);
+    assert_eq!(debounced.units[1], TRANSCODE_API_RESTART_UNIT);
+    assert_eq!(fx.runner.calls().len(), 1);
+
+    // 2. When previously failed, ScheduleApiRestart resets failed state before scheduling.
+    fx.runner.clear_calls();
+    fx.runner.push_rule(|prog, args| {
+        assert_eq!(prog, "systemctl");
+        assert_eq!(args[0], "is-active");
+        Ok(CommandOutput {
+            exit_code: 3,
+            stdout: "inactive\nfailed\n".to_string(),
+            stderr: String::new(),
+        })
+    });
+    fx.runner.push_rule(|prog, args| {
+        assert_eq!(prog, "systemctl");
+        assert_eq!(
+            args,
+            &[
+                "reset-failed".to_string(),
+                format!("{TRANSCODE_API_RESTART_UNIT}.timer"),
+                format!("{TRANSCODE_API_RESTART_UNIT}.service"),
+            ]
+        );
+        Ok(CommandOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    });
+    let scheduled = mgr.schedule_api_restart().await.unwrap();
+    assert!(scheduled.changed);
+    let calls = fx.runner.calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[1].args[0], "reset-failed");
+    assert_eq!(calls[2].program, "systemd-run");
+    assert!(calls[2]
+        .args
+        .contains(&format!("--unit={TRANSCODE_API_RESTART_UNIT}")));
+
+    // 3. Concurrent calls coalesce cleanly under the deterministic unit lock into 1 systemd-run.
+    struct StatefulRestartRunner {
+        active: Mutex<bool>,
+        systemd_run_count: Mutex<usize>,
+    }
+
+    impl CommandRunner for StatefulRestartRunner {
+        fn run_command<'a>(
+            &'a self,
+            program: &'a str,
+            args: &'a [String],
+            _env_vars: &'a [(String, String)],
+            _cancel: &'a CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            let program = program.to_string();
+            let args = args.to_vec();
+            Box::pin(async move {
+                if program == "systemctl" && args.first().map(String::as_str) == Some("is-active") {
+                    let is_active = *self.active.lock().unwrap();
+                    return Ok(CommandOutput {
+                        exit_code: if is_active { 0 } else { 3 },
+                        stdout: if is_active {
+                            "active\ninactive\n".to_string()
+                        } else {
+                            "inactive\ninactive\n".to_string()
+                        },
+                        stderr: String::new(),
+                    });
+                }
+                if program == "systemd-run" {
+                    // Brief yield to maximize overlap between concurrent callers.
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    *self.active.lock().unwrap() = true;
+                    *self.systemd_run_count.lock().unwrap() += 1;
+                }
+                Ok(CommandOutput {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            })
+        }
+    }
+
+    let stateful_runner = Arc::new(StatefulRestartRunner {
+        active: Mutex::new(false),
+        systemd_run_count: Mutex::new(0),
+    });
+    let mgr_conc =
+        Arc::new(PeerTranscodeManager::new(fx.config(), stateful_runner.clone()).unwrap());
+    let (r1, r2, r3) = tokio::join!(
+        mgr_conc.schedule_api_restart(),
+        mgr_conc.schedule_api_restart(),
+        mgr_conc.schedule_api_restart()
+    );
+    let results = [r1.unwrap(), r2.unwrap(), r3.unwrap()];
+    assert_eq!(results.iter().filter(|r| r.changed).count(), 1);
+    assert_eq!(results.iter().filter(|r| !r.changed).count(), 2);
+    assert_eq!(*stateful_runner.systemd_run_count.lock().unwrap(), 1);
 }

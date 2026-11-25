@@ -2,7 +2,15 @@ openapi: 3.1.0
 info:
   title: AetherFlow API
   version: 4.0.0
-  description: Authoritative OpenAPI 3.1 specification for the AetherFlow v4.0.0 pure-Rust control plane (`af-api`). Endpoints under `/api/v1` are namespaced by trust tier (`/public`, `/auth`, and `/admin`). Authenticated state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) require a valid `X-CSRF-Token` header.
+  description: >-
+    Authoritative OpenAPI 3.1 specification for the AetherFlow v4.0.0 pure-Rust control plane
+    (`af-api`). Endpoints under `/api/v1` are namespaced by trust tier (`/public`, `/auth`, and
+    `/admin`). Authenticated state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) require a
+    valid `X-CSRF-Token` header. Top-level unauthenticated `GET /health` always returns
+    `"transcode": null` (see `PublicHealthResponse`), whereas link-authenticated tunnel
+    `GET /health` on `:9443` returns cached `transcode` capabilities (including `worker_max_jobs`)
+    and `inbound_grant_generation` for offline `grant-revoke` reconciliation (see
+    `TunnelHealthResponse`).
 servers:
   - url: /api/v1
     description: Canonical v1
@@ -38,7 +46,7 @@ tags:
   - name: AI
     description: FlowAI assistant, metadata scanning, bandwidth optimization, and predictive scaling
   - name: Cluster
-    description: Peer pairing, WireGuard link health, grants, and remote management
+    description: Peer pairing, WireGuard link health, grants, media storage, distributed Jellyfin transcoding, and remote management
   - name: Network
     description: WireGuard, Tailscale, and host network diagnostics
   - name: Operator
@@ -799,7 +807,11 @@ paths:
   /admin/peers/transcode:
     servers:
       - url: /api/v1
-    description: Configure distributed Jellyfin transcoding dispatcher, local worker service, per-worker weights and job caps, and 2-second path-parity checks.
+    description: >-
+      Configure distributed Jellyfin transcoding dispatcher, local worker service, per-worker
+      weights and job caps, automatic export/mount teardown when disabling controller
+      (`enabled: false`) or worker (`worker_service_enabled: false`) roles, and path-parity checks
+      (1-second software `libx264` clip with 5-second timeout).
     get:
       tags:
         - Cluster
@@ -2775,6 +2787,11 @@ paths:
       tags:
         - Marketplace
       summary: Execute packages update
+      description: >-
+        Performs an in-place package update with automatic rollback protection. When called through
+        the peer proxy (`/api/v1/peers/{id}/admin/packages/{pkg}/update`), `updates: write`
+        authorizes `jellyfin` and `jellyfin-ffmpeg*` updates only; `marketplace: write` is required
+        for all other packages (otherwise returns `403 PEER_SCOPE_DENIED`).
       responses:
         '200':
           description: OK
@@ -6917,6 +6934,129 @@ components:
           type: string
         action:
           type: string
+        request_id:
+          type: string
+          description: Optional correlation ID propagated from/to X-Request-ID, surfaced in Cluster UI error banners and aetherflow-runner logs.
+    PublicHealthResponse:
+      type: object
+      description: >-
+        Payload returned by top-level unauthenticated `GET /health`. Always sets `transcode` to
+        `null` to avoid disclosing host GPU or FFmpeg inventory to unauthenticated callers.
+      required:
+        - status
+        - uptime
+        - version
+        - database
+        - db_latency_ms
+        - peer_protocol
+        - capabilities
+        - transcode
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - degraded
+        uptime:
+          type: string
+        version:
+          type: string
+        database:
+          type: string
+          enum:
+            - ok
+            - unreachable
+        db_latency_ms:
+          type: integer
+        peer_protocol:
+          type: integer
+        capabilities:
+          type: array
+          items:
+            type: string
+        transcode:
+          type: 'null'
+          description: Always `null` on public unauthenticated `GET /health`.
+    PeerTranscodeCapabilities:
+      type: object
+      description: >-
+        Cached local FFmpeg and GPU capability metadata returned by link-authenticated tunnel
+        `GET /health` on `:9443`.
+      required:
+        - ffmpeg_path
+        - encoders
+        - render_nodes
+      properties:
+        ffmpeg_path:
+          type: string
+        ffmpeg_version:
+          type:
+            - string
+            - 'null'
+        ffmpeg_version_line:
+          type:
+            - string
+            - 'null'
+        package_name:
+          type:
+            - string
+            - 'null'
+        package_version:
+          type:
+            - string
+            - 'null'
+        encoders:
+          type: array
+          items:
+            type: string
+        render_nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/PeerTranscodeRenderNode'
+        primary_render_node:
+          type:
+            - string
+            - 'null'
+        worker_max_jobs:
+          type: integer
+          minimum: 1
+          maximum: 64
+          description: Worker-side concurrency cap from `AF_TRANSCODE_WORKER_MAX_JOBS` (default 8, clamped 1..=64) used by controllers to auto-clamp `effective_max_jobs`.
+    TunnelHealthResponse:
+      type: object
+      description: >-
+        Payload returned by link-authenticated tunnel `GET /health` on `:9443` (`Cache-Control:
+        no-store`). Includes cached transcode capabilities and `inbound_grant_generation` for
+        reconciling offline `grant-revoke` state.
+      required:
+        - status
+        - version
+        - peer_protocol
+        - capabilities
+        - transcode
+        - inbound_grant_generation
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+        version:
+          type: string
+        peer_protocol:
+          type: integer
+        capabilities:
+          type: array
+          items:
+            type: string
+        transcode:
+          oneOf:
+            - $ref: '#/components/schemas/PeerTranscodeCapabilities'
+            - type: 'null'
+        inbound_grant_generation:
+          type:
+            - integer
+            - 'null'
+          description: Active inbound grant generation for the calling link, or `null` when no active grant exists (allowing peers to clear stale received grants after offline revocation).
     PeerGrantLevel:
       type: string
       enum:
@@ -7240,6 +7380,7 @@ components:
         - ineligible_reason
         - weight
         - max_jobs
+        - effective_max_jobs
         - active_jobs
         - unhealthy_until
         - ffmpeg_version
@@ -7282,6 +7423,17 @@ components:
           type: integer
           minimum: 1
           maximum: 64
+          description: Controller-configured concurrency cap for this worker.
+        worker_max_jobs:
+          type: integer
+          minimum: 1
+          maximum: 64
+          description: Optional worker-advertised concurrency cap from tunnel `GET /health` (`AF_TRANSCODE_WORKER_MAX_JOBS`). Omitted when not advertised.
+        effective_max_jobs:
+          type: integer
+          minimum: 1
+          maximum: 64
+          description: Effective concurrency cap enforced by the dispatcher (`min(max_jobs, worker_max_jobs)` when `worker_max_jobs` is advertised, otherwise `max_jobs`).
         active_jobs:
           type: integer
           minimum: 0
@@ -7455,14 +7607,17 @@ components:
       properties:
         enabled:
           type: boolean
+          description: Enable or disable local Jellyfin transcode dispatching. Setting `false` stops the dispatcher, removes the Jellyfin drop-in, tears down controller transcode exports, sends best-effort remote mount teardown to enabled workers, and resets worker parity state.
         worker_service_enabled:
           type: boolean
+          description: Enable or disable `af-transcode-worker.service`. Setting `false` tears down all local worker `transcode_bind` and `transcode` NFS mounts (and deletes their `peer_mounts` rows) before stopping and removing the unit.
         workers:
           type: array
           items:
             $ref: '#/components/schemas/UpdatePeerTranscodeWorker'
         run_parity_test_link_id:
           type: string
+          description: Trigger a path-parity check on the selected worker (1-second software `libx264` clip with a 5-second timeout) and verify the output file on the controller.
       additionalProperties: false
     ErrorResponse:
       type: object

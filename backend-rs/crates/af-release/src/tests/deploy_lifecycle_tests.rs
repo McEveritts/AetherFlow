@@ -900,3 +900,248 @@ fn canonical_bin_and_managed_plugin_archive_deploys_alongside_legacy_root_archiv
         .join("speedtest-backend")
         .is_file());
 }
+
+#[test]
+fn package_automation_jellyfin_uses_transcode_socket_directory() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let automation_path = manifest_dir.join("../../../config/package_automation.json");
+    let raw = fs::read_to_string(&automation_path).expect("read config/package_automation.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).expect("parse config/package_automation.json");
+    let rw_paths = parsed["jellyfin"]["sandbox_rw_paths"]
+        .as_array()
+        .expect("jellyfin.sandbox_rw_paths array");
+    let path_strs: Vec<&str> = rw_paths.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        path_strs.contains(&"-/run/aetherflow-transcode"),
+        "expected directory ReadWritePaths entry -/run/aetherflow-transcode, got {path_strs:?}"
+    );
+    assert!(
+        !path_strs.contains(&"-/run/aetherflow-transcode/transcode.sock"),
+        "single-file socket ReadWritePaths entry must not remain: {path_strs:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn transcode_shim_refresh_handles_present_absent_and_symlink_refusal() {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let sb = TempSandbox::new("transcode-shim-refresh");
+    let cfg = ReleaseConfig::for_root(sb.path());
+    let shim_path = crate::health::resolve_transcode_shim_path(&cfg);
+    assert_eq!(
+        shim_path,
+        sb.path().join("usr/lib/aetherflow/transcode/ffmpeg"),
+        "isolated config must rebase transcode shim under isolated_root"
+    );
+
+    let release_v1 = cfg.releases_dir.join("1700000100");
+    fs::create_dir_all(release_v1.join("bin")).unwrap();
+    fs::write(release_v1.join("bin/af-transcode"), b"transcode-v2-binary").unwrap();
+    fs::set_permissions(
+        release_v1.join("bin/af-transcode"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&release_v1, &cfg.current_link).unwrap();
+
+    // 1. Absent shim stays dormant and never creates parent directories or files.
+    assert!(
+        !crate::health::refresh_installed_transcode_shim(&cfg).unwrap(),
+        "absent shim should remain dormant"
+    );
+    assert!(!shim_path.exists());
+    assert!(!shim_path.parent().unwrap().exists());
+
+    // 2. Existing regular shim is atomically replaced (new inode, 0755, no leftover temps).
+    let shim_dir = shim_path.parent().unwrap();
+    fs::create_dir_all(shim_dir).unwrap();
+    fs::write(&shim_path, b"old-shim-v1").unwrap();
+    fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755)).unwrap();
+    let old_ino = fs::symlink_metadata(&shim_path).unwrap().ino();
+    let mut old_open_fd = fs::File::open(&shim_path).unwrap();
+
+    assert!(
+        crate::health::refresh_installed_transcode_shim(&cfg).unwrap(),
+        "existing regular shim must be refreshed"
+    );
+    let new_meta = fs::symlink_metadata(&shim_path).unwrap();
+    assert!(new_meta.file_type().is_file());
+    assert_eq!(new_meta.permissions().mode() & 0o777, 0o755);
+    assert_ne!(
+        new_meta.ino(),
+        old_ino,
+        "atomic rename must replace inode rather than truncating in place"
+    );
+    assert_eq!(fs::read(&shim_path).unwrap(), b"transcode-v2-binary");
+    let mut old_bytes = Vec::new();
+    old_open_fd.read_to_end(&mut old_bytes).unwrap();
+    assert_eq!(
+        old_bytes, b"old-shim-v1",
+        "already-open handle to old shim inode must remain intact"
+    );
+    let entries: Vec<String> = fs::read_dir(shim_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        vec!["ffmpeg".to_string()],
+        "no temporary sibling files may remain after rename"
+    );
+
+    // 3. Legacy release without bin/af-transcode stays dormant and preserves existing shim.
+    let legacy_release = cfg.releases_dir.join("1700000101");
+    fs::create_dir_all(&legacy_release).unwrap();
+    fs::remove_file(&cfg.current_link).unwrap();
+    std::os::unix::fs::symlink(&legacy_release, &cfg.current_link).unwrap();
+    assert!(!crate::health::refresh_installed_transcode_shim(&cfg).unwrap());
+    assert_eq!(fs::read(&shim_path).unwrap(), b"transcode-v2-binary");
+
+    // Restore modern release link for symlink refusal tests.
+    fs::remove_file(&cfg.current_link).unwrap();
+    std::os::unix::fs::symlink(&release_v1, &cfg.current_link).unwrap();
+
+    // 4. Symlink at shim file is refused without modifying symlink or target.
+    let victim = sb.path().join("shim-victim");
+    fs::write(&victim, b"UNTOUCHED-VICTIM").unwrap();
+    fs::remove_file(&shim_path).unwrap();
+    std::os::unix::fs::symlink(&victim, &shim_path).unwrap();
+    let sym_err = crate::health::refresh_installed_transcode_shim(&cfg).unwrap_err();
+    assert!(matches!(sym_err, ReleaseError::PathValidation { .. }));
+    assert!(fs::symlink_metadata(&shim_path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read(&victim).unwrap(), b"UNTOUCHED-VICTIM");
+
+    // 5. Symlinked parent directory is refused without modifying outside target.
+    let outside_dir = sb.path().join("outside-transcode-dir");
+    fs::create_dir_all(&outside_dir).unwrap();
+    let outside_ffmpeg = outside_dir.join("ffmpeg");
+    fs::write(&outside_ffmpeg, b"OUTSIDE-VICTIM").unwrap();
+    fs::remove_dir_all(shim_dir).unwrap();
+    std::os::unix::fs::symlink(&outside_dir, shim_dir).unwrap();
+    let dir_sym_err = crate::health::refresh_installed_transcode_shim(&cfg).unwrap_err();
+    assert!(matches!(dir_sym_err, ReleaseError::PathValidation { .. }));
+    assert_eq!(fs::read(&outside_ffmpeg).unwrap(), b"OUTSIDE-VICTIM");
+
+    // 6. Symlinked release bin/af-transcode source is refused.
+    fs::remove_file(shim_dir).unwrap();
+    fs::create_dir_all(shim_dir).unwrap();
+    fs::write(&shim_path, b"keep-existing-shim").unwrap();
+    fs::remove_file(release_v1.join("bin/af-transcode")).unwrap();
+    std::os::unix::fs::symlink(&victim, release_v1.join("bin/af-transcode")).unwrap();
+    let src_sym_err = crate::health::refresh_installed_transcode_shim(&cfg).unwrap_err();
+    assert!(matches!(src_sym_err, ReleaseError::PathValidation { .. }));
+    assert_eq!(fs::read(&shim_path).unwrap(), b"keep-existing-shim");
+}
+
+#[cfg(unix)]
+#[test]
+fn noop_lifecycle_deploy_refreshes_existing_transcode_shim_atomically() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let sb = TempSandbox::new("noop-deploy-shim-refresh");
+    let mut cfg = ReleaseConfig::for_root(sb.path());
+    cfg.health_interval = Duration::ZERO;
+    seed_valid_sqlite_db(&cfg.host_data_dir.join(&cfg.sqlite_db), "shim-deploy");
+
+    let shim_path = crate::health::resolve_transcode_shim_path(&cfg);
+    fs::create_dir_all(shim_path.parent().unwrap()).unwrap();
+    fs::write(&shim_path, b"old-deployed-shim").unwrap();
+    fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755)).unwrap();
+    let old_ino = fs::symlink_metadata(&shim_path).unwrap().ino();
+
+    let archive = sb.path().join("release.tar.gz");
+    let (_, manifest) = build_synthetic_release_tarball(
+        &archive,
+        &cfg.artifact_name,
+        &[
+            ("aetherflow-api", b"api-bin", EntryType::Regular),
+            ("bin/af-transcode", b"new-deployed-shim", EntryType::Regular),
+            (".version", b"v4.0.0\n", EntryType::Regular),
+            (
+                "web/dist/index.html",
+                b"<html>ok</html>",
+                EntryType::Regular,
+            ),
+            ("web/dist/app.wasm", b"\0asm\x01\0\0\0", EntryType::Regular),
+        ],
+    );
+    let engine = ReleaseEngine::new(
+        cfg.clone(),
+        MockArtifactProvider {
+            resolved_tag: Ok("v4.0.0".to_string()),
+            archive_source: archive,
+            manifest_content: manifest,
+        },
+        NoopLifecycleController::default(),
+        MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+            http_status: 200,
+            body: r#"{"status":"ready"}"#.to_string(),
+        })]),
+    );
+    let outcome = engine.execute(&ReleaseOptions::default()).unwrap();
+    assert!(matches!(outcome, ReleaseOutcome::Deploy(_)));
+    let meta = fs::symlink_metadata(&shim_path).unwrap();
+    assert_ne!(meta.ino(), old_ino);
+    assert_eq!(meta.permissions().mode() & 0o777, 0o755);
+    assert_eq!(fs::read(&shim_path).unwrap(), b"new-deployed-shim");
+}
+
+#[cfg(unix)]
+#[test]
+fn transcode_worker_restarts_only_when_active() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = TempSandbox::new("transcode-worker-restart");
+    let log_path = sb.path().join("systemctl.log");
+    let active_flag = sb.path().join("worker-active");
+    let fail_restart_flag = sb.path().join("worker-fail-restart");
+    let fake_systemctl = sb.path().join("systemctl");
+    fs::write(
+        &fake_systemctl,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nif [ \"$1\" = \"is-active\" ]; then\n  [ -f \"{}\" ] && exit 0\n  exit 3\nfi\nif [ \"$1\" = \"restart\" ] && [ -f \"{}\" ]; then\n  echo \"simulated restart failure\" >&2\n  exit 1\nfi\nexit 0\n",
+            log_path.display(),
+            active_flag.display(),
+            fail_restart_flag.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 1. Inactive worker: checks is-active and does NOT restart.
+    let restarted_inactive =
+        crate::health::restart_transcode_worker_if_active_with_bin(&fake_systemctl).unwrap();
+    assert!(!restarted_inactive);
+    assert_eq!(
+        fs::read_to_string(&log_path).unwrap(),
+        "is-active --quiet af-transcode-worker.service\n"
+    );
+
+    // 2. Active worker: checks is-active and restarts af-transcode-worker.service.
+    fs::write(&log_path, "").unwrap();
+    fs::write(&active_flag, "1").unwrap();
+    let restarted_active =
+        crate::health::restart_transcode_worker_if_active_with_bin(&fake_systemctl).unwrap();
+    assert!(restarted_active);
+    assert_eq!(
+        fs::read_to_string(&log_path).unwrap(),
+        "is-active --quiet af-transcode-worker.service\nrestart af-transcode-worker.service\n"
+    );
+
+    // 3. Active worker whose restart fails: propagates Systemd error.
+    fs::write(&log_path, "").unwrap();
+    fs::write(&fail_restart_flag, "1").unwrap();
+    let err =
+        crate::health::restart_transcode_worker_if_active_with_bin(&fake_systemctl).unwrap_err();
+    assert!(matches!(err, ReleaseError::Systemd { .. }));
+    assert_eq!(
+        fs::read_to_string(&log_path).unwrap(),
+        "is-active --quiet af-transcode-worker.service\nrestart af-transcode-worker.service\n"
+    );
+}
