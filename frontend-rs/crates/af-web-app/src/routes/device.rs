@@ -395,7 +395,7 @@ pub fn DevicePage() -> impl IntoView {
                                     <div class="flex flex-wrap gap-3 pt-2">
                                         <button
                                             type="button"
-                                            class="glass-button px-4 py-2.5 text-sm"
+                                            class="af-btn px-4 py-2.5 text-sm"
                                             on:click=move |_| {
                                                 outcome.set(None);
                                                 error.set(String::new());
@@ -405,7 +405,7 @@ pub fn DevicePage() -> impl IntoView {
                                         >
                                             {move || context.t("OidcDevice.authorizeAnother")}
                                         </button>
-                                        <a href="/" class="glass-button-primary px-4 py-2.5 text-sm inline-flex items-center">
+                                        <a href="/" class="af-btn-primary px-4 py-2.5 text-sm inline-flex items-center">
                                             {move || context.t("Consent.return")}
                                         </a>
                                     </div>
@@ -462,7 +462,7 @@ pub fn DevicePage() -> impl IntoView {
                                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                     <button
                                         type="button"
-                                        class="glass-button-primary px-5 py-3 font-semibold"
+                                        class="af-btn-primary px-5 py-3 font-semibold"
                                         disabled=move || submitting.get() || verifying.get()
                                         on:click=move |_| decide(true)
                                     >
@@ -474,7 +474,7 @@ pub fn DevicePage() -> impl IntoView {
                                     </button>
                                     <button
                                         type="button"
-                                        class="glass-button px-5 py-3"
+                                        class="af-btn px-5 py-3"
                                         disabled=move || submitting.get() || verifying.get()
                                         on:click=move |_| decide(false)
                                     >
@@ -513,7 +513,7 @@ pub fn DevicePage() -> impl IntoView {
                                         <input
                                             id="device-user-code"
                                             type="text"
-                                            class="glass-input w-full px-4 py-3 font-mono text-lg tracking-widest uppercase"
+                                            class="af-input w-full px-4 py-3 font-mono text-lg tracking-widest uppercase"
                                             placeholder="BCDF-2345"
                                             autocomplete="off"
                                             autocapitalize="characters"
@@ -532,7 +532,7 @@ pub fn DevicePage() -> impl IntoView {
                                     </div>
                                     <button
                                         type="submit"
-                                        class="glass-button-primary w-full py-3 font-semibold"
+                                        class="af-btn-primary w-full py-3 font-semibold"
                                         disabled=move || verifying.get() || submitting.get()
                                     >
                                         {move || context.t(if verifying.get() {

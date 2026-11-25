@@ -6,25 +6,17 @@ const DESIGN_DOC_REF: &str = "docs/design-system.md";
 
 /// Shrinking Commit-1 allowlist for Tailwind blur classes in Rust templates.
 /// Commit 2 removes `backdrop-blur` from `shell.rs` and `grid.rs` and clears this list.
-const BLUR_ALLOWLIST: &[&str] = &[
-    "crates/af-web-app/src/shell.rs",
-    "crates/af-web-ui/src/grid.rs",
-];
+const BLUR_ALLOWLIST: &[&str] = &[];
 
 /// Shrinking Commit-1 allowlist for `<dialog class="af-modal glass-card">`.
 /// Commit 2 removes `glass-card` from `Modal` in `primitives.rs` and clears this list.
-const OVERLAY_CARD_ALLOWLIST: &[&str] = &["crates/af-web-ui/src/primitives.rs"];
+const OVERLAY_CARD_ALLOWLIST: &[&str] = &[];
 
 /// Shrinking per-commit ratchet for legacy `.glass-*`, `.obs-tab-pill`, and
 /// `.obs-telemetry-surface` template classes across `af-web-ui` and `af-web-app`.
 /// Commit 1 locks to the exact 61 currently unmigrated files; Commits 2–4 shrink
 /// this list to empty, and Commit 5 deletes the allowlist completely.
 const LEGACY_CLASS_ALLOWLIST: &[&str] = &[
-    "crates/af-web-app/src/routes/consent.rs",
-    "crates/af-web-app/src/routes/device.rs",
-    "crates/af-web-app/src/routes/login.rs",
-    "crates/af-web-app/src/routes/share.rs",
-    "crates/af-web-app/src/shell.rs",
     "crates/af-web-app/src/tabs/ai_chat.rs",
     "crates/af-web-app/src/tabs/audit.rs",
     "crates/af-web-app/src/tabs/cluster/grants.rs",
@@ -78,9 +70,6 @@ const LEGACY_CLASS_ALLOWLIST: &[&str] = &[
     "crates/af-web-app/src/tabs/streaming/portability.rs",
     "crates/af-web-app/src/tabs/streaming/reconciliation.rs",
     "crates/af-web-app/src/tabs/users.rs",
-    "crates/af-web-ui/src/editor.rs",
-    "crates/af-web-ui/src/primitives.rs",
-    "crates/af-web-ui/src/topology.rs",
 ];
 
 fn frontend_rs_root() -> PathBuf {

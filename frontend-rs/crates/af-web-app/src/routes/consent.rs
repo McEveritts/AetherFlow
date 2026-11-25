@@ -169,7 +169,7 @@ pub fn ConsentPage() -> impl IntoView {
                     </label>
                     <input
                         id="oauth-redirect-uri" type="text"
-                        class="glass-input w-full p-3 mt-2 text-sm" readonly=true
+                        class="af-input w-full p-3 mt-2 text-sm" readonly=true
                         value=request.with_value(|request| request["redirect_uri"].as_str().unwrap_or_default().to_string())
                     />
                 </af_web_ui::ObsCard>
@@ -189,7 +189,7 @@ pub fn ConsentPage() -> impl IntoView {
                     }}</p>
                 </Show>
                 <Show when=move || denied_local.get()>
-                    <a href="/login" class="glass-button-primary inline-block px-5 py-3">
+                    <a href="/login" class="af-btn-primary inline-block px-5 py-3">
                         {move || context.t("Login.accessNexus")}
                     </a>
                 </Show>
@@ -198,14 +198,14 @@ pub fn ConsentPage() -> impl IntoView {
                 </Show>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <button
-                        class="glass-button-primary px-5 py-3"
+                        class="af-btn-primary px-5 py-3"
                         disabled=move || context.auth_loading.get() || busy.get() || invalid || denied_local.get()
                         on:click=move |_| consent(true)
                     >
                         {move || context.t("Consent.grant")}
                     </button>
                     <button
-                        class="glass-button px-5 py-3"
+                        class="af-btn px-5 py-3"
                         disabled=move || context.auth_loading.get() || busy.get() || denied_local.get()
                         on:click=move |_| consent(false)
                     >

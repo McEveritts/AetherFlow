@@ -34,7 +34,7 @@ pub fn PublicRouteToolbar() -> impl IntoView {
     view! {
         <div class="af-public-toolbar">
             <select
-                class="af-locale-select glass-input"
+                class="af-locale-select af-input"
                 aria-label=move || context.t("Shell.locale")
                 prop:value=move || context.locale.get()
                 on:change=move |event| context.set_locale(&event_target_value(&event))
@@ -44,7 +44,7 @@ pub fn PublicRouteToolbar() -> impl IntoView {
             </select>
             <button
                 type="button"
-                class="glass-button af-public-theme-toggle"
+                class="af-btn af-public-theme-toggle"
                 aria-label=move || context.t("Shell.toggleTheme")
                 aria-pressed=move || context.is_light().to_string()
                 on:click=move |_| context.toggle_theme()
@@ -568,7 +568,7 @@ fn MobileNavigation() -> impl IntoView {
             <nav aria-label=move || context.t("Shell.mobileNavigation") class="grid grid-cols-2 gap-2">
                 {move || TabId::ALL.into_iter().filter(|tab| !tab.is_admin_only() || context.is_admin()).map(|tab| view! {
                     <button
-                        class="af-mobile-nav-button glass-button px-3 py-3 text-left flex items-center"
+                        class="af-mobile-nav-button af-btn px-3 py-3 text-left flex items-center"
                         aria-label=move || tab.localized_label(&context.locale.get())
                         data-testid=format!("mobile-nav-{}", tab.key())
                         on:click=move |_| {
@@ -581,7 +581,7 @@ fn MobileNavigation() -> impl IntoView {
                     </button>
                 }).collect_view()}
                 <button
-                    class="af-mobile-nav-button glass-button px-3 py-3 text-left flex items-center"
+                    class="af-mobile-nav-button af-btn px-3 py-3 text-left flex items-center"
                     aria-label=move || context.t("Shell.logout")
                     data-testid="mobile-nav-logout"
                     on:click=move |_| context.logout()
@@ -864,7 +864,7 @@ pub fn ActiveServerBar() -> impl IntoView {
                         </div>
                         <button
                             type="button"
-                            class="glass-button px-3 py-2 text-xs font-medium shrink-0"
+                            class="af-btn px-3 py-2 text-xs font-medium shrink-0"
                             data-testid="exit-active-server"
                             on:click=move |_| context.exit_to_local_server()
                         >
@@ -905,10 +905,10 @@ pub fn Header() -> impl IntoView {
         avatar_failed.set(false);
     });
     view! {
-        <header class="af-header sticky top-0 z-20 flex flex-wrap gap-3 items-center justify-between px-4 md:px-8 py-4 border-b border-white/5 backdrop-blur-xl">
+        <header class="af-header sticky top-0 z-20 flex flex-wrap gap-3 items-center justify-between px-4 md:px-8 py-4 border-b border-[var(--af-border-hairline)]">
             <div class="af-header-heading flex items-center gap-3 min-w-0">
                 <button
-                    class="af-hamburger glass-button px-3"
+                    class="af-hamburger af-btn px-3"
                     aria-label=move || context.t("Shell.openNavigation")
                     on:click=move |_| context.mobile_open.set(true)
                 >
@@ -929,7 +929,7 @@ pub fn Header() -> impl IntoView {
                     <select
                         data-testid="server-switcher"
                         aria-label=move || context.t("PeerSwitch.switchServerLabel")
-                        class="glass-input px-2.5 py-1.5 text-sm max-w-44"
+                        class="af-input px-2.5 py-1.5 text-sm max-w-44"
                         prop:value=move || context.active_server_id.get().unwrap_or_default()
                         on:change=move |event| {
                             let val = event_target_value(&event);
@@ -961,7 +961,7 @@ pub fn Header() -> impl IntoView {
                 </Show>
                 <StatusPill state=context.connection locale=context.locale/>
                 <button
-                    class="af-command-button glass-button px-3 text-sm inline-flex items-center gap-2"
+                    class="af-command-button af-btn px-3 text-sm inline-flex items-center gap-2"
                     aria-label=move || context.t("Shell.openCommandPalette")
                     title=move || context.t("Shell.commandPaletteShortcut")
                     on:click=move |_| context.command_open.set(true)
@@ -972,7 +972,7 @@ pub fn Header() -> impl IntoView {
                 </button>
                 <select
                     aria-label=move || context.t("Shell.locale")
-                    class="af-locale-select glass-input px-2 text-sm max-w-24"
+                    class="af-locale-select af-input px-2 text-sm max-w-24"
                     prop:value=move || context.locale.get()
                     on:change=move |event| context.set_locale(&event_target_value(&event))
                 >
@@ -980,7 +980,7 @@ pub fn Header() -> impl IntoView {
                         .into_iter().map(|(value, label)| view! { <option value=value>{label}</option> }).collect_view()}
                 </select>
                 <button
-                    class="glass-button px-3"
+                    class="af-btn px-3"
                     aria-label=move || context.t("Shell.toggleTheme")
                     aria-pressed=move || context.is_light().to_string()
                     on:click=move |_| context.toggle_theme()
@@ -991,7 +991,7 @@ pub fn Header() -> impl IntoView {
                     <div class="af-header-popover-anchor relative">
                         <button
                             type="button"
-                            class="glass-button px-3 text-xs inline-flex items-center gap-1.5"
+                            class="af-btn px-3 text-xs inline-flex items-center gap-1.5"
                             data-testid="header-transfers-trigger"
                             aria-haspopup="true"
                             aria-expanded=move || transfers_open.get().to_string()
@@ -1054,7 +1054,7 @@ pub fn Header() -> impl IntoView {
                     </div>
                 </Show>
                 <button
-                    class="glass-button px-3 relative"
+                    class="af-btn px-3 relative"
                     aria-label=move || context.t("Shell.notifications")
                     on:click=move |_| {
                         account_open.set(false);
@@ -1150,7 +1150,7 @@ pub fn Header() -> impl IntoView {
                             <button
                                 type="button"
                                 role="menuitem"
-                                class="w-full text-left text-sm px-3 py-2 rounded-lg hover:bg-white/5"
+                                class="w-full text-left text-sm px-3 py-2 rounded-lg hover:bg-[var(--af-control-bg-hover)]"
                                 data-testid="header-account-profile"
                                 on:click=move |_| {
                                     account_open.set(false);
@@ -1162,7 +1162,7 @@ pub fn Header() -> impl IntoView {
                             <button
                                 type="button"
                                 role="menuitem"
-                                class="w-full text-left text-sm px-3 py-2 rounded-lg hover:bg-white/5"
+                                class="w-full text-left text-sm px-3 py-2 rounded-lg hover:bg-[var(--af-control-bg-hover)]"
                                 on:click=move |_| {
                                     account_open.set(false);
                                     context.navigate_to_subtab(TabId::Settings, "general");
@@ -1270,7 +1270,7 @@ pub fn OnboardingWizard() -> impl IntoView {
             <Show when=move || step.get() == 2>
                 <label for="onboarding-domain" class="text-sm">{move || context.t("Onboarding.baseDomain")}</label>
                 <input
-                    id="onboarding-domain" class="glass-input w-full px-3 py-3 my-4"
+                    id="onboarding-domain" class="af-input w-full px-3 py-3 my-4"
                     placeholder="example.com" prop:value=move || domain.get()
                     on:input=move |event| {
                         dirty.set(true);
@@ -1280,7 +1280,7 @@ pub fn OnboardingWizard() -> impl IntoView {
             </Show>
             <div class="flex justify-end">
                 <button
-                    class="glass-button-primary px-5 py-3" disabled=move || busy.get()
+                    class="af-btn-primary px-5 py-3" disabled=move || busy.get()
                     on:click=move |_| if step.get_untracked() == 1 { step.set(2); } else { finish(); }
                 >
                     {move || context.t(if busy.get() { "Common.saving" } else if step.get() == 1 {
@@ -1370,7 +1370,7 @@ pub fn GlobalCommandPalette() -> impl IntoView {
             }>
                 <input
                     node_ref=search_input type="search"
-                    class="glass-input w-full px-3 py-3"
+                    class="af-input w-full px-3 py-3"
                     aria-label=move || context.t("Shell.searchCommands")
                     placeholder=move || context.t("Shell.searchPlaceholder")
                     role="combobox" aria-expanded="true" aria-controls="af-command-results"
@@ -1411,7 +1411,7 @@ pub fn NotificationDrawer() -> impl IntoView {
     view! {
         <Drawer open=context.notifications_open title=Signal::derive(move || context.t("Shell.notifications"))>
             <button
-                class="glass-button px-3 py-2 mb-4"
+                class="af-btn px-3 py-2 mb-4"
                 disabled=move || !can_write_settings()
                 title=write_reason
                 on:click=move |_| {

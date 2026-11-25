@@ -598,17 +598,17 @@ pub fn McBrowserCodeEditor(
             }
         >
             <div class="af-editor-toolbar flex flex-wrap items-center gap-2 p-2 border-b border-white/10">
-                <button class="glass-button px-3" disabled=move || readonly.get() || undo.with(Vec::is_empty) on:click=move |_| undo_action()>
+                <button class="af-btn px-3" disabled=move || readonly.get() || undo.with(Vec::is_empty) on:click=move |_| undo_action()>
                     {move || ui_t("Undo" )}
                 </button>
-                <button class="glass-button px-3" disabled=move || readonly.get() || redo.with(Vec::is_empty) on:click=move |_| redo_action()>
+                <button class="af-btn px-3" disabled=move || readonly.get() || redo.with(Vec::is_empty) on:click=move |_| redo_action()>
                     {move || ui_t("Redo" )}
                 </button>
-                <button class="glass-button px-3" on:click=move |_| find_open.update(|open| *open = !*open)>
+                <button class="af-btn px-3" on:click=move |_| find_open.update(|open| *open = !*open)>
                     {move || ui_t("Find / Replace" )}
                 </button>
                 <button
-                    class="glass-button px-3" aria-label=move || ui_t("Decrease font size")
+                    class="af-btn px-3" aria-label=move || ui_t("Decrease font size")
                     disabled=move || { font.get() <= 12 }
                     on:click=move |_| font.update(|font| *font = font.saturating_sub(1).max(12))
                 >
@@ -616,17 +616,17 @@ pub fn McBrowserCodeEditor(
                 </button>
                 <span class="text-xs tabular-nums">{move || ui_t_with("Font {size}px", &[("size", &font.get().to_string())])}</span>
                 <button
-                    class="glass-button px-3" aria-label=move || ui_t("Increase font size")
+                    class="af-btn px-3" aria-label=move || ui_t("Increase font size")
                     disabled=move || { font.get() >= 24 }
                     on:click=move |_| font.update(|font| *font = (*font + 1).min(24))
                 >
                     "+"
                 </button>
-                <button class="glass-button px-3" on:click=move |_| clipboard("copy")>{move || ui_t("Copy")}</button>
-                <button class="glass-button px-3" disabled=move || readonly.get() on:click=move |_| clipboard("cut")>{move || ui_t("Cut")}</button>
-                <button class="glass-button px-3" disabled=move || readonly.get() on:click=move |_| clipboard("paste")>{move || ui_t("Paste")}</button>
+                <button class="af-btn px-3" on:click=move |_| clipboard("copy")>{move || ui_t("Copy")}</button>
+                <button class="af-btn px-3" disabled=move || readonly.get() on:click=move |_| clipboard("cut")>{move || ui_t("Cut")}</button>
+                <button class="af-btn px-3" disabled=move || readonly.get() on:click=move |_| clipboard("paste")>{move || ui_t("Paste")}</button>
                 <select
-                    class="glass-input px-2 py-1 text-xs"
+                    class="af-input px-2 py-1 text-xs"
                     data-testid="editor-language-select"
                     aria-label=move || ui_t("Syntax language")
                     prop:value=move || active_language.get()
@@ -642,7 +642,7 @@ pub fn McBrowserCodeEditor(
                         .collect_view()}
                 </select>
                 <button
-                    class="glass-button px-3"
+                    class="af-btn px-3"
                     data-testid="editor-word-wrap"
                     aria-pressed=move || wrap_lines.get().to_string()
                     on:click=move |_| wrap_lines.update(|wrap| *wrap = !*wrap)
@@ -650,7 +650,7 @@ pub fn McBrowserCodeEditor(
                     {move || ui_t("Word wrap")}
                 </button>
                 <button
-                    class="glass-button px-3" aria-pressed=move || preview.get().to_string()
+                    class="af-btn px-3" aria-pressed=move || preview.get().to_string()
                     on:click=move |_| preview.update(|preview| *preview = !*preview)
                 >
                     {move || ui_t("Markdown preview")}
@@ -659,7 +659,7 @@ pub fn McBrowserCodeEditor(
                 <Show when=move || readonly.get()><crate::Badge label="ReadOnly · Locked" tone="warning"/></Show>
                 <Show when=move || show_save && on_save.is_some()>
                 <button
-                    class="glass-button-primary px-3 ml-auto" disabled=move || readonly.get()
+                    class="af-btn-primary px-3 ml-auto" disabled=move || readonly.get()
                     on:click=move |_| {
                         if let Some(save) = on_save {
                             save.run(value.get_untracked());
@@ -673,12 +673,12 @@ pub fn McBrowserCodeEditor(
             <Show when=move || find_open.get()>
                 <div class="af-editor-find flex flex-wrap gap-2 p-3 border-b border-white/10">
                     <input
-                        class="glass-input px-2" placeholder=move || ui_t("Find") aria-label=move || ui_t("Find")
+                        class="af-input px-2" placeholder=move || ui_t("Find") aria-label=move || ui_t("Find")
                         prop:value=move || find.get()
                         on:input=move |event| find.set(event_target_value(&event))
                     />
                     <input
-                        class="glass-input px-2" placeholder=move || ui_t("Replace") aria-label=move || ui_t("Replace")
+                        class="af-input px-2" placeholder=move || ui_t("Replace") aria-label=move || ui_t("Replace")
                         prop:value=move || replacement.get()
                         on:input=move |event| replacement.set(event_target_value(&event))
                     />
@@ -690,8 +690,8 @@ pub fn McBrowserCodeEditor(
                         <input type="checkbox" prop:checked=move || case_sensitive.get() on:change=move |event| case_sensitive.set(event_target_checked(&event))/>
                         {move || ui_t("Match case")}
                     </label>
-                    <button class="glass-button px-3" on:click=move |_| run_find(false)>{move || ui_t("Find next")}</button>
-                    <button class="glass-button px-3" disabled=move || readonly.get() on:click=move |_| run_find(true)>{move || ui_t("Replace all")}</button>
+                    <button class="af-btn px-3" on:click=move |_| run_find(false)>{move || ui_t("Find next")}</button>
+                    <button class="af-btn px-3" disabled=move || readonly.get() on:click=move |_| run_find(true)>{move || ui_t("Replace all")}</button>
                 </div>
             </Show>
             <div class=move || {

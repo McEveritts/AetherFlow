@@ -1,4 +1,4 @@
-//! Obsidian V2 components, shared across independently implemented domain tabs.
+//! Shared flat UI primitives and widgets conforming to `docs/design-system.md`.
 pub mod charts;
 pub mod editor;
 pub mod grid;
