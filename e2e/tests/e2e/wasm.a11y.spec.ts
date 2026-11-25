@@ -94,6 +94,18 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
             identity: null, peer_protocol: 1, capabilities: ['links'], rtt_warn_ms: 120,
             peers: [], pairing_windows: [], pairing_attempts: [], detected_endpoints: [],
           },
+          '/api/v1/admin/peers/transcode': {
+            enabled: false, worker_service_enabled: false, worker_service_active: false,
+            dispatcher_active: false, dispatcher_socket: '/run/aetherflow/transcode.sock',
+            shim_installed: false, shim_path: '/usr/local/lib/aetherflow/bin/af-transcode',
+            jellyfin_dropin_enabled: false, jellyfin_reported_ffmpeg: null,
+            local: {
+              server_name: 'aetherflow', ffmpeg_version: null, package_name: null,
+              package_version: null, encoders: [], render_nodes: [],
+              primary_render_node: null, transcoding_temp_path: null, tmp_dir: null,
+            },
+            workers: [], recent_jobs: [],
+          },
           '/api/v1/admin/users': { users: [] },
           '/api/v1/admin/audit-log': { entries: [], total: 0 },
           '/api/v1/admin/quotas': { quotas: [] },

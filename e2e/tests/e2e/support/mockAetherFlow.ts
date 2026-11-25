@@ -289,6 +289,37 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
     });
   });
 
+  await page.route(/\/api\/v1\/admin\/peers\/transcode(?:\?.*)?$/, async (route: Route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback();
+      return;
+    }
+    await json(route, {
+      enabled: false,
+      worker_service_enabled: false,
+      worker_service_active: false,
+      dispatcher_active: false,
+      dispatcher_socket: '/run/aetherflow/transcode.sock',
+      shim_installed: false,
+      shim_path: '/usr/local/lib/aetherflow/bin/af-transcode',
+      jellyfin_dropin_enabled: false,
+      jellyfin_reported_ffmpeg: null,
+      local: {
+        server_name: 'aetherflow',
+        ffmpeg_version: null,
+        package_name: null,
+        package_version: null,
+        encoders: [],
+        render_nodes: [],
+        primary_render_node: null,
+        transcoding_temp_path: null,
+        tmp_dir: null,
+      },
+      workers: [],
+      recent_jobs: [],
+    });
+  });
+
   await page.route(/\/api(\/v1)?(\/(auth|admin))?\/system\/update\/(check|status)/, async (route: Route) => {
     if (new URL(route.request().url()).pathname.endsWith('/status')) {
       await json(route, { state: 'idle', phase: '', operationId: '', error: '' });
