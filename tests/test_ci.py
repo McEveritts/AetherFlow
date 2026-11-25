@@ -15,9 +15,12 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         self.assertIn("serviceWorkers: 'block'", config)
         for browser in ("chromium", "firefox", "webkit"):
             self.assertIn(f"name: '{browser}'", config)
-        for filename in ("ci.yml", "release.yml"):
-            workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
-            self.assertIn("playwright install --with-deps chromium firefox webkit", workflow)
+        ci_workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("playwright install --with-deps chromium firefox webkit", ci_workflow)
+        release_workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("browser: [chromium, firefox, webkit]", release_workflow)
+        self.assertIn('npx playwright install --with-deps "${PLAYWRIGHT_BROWSER}"', release_workflow)
+        self.assertIn("--project=${{ matrix.browser }} [.]live[.]spec[.]ts$", release_workflow)
         live = (ROOT / "e2e/tests/e2e/embedded.live.spec.ts").read_text(encoding="utf-8")
         self.assertIn("test.use({ serviceWorkers: 'allow' })", live)
         self.assertIn("Real service-worker cache boundaries", live)

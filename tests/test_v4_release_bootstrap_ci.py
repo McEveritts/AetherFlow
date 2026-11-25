@@ -208,51 +208,88 @@ _depends
         release_yml = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         jobs = parse_workflow_jobs(release_yml)
 
-        self.assertIn("validate-release", jobs)
-        self.assertIn("security-gate", jobs)
-        self.assertIn("release-build", jobs)
-        self.assertIn("release-publish", jobs)
+        expected_2204_jobs = (
+            "validate-release",
+            "security-python",
+            "security-frontend",
+            "security-gate",
+            "build-wasm",
+            "package-amd64",
+            "package-arm64",
+            "package-armv7-speedtest",
+            "release-build",
+            "release-e2e-amd64",
+            "release-publish",
+        )
+        for job_name in expected_2204_jobs:
+            self.assertIn(job_name, jobs)
+        self.assertIn("release-arm64-runtime", jobs)
 
-        val_job = jobs["validate-release"]
         sec_job = jobs["security-gate"]
+        sec_fe_job = jobs["security-frontend"]
+        sec_py_job = jobs["security-python"]
+        wasm_job = jobs["build-wasm"]
+        amd64_job = jobs["package-amd64"]
+        arm64_job = jobs["package-arm64"]
         build_job = jobs["release-build"]
+        e2e_job = jobs["release-e2e-amd64"]
         pub_job = jobs["release-publish"]
 
-        # 1. All release pipeline jobs must run on ubuntu-22.04 (GLIBC 2.35 baseline), never ubuntu-latest
-        for job_name, job_text in (("validate-release", val_job), ("security-gate", sec_job), ("release-build", build_job), ("release-publish", pub_job)):
+        # 1. All x86_64 release pipeline jobs must run on ubuntu-22.04 (GLIBC 2.35 baseline), never ubuntu-latest
+        for job_name in expected_2204_jobs:
             with self.subTest(job=job_name):
-                self.assertIn("runs-on: ubuntu-22.04", job_text)
+                self.assertIn("runs-on: ubuntu-22.04", jobs[job_name])
         self.assertNotIn("runs-on: ubuntu-latest", release_yml)
 
-        # 2. release-build must depend on validate-release + security-gate and keep contents: read;
-        # release-publish must depend on security-gate and release-build
-        self.assertRegex(build_job, r"needs:\s*\[.*security-gate.*\]")
-        self.assertIn("contents: read", build_job)
-        self.assertNotIn("contents: write", build_job)
-        self.assertRegex(pub_job, r"needs:\s*\[.*security-gate.*release-build.*\]")
+        # 2. Only release-publish may hold write permissions; release-build must depend on all security gates
+        # and parallel build artifacts; release-publish must depend on every security, build, and E2E gate.
+        for job_name, job_text in jobs.items():
+            if job_name == "release-publish":
+                continue
+            with self.subTest(readonly_job=job_name):
+                self.assertIn("contents: read", job_text)
+                self.assertNotIn("contents: write", job_text)
 
-        # 3. security-gate must run gitleaks dir + git, cargo-deny, cargo-audit, clippy, and locked workspace tests
+        self.assertRegex(
+            build_job,
+            r"needs:\s*\[.*security-gate.*security-frontend.*security-python.*package-amd64.*package-arm64.*package-armv7-speedtest.*\]",
+        )
+        self.assertRegex(amd64_job, r"needs:\s*\[.*build-wasm.*\]")
+        self.assertRegex(arm64_job, r"needs:\s*\[.*build-wasm.*\]")
+        self.assertRegex(e2e_job, r"needs:\s*\[.*release-build.*\]")
+        self.assertRegex(
+            pub_job,
+            r"needs:\s*\[.*security-gate.*security-frontend.*security-python.*release-build.*release-e2e-amd64.*release-arm64-runtime.*\]",
+        )
+
+        # 3. Security gates must cover sharded Python tests, frontend WASM + Playwright typecheck,
+        # and Gitleaks dir + git, cargo-deny, cargo-audit, clippy, locked workspace tests, and updater survival.
+        self.assertIn("tests/run_parallel_tests.py --shard", sec_py_job)
+        self.assertIn("tests/check_shell_hygiene.py", sec_py_job)
         self.assertIn("gitleaks dir . --verbose --redact", sec_job)
         self.assertIn("gitleaks git . --verbose --redact", sec_job)
         self.assertIn("cargo deny --locked check advisories bans licenses sources", sec_job)
         self.assertIn("cargo audit --file Cargo.lock", sec_job)
         self.assertIn(WORKSPACE_CLIPPY, sec_job)
         self.assertIn("cargo test --workspace --locked", sec_job)
+        self.assertIn("updater_survives_caller_restart", sec_job)
+        self.assertLess(sec_job.index(WORKSPACE_CLIPPY), sec_job.index("cargo test --workspace --locked"))
+        self.assertIn('node-version: "24.22.2"', sec_fe_job)
+        self.assertIn("cargo deny --manifest-path frontend-rs/Cargo.toml --locked", sec_fe_job)
 
-        # 4. Inside release-build, locked clippy and tests precede packaging and runtime verification.
-        # inside release-publish, SHA-pinned attest-build-provenance must precede Publish
-        clippy_idx = build_job.index(WORKSPACE_CLIPPY)
-        test_idx = build_job.index("cargo test --workspace --locked")
-        stage_idx = build_job.index("bash scripts/build_wasm_frontend.sh --stage")
-        build_idx = build_job.index("bash scripts/build_gold.sh")
-        live_idx = build_job.index("- name: Execute Live E2E Against Extracted Release Artifact")
-        upload_idx = build_job.index("- name: Upload Release Bundle Artifact")
-
-        self.assertLess(clippy_idx, test_idx)
-        self.assertLess(test_idx, stage_idx)
-        self.assertLess(stage_idx, build_idx)
-        self.assertLess(build_idx, live_idx)
-        self.assertLess(live_idx, upload_idx)
+        # 4. Build, assembly, live E2E, and attestation stages enforce strict ordering and packaging invariants.
+        self.assertIn("bash scripts/build_wasm_frontend.sh --stage", wasm_job)
+        self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1", amd64_job)
+        self.assertIn("bash scripts/build_gold.sh", amd64_job)
+        self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1", arm64_job)
+        self.assertIn("release-dist/SHA256SUMS", build_job)
+        self.assertLess(
+            build_job.index("- name: Build and Package Standalone Rust LibreSpeed Archives"),
+            build_job.index("- name: Upload Release Bundle Artifact"),
+        )
+        self.assertIn('node-version: "24.22.2"', e2e_job)
+        self.assertIn("aetherflow-api bin/af bin/speedtest-backend", e2e_job)
+        self.assertIn("- name: Execute Live E2E Against Extracted Release Artifact", e2e_job)
 
         attest_idx = pub_job.index("actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8")
         publish_idx = pub_job.index("- name: Publish to GitHub Releases")
@@ -260,10 +297,6 @@ _depends
 
         self.assertNotIn("actions/setup-go", sec_job)
         self.assertNotIn("Legacy Go", sec_job)
-        self.assertIn('node-version: "24.22.2"', build_job)
-        self.assertIn("BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1", build_job)
-        self.assertIn("aetherflow-api bin/af bin/speedtest-backend", build_job)
-        self.assertIn("release-dist/SHA256SUMS", build_job)
 
     def test_ci_workflow_runs_locked_rust_build_and_embedded_e2e_and_smoke_gate(self):
         ci_yml = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

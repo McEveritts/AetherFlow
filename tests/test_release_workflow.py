@@ -29,13 +29,29 @@ def step_script(name):
 class RustCacheWorkflowTests(unittest.TestCase):
     def test_rust_jobs_cache_downloads_without_compiled_artifacts(self):
         jobs = {
-            "ci.yml": ["backend-rs", "frontend-rs"],
-            "release.yml": ["security-gate", "release-build"],
-            "security.yml": ["rust-security"],
+            "ci.yml": {
+                "backend-rs": '          workspaces: "backend-rs -> target"\n',
+                "frontend-rs": '          workspaces: "frontend-rs -> target"\n',
+            },
+            "release.yml": {
+                "security-frontend": '          workspaces: "frontend-rs -> target"\n',
+                "security-gate": '          workspaces: "backend-rs -> target"\n',
+                "build-wasm": '          workspaces: "frontend-rs -> target"\n',
+                "package-amd64": '          workspaces: "backend-rs -> target"\n',
+                "package-arm64": '          workspaces: "backend-rs -> target"\n',
+                "package-armv7-speedtest": '          workspaces: "backend-rs -> target"\n',
+            },
+            "security.yml": {
+                "rust-security": (
+                    "          workspaces: |\n"
+                    "            backend-rs -> target\n"
+                    "            frontend-rs -> target\n"
+                ),
+            },
         }
-        for filename, job_names in jobs.items():
+        for filename, job_workspaces in jobs.items():
             workflow = (WORKFLOW.parent / filename).read_text()
-            for job_name in job_names:
+            for job_name, expected_workspace in job_workspaces.items():
                 with self.subTest(workflow=filename, job=job_name):
                     job = re.search(
                         rf"^  {re.escape(job_name)}:\n(.*?)(?=^  [\w-]+:|\Z)",
@@ -51,15 +67,48 @@ class RustCacheWorkflowTests(unittest.TestCase):
                     caches = [step for step in steps if "uses: Swatinem/rust-cache@" in step]
                     self.assertEqual(len(caches), 1)
                     self.assertIn("          cache-targets: \"false\"\n", caches[0])
-                    if job_name in {"backend-rs", "frontend-rs"}:
-                        self.assertIn(f'          workspaces: "{job_name} -> target"\n', caches[0])
-                    else:
-                        self.assertIn(
-                            "          workspaces: |\n"
-                            "            backend-rs -> target\n"
-                            "            frontend-rs -> target\n",
-                            caches[0],
-                        )
+                    self.assertIn(expected_workspace, caches[0])
+
+
+class ParallelTestRunnerShardingTests(unittest.TestCase):
+    @staticmethod
+    def _runner_module():
+        try:
+            import run_parallel_tests
+            return run_parallel_tests
+        except ImportError:
+            from tests import run_parallel_tests
+            return run_parallel_tests
+
+    def test_parse_shard_validates_bounds_and_syntax(self):
+        run_parallel_tests = self._runner_module()
+
+        self.assertEqual(run_parallel_tests.parse_shard("1/6"), (1, 6))
+        self.assertEqual(run_parallel_tests.parse_shard("6/6"), (6, 6))
+        for invalid in ("", "0/6", "7/6", "1/0", "-1/4", "1/2/3", "abc/4"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    run_parallel_tests.parse_shard(invalid)
+
+    def test_select_shard_units_forms_complete_disjoint_balanced_partition(self):
+        run_parallel_tests = self._runner_module()
+
+        units = [([f"test_mod_{i}.Case.test_{j}" for j in range((i % 12) + 1)], (i % 12) + 1) for i in range(60)]
+        units.sort(key=lambda item: (-item[1], item[0][0]))
+        expected_total = sum(count for _, count in units)
+        seen_targets = []
+        shard_totals = []
+        for idx in range(1, 7):
+            selected, shard_count = run_parallel_tests.select_shard_units(units, idx, 6)
+            self.assertEqual(shard_count, sum(c for _, c in selected))
+            shard_totals.append(shard_count)
+            for targets, _ in selected:
+                seen_targets.extend(targets)
+
+        self.assertEqual(sum(shard_totals), expected_total)
+        self.assertEqual(len(seen_targets), expected_total)
+        self.assertEqual(len(set(seen_targets)), expected_total)
+        self.assertLessEqual(max(shard_totals) - min(shard_totals), 12)
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
@@ -282,11 +331,17 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("BUILD_FRONTEND=0", step_script(package))
         self.assertIn("BUILD_TRANSCODE=1", step_script(package))
         self.assertIn("bash scripts/build_gold.sh", step_script(package))
-        self.assertIn("npx playwright install --with-deps chromium firefox webkit", step_script(install))
+        e2e_job = workflow.split("  release-e2e-amd64:\n", 1)[1].split("  release-arm64-runtime:\n", 1)[0]
+        self.assertIn("browser: [chromium, firefox, webkit]", e2e_job)
+        self.assertIn('npx playwright install --with-deps "${PLAYWRIGHT_BROWSER}"', step_script(install))
+        self.assertIn("--project=${{ matrix.browser }} [.]live[.]spec[.]ts$", e2e_job)
+        self.assertIn("needs: [validate-release, release-build]", e2e_job)
+        self.assertRegex(workflow, r"needs: \[.*release-e2e-amd64.*\]")
         ordered = (
             "Stage External WASM Frontend Assets", package,
-            "Build and Package Standalone Rust LibreSpeed Archives", install, verify,
-            "Upload Release Bundle Artifact", "Verify Release Archive Integrity",
+            "Build and Package Standalone Rust LibreSpeed Archives",
+            "Upload Release Bundle Artifact", install, verify,
+            "Verify Release Archive Integrity",
             "Attest Build Provenance", "Publish to GitHub Releases",
         )
         steps = [workflow.index(f"- name: {name}") for name in ordered]

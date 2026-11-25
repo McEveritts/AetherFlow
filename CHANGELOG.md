@@ -1,6 +1,8 @@
-## Unreleased — Peer Clustering
+## Nightly Patch Notes — November 25, 2026 — Peer Clustering
 
-- The Cluster tab pairs servers over a dedicated WireGuard link and shows link health, protocol compatibility, and latency.
+- The Cluster tab pairs independent AetherFlow servers over a dedicated peer WireGuard mesh, showing link health, protocol compatibility, latency, delegated grants, and remote management controls.
+- Adds cross-peer media storage federation (`/v1/peer-storage`) and remote Jellyfin transcode offloading via the `af-transcode` worker/shim (`af-transcode-worker.service` with dedicated secret-free `/etc/aetherflow/transcode.env`), plus CLI cluster diagnostics (`af peers` / `af cluster`).
+- Hardens peer pairing and control-plane reliability with DNS-pinned pairing SSRF protection (`AF_PEER_ALLOW_PRIVATE_PAIRING_URLS` opt-in for private LAN/VLAN pairing), sub-second cancellation of active peer streams on grant/link revocation, automatic WireGuard tool installation on first pairing, narrow package-update grant scopes, and live stream metrics.
 - Breaking change. Migration 26 removes the legacy master/worker enrollment, node, and command tables. The `CLUSTER_*` settings and `/api/v1/admin/cluster/*` routes are retired. Pair previously enrolled servers again from the Cluster tab.
 
 ---

@@ -81,8 +81,97 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_modern_stack_env.py' -v
           python3 -m unittest discover -s tests -p 'test_round3_security_regressions.py' -v
 
+  security-python:
+    name: Python Verification & Shell Hygiene (Shard ${{ matrix.shard }}/6)
+    needs: [validate-release]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check Shell Hygiene & Sharded Python Verification Suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-yaml python3-tomlkit apache2-bin jq sqlite3 bc python3-toml python3.11 python3.11-venv
+          if [[ "${TEST_SHARD}" == "1" ]]; then
+            python3 tests/check_shell_hygiene.py
+            bash -n packages/common.sh packages/lib/*.sh packages/youtube-common.sh
+            for app in invidious piped; do
+              bash -n "packages/package/install/installpackage-${app}"
+              bash -n "packages/package/remove/removepackage-${app}"
+            done
+          fi
+          PATH="$PATH:/usr/sbin" /usr/bin/python3 tests/run_parallel_tests.py --shard "${TEST_SHARD}/6"
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+
+  security-frontend:
+    name: Frontend WASM Security, Tests & Playwright Typecheck
+    needs: [validate-release]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24.22.2"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Typecheck Playwright E2E Suite
+        run: |
+          npm ci
+          cd e2e
+          ../node_modules/.bin/tsc --noEmit --incremental false
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
+        with:
+          toolchain: "1.99.1"
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+
+      - name: Rust Cargo Dependency Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "frontend-rs -> target"
+          cache-targets: "false"
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-audit@0.22.2, cargo-deny@0.20.2
+
+      - name: Verify Rust WASM Frontend
+        run: |
+          cargo fmt --manifest-path frontend-rs/Cargo.toml --all -- --check
+          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings
+          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked -- -D warnings
+          cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
+          cargo deny --manifest-path frontend-rs/Cargo.toml --locked check advisories bans licenses sources
+          cargo audit --file frontend-rs/Cargo.lock
+          python3 scripts/finalize_wasm_assets.py --self-test
+
   security-gate:
-    name: Release Security, SAST & Advisory Gate
+    name: Release Security, SAST & Backend Rust Gate
     needs: [validate-release]
     runs-on: ubuntu-22.04
     permissions:
@@ -96,17 +185,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Check Shell Hygiene & Full Python Verification Suite
-        working-directory: .
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends python3-yaml python3-tomlkit apache2-bin jq sqlite3 bc python3-toml python3.11 python3.11-venv
-          python3 tests/check_shell_hygiene.py
-          PATH="$PATH:/usr/sbin" /usr/bin/python3 tests/run_parallel_tests.py
-          find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
       - name: Secret Scan (Gitleaks Gate)
         working-directory: .
@@ -143,14 +221,11 @@ jobs:
         with:
           toolchain: "1.99.1"
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown
 
       - name: Rust Cargo Dependency Cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: |
-            backend-rs -> target
-            frontend-rs -> target
+          workspaces: "backend-rs -> target"
           cache-targets: "false"
 
       - name: Verify Zero-Go Repository Hygiene
@@ -167,17 +242,6 @@ jobs:
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-audit@0.22.2, cargo-deny@0.20.2
-
-      - name: Verify Rust WASM Frontend
-        working-directory: .
-        run: |
-          cargo fmt --manifest-path frontend-rs/Cargo.toml --all -- --check
-          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings
-          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked -- -D warnings
-          cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
-          cargo deny --manifest-path frontend-rs/Cargo.toml --locked check advisories bans licenses sources
-          cargo audit --file frontend-rs/Cargo.lock
-          python3 scripts/finalize_wasm_assets.py --self-test
 
       - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
         run: |
@@ -217,9 +281,60 @@ jobs:
         run: |
           cargo test --workspace --locked -- --test-threads=1
 
-  release-build:
-    name: Build & Verify Release Tarball (Rust Control Plane)
-    needs: [validate-release, security-gate]
+      - name: Verify Updater Survives Its Caller Restart
+        run: |
+          test_binary=$(cargo test -p af-runner --lib --locked --no-run --message-format=json | python3 -c 'import json,sys; artifacts=[json.loads(line) for line in sys.stdin if line.startswith("{")]; binaries=[item["executable"] for item in artifacts if item.get("reason")=="compiler-artifact" and item.get("executable") and item["target"]["name"]=="af_runner"]; assert len(binaries)==1; print(binaries[0])')
+          sudo "$test_binary" tests::updater_survives_caller_restart --ignored --exact --nocapture
+
+  build-wasm:
+    name: Build & Stage External WASM Frontend
+    needs: [validate-release]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
+        with:
+          toolchain: "1.99.1"
+          targets: wasm32-unknown-unknown
+
+      - name: Rust Cargo Dependency Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "frontend-rs -> target"
+          cache-targets: "false"
+
+      - name: Install Pinned WASM Build Tools (SHA-256 Verified)
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/wasm-tools"
+          WASM_TOOL_DIR="${tool_dir}" bash scripts/install_wasm_build_tools.sh
+          echo "${tool_dir}/bin" >> "${GITHUB_PATH}"
+          echo "WASM_TOOL_DIR=${tool_dir}" >> "${GITHUB_ENV}"
+
+      - name: Stage External WASM Frontend Assets
+        run: bash scripts/build_wasm_frontend.sh --stage
+
+      - name: Upload Staged WASM Frontend Artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-web-dist
+          path: web/dist
+          retention-days: 1
+          if-no-files-found: error
+
+  package-amd64:
+    name: Build & Package AMD64 Release Tarball
+    needs: [validate-release, build-wasm]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -234,81 +349,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Test YouTube Marketplace Packages
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq
-          bash -n packages/common.sh packages/lib/*.sh packages/youtube-common.sh
-          for app in invidious piped; do
-            bash -n "packages/package/install/installpackage-${app}"
-            bash -n "packages/package/remove/removepackage-${app}"
-          done
-          PATH="/usr/sbin:$PATH" /usr/bin/python3 -m unittest discover -s tests -p 'test_youtube_packages.py' -v
-
-      - name: Setup Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: "24.22.2"
-          cache: npm
-          cache-dependency-path: package-lock.json
-
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
         with:
           toolchain: "1.99.1"
-          targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, armv7-unknown-linux-gnueabihf, wasm32-unknown-unknown
-          components: clippy, rustfmt
+          targets: x86_64-unknown-linux-gnu
 
-      - name: Install mold Fast Linker & ARM Cross Toolchains
+      - name: Install mold Fast Linker
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends mold clang pkg-config libssl-dev \
-            gcc-aarch64-linux-gnu libc6-dev-arm64-cross gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+          sudo apt-get install -y -qq --no-install-recommends mold clang pkg-config libssl-dev
 
       - name: Rust Cargo Dependency Cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: |
-            backend-rs -> target
-            frontend-rs -> target
+          workspaces: "backend-rs -> target"
           cache-targets: "false"
 
-      - name: Typecheck Playwright E2E Suite
-        run: |
-          npm ci
-          cd e2e
-          ../node_modules/.bin/tsc --noEmit --incremental false
-
-      - name: Install Pinned WASM Build Tools (SHA-256 Verified)
-        working-directory: .
-        run: |
-          set -euo pipefail
-          tool_dir="${RUNNER_TEMP}/wasm-tools"
-          WASM_TOOL_DIR="${tool_dir}" bash scripts/install_wasm_build_tools.sh
-          echo "${tool_dir}/bin" >> "${GITHUB_PATH}"
-          echo "WASM_TOOL_DIR=${tool_dir}" >> "${GITHUB_ENV}"
-
-      - name: Run Rust Workspace Unit & Contract Tests (--locked)
-        working-directory: backend-rs
-        env:
-          JWT_SECRET: ci-test-secret-exactly-32bytes!!
-          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
-          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
-          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
-          TMPDIR: /tmp
-        run: |
-          test -f Cargo.lock
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo test --workspace --locked -- --test-threads=1
-
-      - name: Verify Updater Survives Its Caller Restart
-        working-directory: backend-rs
-        run: |
-          test_binary=$(cargo test -p af-runner --lib --locked --no-run --message-format=json | python3 -c 'import json,sys; artifacts=[json.loads(line) for line in sys.stdin if line.startswith("{")]; binaries=[item["executable"] for item in artifacts if item.get("reason")=="compiler-artifact" and item.get("executable") and item["target"]["name"]=="af_runner"]; assert len(binaries)==1; print(binaries[0])')
-          sudo "$test_binary" tests::updater_survives_caller_restart --ignored --exact --nocapture
-
-      - name: Stage External WASM Frontend Assets
-        run: bash scripts/build_wasm_frontend.sh --stage
+      - name: Download Staged WASM Frontend Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-web-dist
+          path: web/dist
 
       - name: Package Release Tarball & SHA-256 Manifest
         run: |
@@ -316,19 +378,110 @@ jobs:
             TARGETS=amd64 OUTPUT_DIR="${PWD}/release-dist" VERSION="${VERSION_STAMP}" \
             bash scripts/build_gold.sh
 
+      - name: Upload AMD64 Release Artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-amd64
+          path: |
+            release-dist/aetherflow-linux-amd64.tar.gz
+            release-dist/linux-amd64/bin/speedtest-backend
+          retention-days: 1
+          if-no-files-found: error
+
+  package-arm64:
+    name: Build & Package ARM64 Release Tarball
+    needs: [validate-release, build-wasm]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+      VERSION_STAMP: ${{ needs.validate-release.outputs.version_stamp }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
+        with:
+          toolchain: "1.99.1"
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install ARM64 Cross Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends clang pkg-config libssl-dev \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Rust Cargo Dependency Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "backend-rs -> target"
+          cache-targets: "false"
+
+      - name: Download Staged WASM Frontend Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-web-dist
+          path: web/dist
+
       - name: Package ARM64 Release Tarball
         run: |
           BUILD_FRONTEND=0 RUN_TESTS=0 PACKAGE_RELEASE=1 BUILD_CLI=1 BUILD_SPEEDTEST=1 BUILD_TRANSCODE=1 \
             TARGETS=arm64 OUTPUT_DIR="${PWD}/release-dist-arm64" VERSION="${VERSION_STAMP}" \
             bash scripts/build_gold.sh
-          cp -f release-dist-arm64/aetherflow-linux-arm64.tar.gz release-dist/aetherflow-linux-arm64.tar.gz
-          cp -rf release-dist-arm64/linux-arm64 release-dist/linux-arm64
 
-      - name: Build and Package Standalone Rust LibreSpeed Archives
+      - name: Upload ARM64 Release Artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-arm64
+          path: |
+            release-dist-arm64/aetherflow-linux-arm64.tar.gz
+            release-dist-arm64/linux-arm64/bin/speedtest-backend
+          retention-days: 1
+          if-no-files-found: error
+
+  package-armv7-speedtest:
+    name: Build ARMv7 Standalone Rust LibreSpeed
+    needs: [validate-release]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: "0"
+      RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
+        with:
+          toolchain: "1.99.1"
+          targets: armv7-unknown-linux-gnueabihf
+
+      - name: Install ARMv7 Cross Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+
+      - name: Rust Cargo Dependency Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "backend-rs -> target"
+          cache-targets: "false"
+
+      - name: Build ARMv7 Rust LibreSpeed Binary
         run: |
           set -euo pipefail
           export AF_BUILD_VERSION="${RELEASE_TAG#v}"
-          SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}"
           (
             cd backend-rs
             export RUSTFLAGS="-C link-arg=-Wl,--as-needed"
@@ -336,6 +489,68 @@ jobs:
               CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
               cargo build --release --locked --target armv7-unknown-linux-gnueabihf -p af-librespeed --bin speedtest-backend
           )
+          mkdir -p release-dist/linux-armv7/bin
+          install -m 0755 backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend \
+            release-dist/linux-armv7/bin/speedtest-backend
+
+      - name: Upload ARMv7 LibreSpeed Artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-armv7-speedtest
+          path: release-dist/linux-armv7/bin/speedtest-backend
+          retention-days: 1
+          if-no-files-found: error
+
+  release-build:
+    name: Assemble Release Bundle & SHA-256 Manifest
+    needs: [validate-release, security-gate, security-frontend, security-python, package-amd64, package-arm64, package-armv7-speedtest]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+      VERSION_STAMP: ${{ needs.validate-release.outputs.version_stamp }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download AMD64 Release Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-amd64
+          path: release-dist
+
+      - name: Download ARM64 Release Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-arm64
+          path: release-dist
+
+      - name: Download ARMv7 LibreSpeed Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-armv7-speedtest
+          path: release-dist/linux-armv7/bin
+
+      - name: Build and Package Standalone Rust LibreSpeed Archives
+        run: |
+          set -euo pipefail
+          export AF_BUILD_VERSION="${RELEASE_TAG#v}"
+          SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}"
+          armv7_bin="release-dist/linux-armv7/bin/speedtest-backend"
+          if [[ ! -f "${armv7_bin}" ]]; then
+            (
+              cd backend-rs
+              export RUSTFLAGS="-C link-arg=-Wl,--as-needed"
+              CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
+                CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
+                cargo build --release --locked --target armv7-unknown-linux-gnueabihf -p af-librespeed --bin speedtest-backend
+            )
+            armv7_bin="backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend"
+          fi
 
           stage="$(mktemp -d)"
           trap 'rm -rf "${stage}"' EXIT
@@ -350,7 +565,7 @@ jobs:
           }
           package_speedtest "release-dist/linux-amd64/bin/speedtest-backend" amd64
           package_speedtest "release-dist/linux-arm64/bin/speedtest-backend" arm64
-          package_speedtest "backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend" armv7
+          package_speedtest "${armv7_bin}" armv7
           if git rev-parse --git-dir >/dev/null 2>&1; then
             # Setup and the source build need deployment files and both Rust workspaces.
             git archive --format=tar.gz --prefix=AetherFlow/ HEAD -- \
@@ -370,15 +585,63 @@ jobs:
             release_archives+=(aetherflow-bootstrap.tar.gz)
           fi
           (cd release-dist && sha256sum "${release_archives[@]}" "${speedtest_archives[@]}" > SHA256SUMS)
+          (cd release-dist && sha256sum --strict --check SHA256SUMS)
+
+      - name: Upload Release Bundle Artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-dist
+          path: |
+            release-dist/aetherflow-linux-*.tar.gz
+            release-dist/aetherflow-bootstrap.tar.gz
+            release-dist/speedtest-backend_*_linux_*.tar.gz
+            release-dist/SHA256SUMS
+          if-no-files-found: error
+
+  release-e2e-amd64:
+    name: Verify Extracted AMD64 Release E2E (${{ matrix.browser }})
+    needs: [validate-release, release-build]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    env:
+      VERSION_STAMP: ${{ needs.validate-release.outputs.version_stamp }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24.22.2"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Download Release Bundle Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-dist
+          path: release-dist
 
       - name: Install Playwright Browser Engines for Release Verification
+        env:
+          PLAYWRIGHT_BROWSER: ${{ matrix.browser }}
         run: |
+          npm ci
           cd e2e
-          npx playwright install --with-deps chromium firefox webkit
+          npx playwright install --with-deps "${PLAYWRIGHT_BROWSER}"
 
       - name: Execute Live E2E Against Extracted Release Artifact
         env:
           CI: "true"
+          E2E_PLAYWRIGHT_SPECS: --project=${{ matrix.browser }} [.]live[.]spec[.]ts$
         run: |
           RELEASE_E2E_DIR="$(mktemp -d "${RUNNER_TEMP}/aetherflow-release-e2e.XXXXXX")"
           trap 'rm -rf "${RELEASE_E2E_DIR}"' EXIT
@@ -408,22 +671,13 @@ jobs:
           test "$(cat "${RELEASE_E2E_DIR}/.version")" = "${VERSION_STAMP}"
           bash scripts/run_embedded_e2e.sh --binary "${RELEASE_E2E_DIR}/aetherflow-api" --static-dir "${RELEASE_E2E_DIR}/web/dist" --port 18080 --playwright
 
-      - name: Upload Release Bundle Artifact
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: release-dist
-          path: |
-            release-dist/aetherflow-linux-*.tar.gz
-            release-dist/aetherflow-bootstrap.tar.gz
-            release-dist/speedtest-backend_*_linux_*.tar.gz
-            release-dist/SHA256SUMS
-          if-no-files-found: error
-
   release-arm64-runtime:
     name: Verify Extracted Release on ARM64
     needs: [validate-release, release-build]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -464,7 +718,7 @@ jobs:
   release-publish:
     name: Attest & Publish Signed Release
     if: github.ref == 'refs/heads/nightly' || github.ref == 'refs/heads/Nightly' || startsWith(github.ref, 'refs/tags/v')
-    needs: [validate-release, security-gate, release-build, release-arm64-runtime]
+    needs: [validate-release, security-gate, security-frontend, security-python, release-build, release-e2e-amd64, release-arm64-runtime]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

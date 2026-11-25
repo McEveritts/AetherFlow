@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Parallel unittest runner for tests/test_*.py preserving setUpClass/tearDownClass isolation."""
 
+import argparse
 import concurrent.futures
 import os
 import subprocess
@@ -8,7 +9,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = ROOT / "tests"
@@ -98,8 +99,66 @@ def run_bucket(idx: int, targets: List[str]) -> Tuple[int, int, int, float, str]
     return idx, proc.returncode, ran, elapsed, combined
 
 
-def main() -> int:
-    units, expected_total = discover_work_units()
+def parse_shard(spec: str) -> Tuple[int, int]:
+    parts = spec.strip().split("/")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid shard specification {spec!r}; expected '<index>/<total>' (1-based).")
+    try:
+        shard_index = int(parts[0])
+        shard_total = int(parts[1])
+    except ValueError as exc:
+        raise ValueError(f"Invalid shard specification {spec!r}; expected integer '<index>/<total>'.") from exc
+    if shard_total < 1 or shard_index < 1 or shard_index > shard_total:
+        raise ValueError(
+            f"Invalid shard specification {spec!r}; require 1 <= index <= total (got {shard_index}/{shard_total})."
+        )
+    return shard_index, shard_total
+
+
+def select_shard_units(
+    units: Sequence[Tuple[List[str], int]],
+    shard_index: int,
+    shard_total: int,
+) -> Tuple[List[Tuple[List[str], int]], int]:
+    if shard_total < 1 or shard_index < 1 or shard_index > shard_total:
+        raise ValueError(f"Invalid shard range {shard_index}/{shard_total}")
+    if shard_total == 1:
+        selected = list(units)
+        return selected, sum(count for _, count in selected)
+
+    shards: List[List[Tuple[List[str], int]]] = [[] for _ in range(shard_total)]
+    shard_loads = [0] * shard_total
+    for targets, count in units:
+        target_shard = min(range(shard_total), key=lambda idx: (shard_loads[idx], idx))
+        shards[target_shard].append((targets, count))
+        shard_loads[target_shard] += count
+
+    selected = shards[shard_index - 1]
+    return selected, shard_loads[shard_index - 1]
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Parallel unittest runner for tests/test_*.py")
+    parser.add_argument(
+        "--shard",
+        default=os.environ.get("AF_TEST_SHARD", ""),
+        help="Optional 1-based shard selector '<index>/<total>' (e.g. 1/6) to run a deterministic balanced partition.",
+    )
+    args = parser.parse_args(argv)
+
+    units, discovered_total = discover_work_units()
+    shard_label = ""
+    if args.shard:
+        shard_index, shard_total = parse_shard(args.shard)
+        units, expected_total = select_shard_units(units, shard_index, shard_total)
+        shard_label = f" [shard {shard_index}/{shard_total} of {discovered_total} total]"
+    else:
+        expected_total = discovered_total
+
+    if not units:
+        print(f"[PASS] No tests assigned{shard_label}.", flush=True)
+        return 0
+
     cpus = os.cpu_count() or 4
     default_workers = min(max(cpus * 2, 4), 12)
     workers = int(os.environ.get("AF_TEST_WORKERS", str(default_workers)))
@@ -113,7 +172,7 @@ def main() -> int:
         loads[target_idx] += count
 
     print(
-        f"[run_parallel_tests] Running {expected_total} tests across {len(units)} work units "
+        f"[run_parallel_tests] Running {expected_total} tests across {len(units)} work units{shard_label} "
         f"using {workers} parallel workers (loads={loads})",
         flush=True,
     )
@@ -141,12 +200,12 @@ def main() -> int:
 
     if total_ran != expected_total:
         print(
-            f"[FAIL] Expected {expected_total} tests to run, but workers reported {total_ran}",
+            f"[FAIL] Expected {expected_total} tests to run{shard_label}, but workers reported {total_ran}",
             file=sys.stderr,
         )
         return 1
 
-    print(f"[PASS] All {total_ran} tests passed in {wall:.1f}s across {workers} workers.", flush=True)
+    print(f"[PASS] All {total_ran} tests passed{shard_label} in {wall:.1f}s across {workers} workers.", flush=True)
     return 0
 
 
