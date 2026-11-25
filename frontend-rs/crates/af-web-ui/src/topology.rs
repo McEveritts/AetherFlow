@@ -68,21 +68,21 @@ pub fn AppTopologyMap(
                 />
                 <div class="flex gap-2">
                     <button
-                        class="glass-button px-3"
+                        class="af-btn px-3"
                         aria-label=move || ui_t("Zoom out")
                         on:click=move |_| zoom.update(|zoom| *zoom = (*zoom / 1.2).max(0.3))
                     >
                         "−"
                     </button>
                     <button
-                        class="glass-button px-3"
+                        class="af-btn px-3"
                         aria-label=move || ui_t("Zoom in")
                         on:click=move |_| zoom.update(|zoom| *zoom = (*zoom * 1.2).min(4.0))
                     >
                         "+"
                     </button>
                     <button
-                        class="glass-button px-3"
+                        class="af-btn px-3"
                         on:click=move |_| {
                             zoom.set(1.0);
                             pan.set((0.0, 0.0));
@@ -96,25 +96,29 @@ pub fn AppTopologyMap(
                 <Show
                     when=move || mode.get() == "graph"
                     fallback=move || view! {
-                        <div class="grid sm:grid-cols-2 gap-4">
+                        <div class="af-hairline-grid grid sm:grid-cols-2">
                             {[ServiceGroup::Core, ServiceGroup::Active, ServiceGroup::Stopped, ServiceGroup::Exception, ServiceGroup::Other]
                                 .into_iter().map(|group| view! {
-                                    <crate::ObsCard title=group_key(group)>
-                                        {move || nodes.get().into_iter().filter(|node| node.group == group).map(|node| {
-                                            let name = node.label.clone();
-                                            view! {
-                                                <button
-                                                    class="block w-full text-left py-2 border-b border-white/5"
-                                                    on:click=move |_| {
-                                                        selected.set(Some(node.clone()));
-                                                        inspector.set(true);
-                                                    }
-                                                >
-                                                    {name}
-                                                </button>
-                                            }
-                                        }).collect_view()}
-                                    </crate::ObsCard>
+                                    <section class="p-4 min-w-0 space-y-2">
+                                        <h3 class="text-sm font-semibold text-slate-200">{move || ui_t(group_key(group))}</h3>
+                                        <div class="space-y-1.5">
+                                            {move || nodes.get().into_iter().filter(|node| node.group == group).map(|node| {
+                                                let name = node.label.clone();
+                                                view! {
+                                                    <button
+                                                        type="button"
+                                                        class="af-surface-inset block w-full text-left px-3 py-2 text-sm hover:bg-[var(--af-control-bg-hover)] transition-colors"
+                                                        on:click=move |_| {
+                                                            selected.set(Some(node.clone()));
+                                                            inspector.set(true);
+                                                        }
+                                                    >
+                                                        {name}
+                                                    </button>
+                                                }
+                                            }).collect_view()}
+                                        </div>
+                                    </section>
                                 }).collect_view()}
                         </div>
                     }

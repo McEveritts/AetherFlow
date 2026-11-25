@@ -554,13 +554,13 @@ fn ShareContent(token: String) -> impl IntoView {
                             </label>
                             <input
                                 id="share-password" type="password"
-                                class="glass-input px-3 py-2 flex-1 min-w-0"
+                                class="af-input px-3 py-2 flex-1 min-w-0"
                                 autocomplete="current-password" required=true
                                 placeholder=move || context.t("Share.password")
                                 prop:value=move || password.get()
                                 on:input=move |event| password.set(event_target_value(&event))
                             />
-                            <button type="submit" class="glass-button-primary px-4" disabled=move || busy.get()>
+                            <button type="submit" class="af-btn-primary px-4" disabled=move || busy.get()>
                                 {move || context.t("Share.unlock")}
                             </button>
                         </form>
@@ -579,7 +579,7 @@ fn ShareContent(token: String) -> impl IntoView {
                         <af_web_ui::ObsCard title=Signal::derive(move || context.t("Share.files"))>
                             <div class="flex gap-3 mb-4">
                                 <button
-                                    class="glass-button px-3"
+                                    class="af-btn px-3"
                                     disabled=move || directory.with(|value| value.path.is_empty())
                                     on:click=move |_| {
                                         invalidate_selection();
@@ -597,7 +597,7 @@ fn ShareContent(token: String) -> impl IntoView {
                                 <p role="status">{move || context.t("Share.loading")}</p>
                             </Show>
                             <Show when=move || !listing_busy.get() && !listing_ready()>
-                                <button class="glass-button px-3 py-2" on:click=move |_| {
+                                <button class="af-btn px-3 py-2" on:click=move |_| {
                                     invalidate_selection();
                                     directory.update(|value| value.revision += 1);
                                 }>
@@ -653,12 +653,12 @@ fn ShareContent(token: String) -> impl IntoView {
                     </Show>
                     <Show when=transfers_allowed>
                     <div class="flex flex-wrap gap-3">
-                        <button class="glass-button px-4 py-2" disabled=move || preview_busy.get() || !preview_ready() on:click=move |_| preview()>
+                        <button class="af-btn px-4 py-2" disabled=move || preview_busy.get() || !preview_ready() on:click=move |_| preview()>
                             {move || context.t("Share.preview")}
                         </button>
                         <Show when=preview_ready>
                             <a
-                                class="glass-button-primary px-4 py-2"
+                                class="af-btn-primary px-4 py-2"
                                 href=move || format!("{}/download?path={}", base.get_value(), js_sys::encode_uri_component(&file.get()))
                                 download=display_selected_name
                             >
@@ -671,7 +671,7 @@ fn ShareContent(token: String) -> impl IntoView {
                         <p role="status">{move || context.t("Share.loadingPreview")}</p>
                     </Show>
                     <Show when=move || preview_text.with(|text| !text.is_empty())>
-                        <pre class="glass-card p-5 obs-scroller max-h-[65vh] text-sm whitespace-pre-wrap break-words">
+                        <pre class="af-card p-5 obs-scroller max-h-[65vh] text-sm whitespace-pre-wrap break-words">
                             {move || {
                                 preview_text.with(|text| match split_preview_text_segments(text) {
                                     Some(segments) => segments

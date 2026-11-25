@@ -94,10 +94,52 @@ fn tab_dom_id(prefix: &str, kind: &str, id: &str) -> String {
     format!("{prefix}-{kind}-{safe_id}")
 }
 
+fn card_class(interactive: bool) -> &'static str {
+    if interactive {
+        "af-card af-card-interactive p-5 min-w-0 max-w-full"
+    } else {
+        "af-card p-5 min-w-0 max-w-full"
+    }
+}
+
+fn button_appearance(primary: bool, tone: &str) -> (&'static str, Option<&'static str>) {
+    let normalized = tone.trim().to_ascii_lowercase();
+    if primary || normalized == "primary" {
+        ("af-btn-primary px-4 py-2", None)
+    } else {
+        let data_tone = match normalized.as_str() {
+            "danger" => Some("danger"),
+            "success" => Some("success"),
+            _ => None,
+        };
+        ("af-btn px-4 py-2", data_tone)
+    }
+}
+
+fn modal_dialog_class() -> &'static str {
+    "af-modal min-w-0 max-w-full"
+}
+
+fn modal_close_button_class() -> &'static str {
+    "af-btn px-3 min-w-10 min-h-10"
+}
+
+fn confirm_button_appearance(danger: bool) -> (&'static str, Option<&'static str>) {
+    if danger {
+        ("af-btn px-4 py-2", Some("danger"))
+    } else {
+        ("af-btn-primary px-4 py-2", None)
+    }
+}
+
 #[component]
-pub fn ObsCard(#[prop(optional, into)] title: Signal<String>, children: Children) -> impl IntoView {
+pub fn ObsCard(
+    #[prop(optional, into)] title: Signal<String>,
+    #[prop(optional)] interactive: bool,
+    children: Children,
+) -> impl IntoView {
     view! {
-        <section class="glass-card p-5 min-w-0 max-w-full">
+        <section class=card_class(interactive)>
             <Show when=move || !title.get().is_empty()>
                 <h2 class="text-lg font-semibold mb-4">{move || ui_t(&title.get())}</h2>
             </Show>
@@ -109,14 +151,17 @@ pub fn ObsCard(#[prop(optional, into)] title: Signal<String>, children: Children
 #[component]
 pub fn Button(
     #[prop(optional)] primary: bool,
+    #[prop(optional, into)] tone: String,
     #[prop(optional, into)] disabled: Signal<bool>,
     #[prop(optional)] on_click: Option<Callback<web_sys::MouseEvent>>,
     children: Children,
 ) -> impl IntoView {
+    let (class, data_tone) = button_appearance(primary, &tone);
     view! {
         <button
             type="button"
-            class=if primary { "glass-button-primary px-4 py-2" } else { "glass-button px-4 py-2" }
+            class=class
+            data-tone=data_tone
             disabled=move || disabled.get()
             on:click=move |event| {
                 if let Some(callback) = on_click {
@@ -277,7 +322,7 @@ pub fn Modal(
     view! {
         <dialog
             node_ref=dialog
-            class="af-modal glass-card min-w-0 max-w-full"
+            class=modal_dialog_class()
             role="dialog"
             aria-modal="true"
             aria-label=move || ui_t(&title.get())
@@ -339,7 +384,7 @@ pub fn Modal(
                 <h2 class="text-xl font-semibold">{move || ui_t(&title.get())}</h2>
                 <button
                     type="button"
-                    class="glass-button px-3"
+                    class=modal_close_button_class()
                     aria-label=move || ui_t("Common.closeDialog")
                     on:click=move |_| open.set(false)
                 >
@@ -371,20 +416,25 @@ pub fn ConfirmDialog(
     #[prop(into)] message: Signal<String>,
     on_confirm: Callback<()>,
     #[prop(optional, into)] busy: Signal<bool>,
+    #[prop(optional)] danger: bool,
 ) -> impl IntoView {
+    let (confirm_class, confirm_tone) = confirm_button_appearance(danger);
     view! {
         <Modal open title>
             <p class="text-slate-300 mb-5">{move || ui_t(&message.get())}</p>
             <div class="flex gap-3 justify-end">
                 <button
-                    class="glass-button px-4 py-2"
+                    type="button"
+                    class="af-btn px-4 py-2"
                     disabled=move || busy.get()
                     on:click=move |_| open.set(false)
                 >
                     {move || ui_t("Common.cancel")}
                 </button>
                 <button
-                    class="glass-button-primary px-4 py-2"
+                    type="button"
+                    class=confirm_class
+                    data-tone=confirm_tone
                     disabled=move || busy.get()
                     on:click=move |_| on_confirm.run(())
                 >
@@ -464,8 +514,8 @@ pub fn TabsBar(
                             })
                         }
                         role="tab"
-                        class="obs-tab-pill px-4 py-2"
-                        class:obs-tab-pill-active=move || active.get() == selected
+                        class="af-tab-pill px-4 py-2"
+                        class:af-tab-pill-active=move || active.get() == selected
                         aria-selected=move || (active.get() == tab_index).to_string()
                         tabindex=move || if active.get() == id { 0 } else { -1 }
                         on:click=move |_| active.set(target.clone())
@@ -491,7 +541,7 @@ pub fn TabPanel(
             id=move || prefix.with_value(|prefix| tab_dom_id(prefix, "tabpanel", &id.get()))
             aria-labelledby=move || prefix.with_value(|prefix| tab_dom_id(prefix, "tab", &id.get()))
             tabindex="0"
-            class="min-w-0 max-w-full space-y-5 focus:outline-none"
+            class="min-w-0 max-w-full space-y-5"
         >
             {children()}
         </div>
@@ -518,7 +568,7 @@ pub fn SearchInput(
                 type="search"
                 aria-label=move || search_accessible_label(&placeholder.get())
                 placeholder=move || ui_t(&placeholder.get())
-                class="glass-input obs-search-input pl-9 pr-3 py-2 min-w-0 w-full"
+                class="af-input obs-search-input pl-9 pr-3 py-2 min-w-0 w-full"
                 prop:value=move || value.get()
                 on:input=move |event| value.set(event_target_value(&event))
             />
@@ -660,6 +710,66 @@ mod tests {
         assert_eq!(
             tab_dom_id("topology", "tabpanel", "list"),
             "topology-tabpanel-list"
+        );
+    }
+
+    #[test]
+    fn button_tones_map_to_flat_classes_and_data_tones() {
+        assert_eq!(
+            button_appearance(true, ""),
+            ("af-btn-primary px-4 py-2", None)
+        );
+        assert_eq!(
+            button_appearance(false, "primary"),
+            ("af-btn-primary px-4 py-2", None)
+        );
+        assert_eq!(
+            button_appearance(false, " PRIMARY "),
+            ("af-btn-primary px-4 py-2", None)
+        );
+        assert_eq!(
+            button_appearance(false, "danger"),
+            ("af-btn px-4 py-2", Some("danger"))
+        );
+        assert_eq!(
+            button_appearance(false, " SUCCESS "),
+            ("af-btn px-4 py-2", Some("success"))
+        );
+        for neutral in ["", "neutral", "unknown", "fixed inset-0"] {
+            assert_eq!(
+                button_appearance(false, neutral),
+                ("af-btn px-4 py-2", None),
+                "{neutral:?}"
+            );
+        }
+        assert_eq!(
+            confirm_button_appearance(false),
+            ("af-btn-primary px-4 py-2", None)
+        );
+        assert_eq!(
+            confirm_button_appearance(true),
+            ("af-btn px-4 py-2", Some("danger"))
+        );
+    }
+
+    #[test]
+    fn card_and_modal_helpers_emit_flat_surface_classes() {
+        assert_eq!(card_class(false), "af-card p-5 min-w-0 max-w-full");
+        assert_eq!(
+            card_class(true),
+            "af-card af-card-interactive p-5 min-w-0 max-w-full"
+        );
+        let dialog_class = modal_dialog_class();
+        assert_eq!(dialog_class, "af-modal min-w-0 max-w-full");
+        assert!(
+            !dialog_class
+                .split_whitespace()
+                .any(|cls| cls.starts_with("glass-") || cls == "af-card"),
+            "modal overlay must never combine with card or legacy glass classes: {dialog_class}"
+        );
+        assert_eq!(
+            modal_close_button_class(),
+            "af-btn px-3 min-w-10 min-h-10"
         );
     }
 }

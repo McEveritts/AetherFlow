@@ -269,7 +269,7 @@ pub fn DataGrid(
                         }
                     }
                 >
-                    <thead class="sticky top-0 z-10 bg-slate-950/95 backdrop-blur">
+                    <thead class="sticky top-0 z-10 bg-[var(--af-bg-chrome)] border-b border-[var(--af-border-hairline)]">
                         <tr role="row">{move || columns.get().into_iter().map(|column| {
                             let key = column.key.clone();
                             let sort_key = column.key.clone();

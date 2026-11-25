@@ -219,7 +219,7 @@ pub fn LoginPage() -> impl IntoView {
                     </h1>
                     <p class="text-slate-400 text-sm mt-3">{move || context.t("Login.tagline")}</p>
                 </header>
-                <div class="glass-card p-6 min-w-0">
+                <div class="af-card p-6 min-w-0">
                     <Show
                         when=move || !setup.loading.get()
                         fallback=move || view! { <p role="status">{move || context.t("Login.checking")}</p> }
@@ -236,7 +236,7 @@ pub fn LoginPage() -> impl IntoView {
                                     </label>
                                     <input
                                         id="mfa-code"
-                                        class="glass-input w-full px-3 py-3 font-mono tracking-widest"
+                                        class="af-input w-full px-3 py-3 font-mono tracking-widest"
                                         type="text"
                                         inputmode=move || if recovery.get() { "text" } else { "numeric" }
                                         autocomplete="one-time-code"
@@ -247,7 +247,7 @@ pub fn LoginPage() -> impl IntoView {
                                     />
                                     <button
                                         type="button"
-                                        class="text-indigo-300 text-sm"
+                                        class="text-indigo-300 text-sm min-h-11 py-2 underline hover:text-indigo-200"
                                         on:click=move |_| {
                                             recovery.update(|value| *value = !*value);
                                             code.set(String::new());
@@ -262,7 +262,7 @@ pub fn LoginPage() -> impl IntoView {
                                 </label>
                                 <input
                                     id="username" type="text" required=true autocomplete="username"
-                                    class="glass-input w-full px-3 py-3"
+                                    class="af-input w-full px-3 py-3"
                                     placeholder=move || context.t(if setup.data.with(|value| value["setupRequired"] == true) {
                                         "Login.chooseUsername"
                                     } else { "Login.username" })
@@ -275,7 +275,7 @@ pub fn LoginPage() -> impl IntoView {
                                 <input
                                     id="password" type="password" required=true
                                     autocomplete=move || if setup.data.with(|value| value["setupRequired"] == true) { "new-password" } else { "current-password" }
-                                    class="glass-input w-full px-3 py-3"
+                                    class="af-input w-full px-3 py-3"
                                     placeholder=move || context.t(if setup.data.with(|value| value["setupRequired"] == true) {
                                         "Login.choosePassword"
                                     } else { "Login.password" })
@@ -291,7 +291,7 @@ pub fn LoginPage() -> impl IntoView {
                                         id="setup-token"
                                         type="password"
                                         autocomplete="off"
-                                        class="glass-input w-full px-3 py-3 font-mono"
+                                        class="af-input w-full px-3 py-3 font-mono"
                                         placeholder="Optional unless required by remote bootstrap"
                                         prop:value=move || setup_token.get()
                                         on:input=move |event| setup_token.set(event_target_value(&event))
@@ -315,7 +315,7 @@ pub fn LoginPage() -> impl IntoView {
                             </Show>
                             <button
                                 type="submit"
-                                class="glass-button-primary w-full py-3 font-semibold"
+                                class="af-btn-primary w-full py-3 font-semibold"
                                 disabled=move || busy.get()
                             >
                                 {move || context.t(if busy.get() {
@@ -331,7 +331,7 @@ pub fn LoginPage() -> impl IntoView {
                             {move || view! {
                                 <EmptyState title=context.t("Login.unavailable") description=context.t("Login.retryDescription")/>
                             }}
-                            <button class="glass-button px-3" on:click=move |_| setup.refresh()>
+                            <button class="af-btn px-3" on:click=move |_| setup.refresh()>
                                 {move || context.t("Common.retry")}
                             </button>
                         </Show>
@@ -340,7 +340,7 @@ pub fn LoginPage() -> impl IntoView {
                             <div class="border-t border-white/10 mt-6 pt-5 space-y-3">
                                 <button
                                     type="button"
-                                    class="glass-button w-full py-3"
+                                    class="af-btn w-full py-3"
                                     on:click=move |_| {
                                         let destination = destination.get_value();
                                         let query = if destination == "/" { String::new() } else {
