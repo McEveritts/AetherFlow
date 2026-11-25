@@ -1,0 +1,324 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 800" width="1600" height="800" role="img" aria-labelledby="pc-title pc-desc">
+  <title id="pc-title">AetherFlow v4.0.0 — Peer Clustering</title>
+  <desc id="pc-desc">Three independent AetherFlow v4.0.0 servers paired over a dedicated WireGuard afpeer0 mesh for delegated grants, NFSv4.2 storage federation, and remote Jellyfin 12.4 transcode offload.</desc>
+  <defs>
+    <style>
+      .af-sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+      .af-mono { font-family: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+
+    <linearGradient id="pc-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#07070c"/>
+      <stop offset="50%" stop-color="#0b0d17"/>
+      <stop offset="100%" stop-color="#0f0f1a"/>
+    </linearGradient>
+    <linearGradient id="pc-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.5"/>
+      <stop offset="45%" stop-color="#22d3ee" stop-opacity="0.46"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0.48"/>
+    </linearGradient>
+    <linearGradient id="pc-specular" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0"/>
+      <stop offset="25%" stop-color="#34d399" stop-opacity="0.72"/>
+      <stop offset="55%" stop-color="#22d3ee" stop-opacity="0.8"/>
+      <stop offset="85%" stop-color="#a855f7" stop-opacity="0.62"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0"/>
+    </linearGradient>
+
+    <radialGradient id="pc-glow-center" cx="50%" cy="46%" r="36%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.18"/>
+      <stop offset="55%" stop-color="#22d3ee" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pc-glow-left" cx="15%" cy="35%" r="35%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pc-glow-right" cx="86%" cy="68%" r="34%">
+      <stop offset="0%" stop-color="#d946ef" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="pc-panel" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#121629" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#0b0e1c" stop-opacity="0.97"/>
+    </linearGradient>
+    <linearGradient id="pc-subcard" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#171c33" stop-opacity="0.94"/>
+      <stop offset="100%" stop-color="#101425" stop-opacity="0.95"/>
+    </linearGradient>
+    <linearGradient id="pc-mesh-box" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0b1f1e" stop-opacity="0.95"/>
+      <stop offset="55%" stop-color="#0c1726" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#151229" stop-opacity="0.95"/>
+    </linearGradient>
+
+    <pattern id="pc-grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#ffffff" stroke-width="0.6" stroke-opacity="0.03"/>
+    </pattern>
+
+    <!-- Markers -->
+    <marker id="pc-arr-indigo" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#818cf8"/>
+    </marker>
+    <marker id="pc-arr-cyan" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="pc-arr-fuchsia" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#e879f9"/>
+    </marker>
+    <marker id="pc-arr-emerald" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#34d399"/>
+    </marker>
+
+    <clipPath id="pc-clip">
+      <rect x="2" y="2" width="1596" height="796" rx="24"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#pc-clip)">
+    <rect x="2" y="2" width="1596" height="796" rx="24" fill="url(#pc-bg)"/>
+    <rect x="2" y="2" width="1596" height="796" rx="24" fill="url(#pc-glow-center)"/>
+    <rect x="2" y="2" width="1596" height="796" rx="24" fill="url(#pc-glow-left)"/>
+    <rect x="2" y="2" width="1596" height="796" rx="24" fill="url(#pc-glow-right)"/>
+    <rect x="2" y="2" width="1596" height="796" rx="24" fill="url(#pc-grid)"/>
+
+    <!-- Header -->
+    <g transform="translate(36, 26)">
+      <text x="0" y="26" class="af-sans" font-size="26" font-weight="800" fill="#f8fafc" letter-spacing="-0.5">AetherFlow v4.0.0 — Peer Clustering Topology</text>
+      <text x="0" y="50" class="af-mono" font-size="12.5" fill="#94a3b8">3 independent servers · dedicated WireGuard (afpeer0) · delegated grants · NFSv4.2 federation · Jellyfin 12.4 GPU offload</text>
+
+      <!-- CLI Diagnostics Badge (Top Right) -->
+      <g transform="translate(1224, 10)">
+        <rect x="0" y="0" width="304" height="34" rx="17" fill="#0d201d" stroke="#10b981" stroke-opacity="0.55" stroke-width="1.2"/>
+        <circle cx="18" cy="17" r="4.5" fill="#34d399"/>
+        <text x="32" y="21.5" class="af-mono" font-size="12" font-weight="600" fill="#d1fae5">af cluster diagnose &lt;link&gt;</text>
+      </g>
+    </g>
+
+    <line x1="36" y1="88" x2="1564" y2="88" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1"/>
+
+    <!-- =================================================================== -->
+    <!-- LEFT: SERVER A (node-alpha — Controller + Jellyfin 12.4)            -->
+    <!-- =================================================================== -->
+    <g transform="translate(36, 108)">
+      <rect x="0" y="0" width="460" height="496" rx="18" fill="url(#pc-panel)" stroke="#6366f1" stroke-opacity="0.62" stroke-width="1.6"/>
+      <rect x="0" y="0" width="460" height="58" rx="18" fill="#171936"/>
+      <rect x="0" y="34" width="460" height="24" fill="#171936"/>
+      <line x1="0" y1="58" x2="460" y2="58" stroke="#6366f1" stroke-opacity="0.35" stroke-width="1"/>
+
+      <circle cx="22" cy="24" r="5.5" fill="#818cf8"/>
+      <text x="36" y="29" class="af-sans" font-size="16" font-weight="800" fill="#ffffff">Server A — node-alpha</text>
+      <rect x="342" y="12" width="104" height="24" rx="12" fill="#232757" stroke="#818cf8" stroke-opacity="0.5" stroke-width="1"/>
+      <text x="394" y="28" text-anchor="middle" class="af-mono" font-size="11" font-weight="600" fill="#c7d2fe">10.231.0.10</text>
+      <text x="36" y="48" class="af-mono" font-size="11" fill="#a5b4fc">Independent AetherFlow Node · Managing + Jellyfin 12.4</text>
+
+      <!-- Block 1: Cluster UI & Peer Proxy -->
+      <rect x="16" y="72" width="428" height="106" rx="12" fill="url(#pc-subcard)" stroke="#818cf8" stroke-opacity="0.42" stroke-width="1.1"/>
+      <text x="28" y="94" class="af-mono" font-size="12.5" font-weight="700" fill="#e0e7ff">af-api  ·  Cluster UI (/?tab=cluster)</text>
+      <text x="28" y="115" class="af-mono" font-size="11" fill="#cbd5e1">peers::proxy → /api/v1/peers/{id}/* (HTTP &amp; WS)</text>
+      <text x="28" y="134" class="af-mono" font-size="11" fill="#94a3b8">Holds X-AF-Link-Token + outbound X-AF-Grant-Token</text>
+      <text x="28" y="153" class="af-mono" font-size="11" fill="#94a3b8">15s health loop: WG handshake · /health · sentinels</text>
+      <text x="28" y="169" class="af-mono" font-size="10" fill="#818cf8">Active server switcher · AreaFence · local-only auth</text>
+
+      <!-- Block 2: Mounted Peer Storage -->
+      <rect x="16" y="192" width="428" height="106" rx="12" fill="url(#pc-subcard)" stroke="#22d3ee" stroke-opacity="0.42" stroke-width="1.1"/>
+      <text x="28" y="214" class="af-mono" font-size="12.5" font-weight="700" fill="#cffafe">af-runner  ·  /v1/peer-storage (root)</text>
+      <text x="28" y="235" class="af-mono" font-size="11" fill="#cbd5e1">Mounts B exports → /mnt/af-peers/node-beta/movies</text>
+      <text x="28" y="254" class="af-mono" font-size="11" fill="#94a3b8">Apps read interior subfolder (/library) only</text>
+      <text x="28" y="273" class="af-mono" font-size="11" fill="#94a3b8">Exports /var/cache/jellyfin/{transcodes,af-tmp} to C</text>
+      <text x="28" y="289" class="af-mono" font-size="10" fill="#22d3ee">Auto-stops mount on 2 sentinel fails or WG &gt;180s</text>
+
+      <!-- Block 3: Jellyfin 12.4 + af-transcode Shim -->
+      <rect x="16" y="312" width="428" height="168" rx="12" fill="url(#pc-subcard)" stroke="#d946ef" stroke-opacity="0.45" stroke-width="1.2"/>
+      <text x="28" y="334" class="af-mono" font-size="12.5" font-weight="700" fill="#fae8ff">Jellyfin 12.4  →  af-transcode Shim</text>
+      <text x="28" y="355" class="af-mono" font-size="9.8" fill="#cbd5e1">JELLYFIN_FFMPEG=/usr/lib/aetherflow/transcode/ffmpeg</text>
+      <text x="28" y="374" class="af-mono" font-size="9.8" fill="#94a3b8">20-aetherflow-transcode.conf + secret-free transcode.env</text>
+
+      <!-- Mini local pipeline box -->
+      <rect x="28" y="388" width="404" height="54" rx="9" fill="#181229" stroke="#e879f9" stroke-opacity="0.34" stroke-width="1"/>
+      <text x="40" y="409" class="af-mono" font-size="10.4" font-weight="600" fill="#f0abfc">af-transcode shim  →  transcode.sock  →  dispatcher</text>
+      <text x="40" y="429" class="af-mono" font-size="10" fill="#94a3b8">/run/aetherflow-transcode/transcode.sock · wincode</text>
+
+      <text x="28" y="464" class="af-mono" font-size="10" fill="#34d399">Local fallback: probes, net inputs, pre-start errors</text>
+    </g>
+
+    <!-- =================================================================== -->
+    <!-- CENTER: DEDICATED PEER WIREGUARD MESH (afpeer0)                     -->
+    <!-- =================================================================== -->
+    <g transform="translate(550, 108)">
+      <rect x="0" y="0" width="500" height="496" rx="18" fill="url(#pc-mesh-box)" stroke="#10b981" stroke-opacity="0.58" stroke-width="1.6"/>
+
+      <!-- Mesh Header -->
+      <rect x="0" y="0" width="500" height="72" rx="18" fill="#0d2624" fill-opacity="0.92"/>
+      <rect x="0" y="42" width="500" height="30" fill="#0d2624" fill-opacity="0.92"/>
+      <line x1="0" y1="72" x2="500" y2="72" stroke="#10b981" stroke-opacity="0.34" stroke-width="1"/>
+      <circle cx="24" cy="28" r="6" fill="#34d399">
+        <animate attributeName="opacity" values="0.55;1;0.55" dur="3s" repeatCount="indefinite"/>
+      </circle>
+      <text x="40" y="33" class="af-sans" font-size="16.5" font-weight="800" fill="#ecfdf5">Dedicated Peer WireGuard Mesh — afpeer0</text>
+      <text x="40" y="55" class="af-mono" font-size="11.5" fill="#6ee7b7">UDP 51821 · 10.231.0.0/16 · /32 peers · Separate from wg0</text>
+
+      <!-- Pairing Trust Anchor Pill -->
+      <rect x="18" y="86" width="464" height="44" rx="10" fill="#0c1c28" stroke="#34d399" stroke-opacity="0.4" stroke-width="1"/>
+      <text x="250" y="105" text-anchor="middle" class="af-sans" font-size="12" font-weight="700" fill="#d1fae5">Zero-Trust Pairing: 10-min HTTPS Invite + 6-Digit Verification Code</text>
+      <text x="250" y="122" text-anchor="middle" class="af-mono" font-size="9.5" fill="#94a3b8">OS-CA TLS · SSRF guard · pinned WG keys · TCP 9443 &amp; 2049 on afpeer0</text>
+
+      <!-- LANE 1: Delegated Grants & Management Proxy -->
+      <g transform="translate(18, 148)">
+        <rect x="0" y="0" width="464" height="98" rx="12" fill="#141730" stroke="#818cf8" stroke-opacity="0.55" stroke-width="1.3"/>
+        <rect x="0" y="14" width="4" height="70" rx="2" fill="#6366f1"/>
+        <text x="16" y="25" class="af-sans" font-size="13.5" font-weight="700" fill="#e0e7ff">1. Delegated Grants &amp; Scoped Management</text>
+        <text x="450" y="25" text-anchor="end" class="af-mono" font-size="10.5" font-weight="700" fill="#a5b4fc">TCP 9443</text>
+        <text x="16" y="46" class="af-mono" font-size="11" fill="#cbd5e1">Zero access by default (8 areas: none / read / write)</text>
+        <text x="16" y="65" class="af-mono" font-size="11" fill="#94a3b8">SHA-256 X-AF-Link-Token + X-AF-Grant-Token</text>
+        <text x="16" y="84" class="af-mono" font-size="10.5" fill="#818cf8">Fail-closed TrackedRouter · &lt;1s in-flight stream revoke</text>
+      </g>
+
+      <!-- LANE 2: NFSv4.2 Storage Federation -->
+      <g transform="translate(18, 264)">
+        <rect x="0" y="0" width="464" height="98" rx="12" fill="#0d1e28" stroke="#22d3ee" stroke-opacity="0.55" stroke-width="1.3"/>
+        <rect x="0" y="14" width="4" height="70" rx="2" fill="#22d3ee"/>
+        <text x="16" y="25" class="af-sans" font-size="13.5" font-weight="700" fill="#cffafe">2. NFSv4.2 Storage Federation</text>
+        <text x="450" y="25" text-anchor="end" class="af-mono" font-size="10.5" font-weight="700" fill="#67e8f9">TCP 2049</text>
+        <text x="16" y="46" class="af-mono" font-size="11" fill="#cbd5e1">/v1/peer-storage · nfsd bound exclusively to afpeer0</text>
+        <text x="16" y="65" class="af-mono" font-size="11" fill="#94a3b8">Read-only default (ro,root_squash) · opt-in rw squash</text>
+        <text x="16" y="84" class="af-mono" font-size="10.5" fill="#38bdf8">.af-peer-sentinel 15s health-gated systemd .mount units</text>
+      </g>
+
+      <!-- LANE 3: Remote Jellyfin 12.4 Transcode Offload -->
+      <g transform="translate(18, 380)">
+        <rect x="0" y="0" width="464" height="100" rx="12" fill="#1e132b" stroke="#d946ef" stroke-opacity="0.58" stroke-width="1.3"/>
+        <rect x="0" y="14" width="4" height="72" rx="2" fill="#d946ef"/>
+        <text x="16" y="25" class="af-sans" font-size="13.5" font-weight="700" fill="#fae8ff">3. Jellyfin 12.4 Transcode Offload</text>
+        <text x="450" y="25" text-anchor="end" class="af-mono" font-size="10.5" font-weight="700" fill="#f0abfc">WS :9443</text>
+        <text x="16" y="46" class="af-mono" font-size="11" fill="#cbd5e1">GET /peer/v1/transcode/jobs (wincode frames, 1 MiB cap)</text>
+        <text x="16" y="65" class="af-mono" font-size="11" fill="#94a3b8">Requires transcoding: write + matching jellyfin-ffmpeg</text>
+        <text x="16" y="84" class="af-mono" font-size="10.5" fill="#e879f9">Parity test + /v1/peer-transcode cache &amp; media binds</text>
+      </g>
+    </g>
+
+    <!-- =================================================================== -->
+    <!-- TRAFFIC BRIDGES: SERVER A <-> MESH <-> SERVERS B & C                -->
+    <!-- =================================================================== -->
+    <!-- Left Bridges (Server A <-> Mesh Lanes) -->
+    <!-- Lane 1: Grants/Proxy -->
+    <line x1="496" y1="304" x2="546" y2="304" stroke="#818cf8" stroke-width="2.4" marker-start="url(#pc-arr-indigo)" marker-end="url(#pc-arr-indigo)"/>
+    <!-- Lane 2: NFSv4.2 Storage -->
+    <line x1="496" y1="420" x2="546" y2="420" stroke="#22d3ee" stroke-width="2.4" marker-start="url(#pc-arr-cyan)" marker-end="url(#pc-arr-cyan)"/>
+    <!-- Lane 3: Transcode Offload -->
+    <line x1="496" y1="538" x2="546" y2="538" stroke="#e879f9" stroke-width="2.4" stroke-dasharray="6 4" marker-end="url(#pc-arr-fuchsia)">
+      <animate attributeName="stroke-dashoffset" from="0" to="-20" dur="1.8s" repeatCount="indefinite"/>
+    </line>
+
+    <!-- Right Bridges (Mesh Lanes <-> Server B & Server C) -->
+    <!-- Lane 1 -> Server B (Grants & Management) -->
+    <path d="M 1050 288 L 1076 288 L 1076 194 L 1100 194" fill="none" stroke="#818cf8" stroke-width="2.2" marker-end="url(#pc-arr-indigo)"/>
+    <!-- Lane 1 -> Server C (transcoding: write grant) -->
+    <path d="M 1050 318 L 1068 318 L 1068 454 L 1100 454" fill="none" stroke="#818cf8" stroke-width="1.8" stroke-dasharray="4 4" marker-end="url(#pc-arr-indigo)"/>
+    <!-- Server B -> Lane 2 (NFS media export to A) -->
+    <path d="M 1104 282 L 1086 282 L 1086 418 L 1054 418" fill="none" stroke="#22d3ee" stroke-width="2.4" marker-end="url(#pc-arr-cyan)"/>
+    <!-- Lane 3 -> Server C (Transcode WebSocket jobs + cache NFS) -->
+    <line x1="1050" y1="538" x2="1100" y2="538" stroke="#e879f9" stroke-width="2.4" stroke-dasharray="6 4" marker-end="url(#pc-arr-fuchsia)">
+      <animate attributeName="stroke-dashoffset" from="0" to="-20" dur="1.8s" repeatCount="indefinite"/>
+    </line>
+
+    <!-- =================================================================== -->
+    <!-- TOP-RIGHT: SERVER B (node-beta — Media Vault & Managed Peer)        -->
+    <!-- =================================================================== -->
+    <g transform="translate(1104, 108)">
+      <rect x="0" y="0" width="460" height="224" rx="18" fill="url(#pc-panel)" stroke="#22d3ee" stroke-opacity="0.58" stroke-width="1.6"/>
+      <rect x="0" y="0" width="460" height="56" rx="18" fill="#102432"/>
+      <rect x="0" y="34" width="460" height="22" fill="#102432"/>
+      <line x1="0" y1="56" x2="460" y2="56" stroke="#22d3ee" stroke-opacity="0.34" stroke-width="1"/>
+
+      <circle cx="22" cy="23" r="5.5" fill="#22d3ee"/>
+      <text x="36" y="28" class="af-sans" font-size="16" font-weight="800" fill="#ffffff">Server B — node-beta</text>
+      <rect x="342" y="11" width="104" height="24" rx="12" fill="#123142" stroke="#38bdf8" stroke-opacity="0.5" stroke-width="1"/>
+      <text x="394" y="27" text-anchor="middle" class="af-mono" font-size="11" font-weight="600" fill="#bae6fd">10.231.0.20</text>
+      <text x="36" y="47" class="af-mono" font-size="11" fill="#7dd3fc">Independent Node · Media Vault &amp; Managed Peer</text>
+
+      <rect x="16" y="68" width="428" height="66" rx="10" fill="url(#pc-subcard)" stroke="#818cf8" stroke-opacity="0.38" stroke-width="1"/>
+      <text x="28" y="88" class="af-mono" font-size="12" font-weight="700" fill="#e0e7ff">af-api Peer Listener (:9443 · SO_BINDTODEVICE)</text>
+      <text x="28" y="107" class="af-mono" font-size="10.8" fill="#cbd5e1">Run-as peer-node-alpha · audited in admin_audit_log</text>
+      <text x="28" y="124" class="af-mono" font-size="10.2" fill="#94a3b8">Independent reciprocal grant direction (1-way or 2-way)</text>
+
+      <rect x="16" y="144" width="428" height="66" rx="10" fill="url(#pc-subcard)" stroke="#22d3ee" stroke-opacity="0.4" stroke-width="1"/>
+      <text x="28" y="164" class="af-mono" font-size="12" font-weight="700" fill="#cffafe">af-runner · /v1/peer-storage · nfs-server.service</text>
+      <text x="28" y="183" class="af-mono" font-size="10.8" fill="#cbd5e1">Exports /srv/media/movies + .af-peer-sentinel (TCP 2049)</text>
+      <text x="28" y="200" class="af-mono" font-size="10.2" fill="#67e8f9">/etc/nfs.conf.d/aetherflow-peers.conf (afpeer0 only)</text>
+    </g>
+
+    <!-- Direct Peer Mesh Link between Server B and Server C -->
+    <line x1="1334" y1="332" x2="1334" y2="374" stroke="#34d399" stroke-width="2" stroke-dasharray="4 4" marker-start="url(#pc-arr-emerald)" marker-end="url(#pc-arr-emerald)"/>
+    <rect x="1186" y="342" width="296" height="22" rx="6" fill="#0c201e" stroke="#34d399" stroke-opacity="0.5" stroke-width="1"/>
+    <text x="1334" y="357" text-anchor="middle" class="af-mono" font-size="10.5" font-weight="600" fill="#a7f3d0">afpeer0 mesh · B↔C media parity &amp; grants</text>
+
+    <!-- =================================================================== -->
+    <!-- BOTTOM-RIGHT: SERVER C (node-gamma — GPU Transcode Worker)          -->
+    <!-- =================================================================== -->
+    <g transform="translate(1104, 378)">
+      <rect x="0" y="0" width="460" height="226" rx="18" fill="url(#pc-panel)" stroke="#d946ef" stroke-opacity="0.6" stroke-width="1.6"/>
+      <rect x="0" y="0" width="460" height="56" rx="18" fill="#251434"/>
+      <rect x="0" y="34" width="460" height="22" fill="#251434"/>
+      <line x1="0" y1="56" x2="460" y2="56" stroke="#d946ef" stroke-opacity="0.34" stroke-width="1"/>
+
+      <circle cx="22" cy="23" r="5.5" fill="#e879f9"/>
+      <text x="36" y="28" class="af-sans" font-size="16" font-weight="800" fill="#ffffff">Server C — node-gamma</text>
+      <rect x="342" y="11" width="104" height="24" rx="12" fill="#341a4a" stroke="#e879f9" stroke-opacity="0.5" stroke-width="1"/>
+      <text x="394" y="27" text-anchor="middle" class="af-mono" font-size="11" font-weight="600" fill="#f5d0fe">10.231.0.30</text>
+      <text x="36" y="47" class="af-mono" font-size="11" fill="#f0abfc">Independent Node · Jellyfin 12.4 GPU Transcode Worker</text>
+
+      <!-- Worker Service Box -->
+      <rect x="16" y="68" width="428" height="76" rx="10" fill="url(#pc-subcard)" stroke="#d946ef" stroke-opacity="0.45" stroke-width="1.1"/>
+      <text x="28" y="88" class="af-mono" font-size="12" font-weight="700" fill="#fae8ff">af-transcode-worker.service (User=jellyfin)</text>
+      <text x="28" y="107" class="af-mono" font-size="9.6" fill="#cbd5e1">af-api relay → /run/aetherflow-transcode-worker/worker.sock</text>
+      <text x="28" y="125" class="af-mono" font-size="9.6" fill="#94a3b8">PrivateNetwork=yes · ProtectSystem=strict · /dev/dri/renderD*</text>
+      <text x="28" y="139" class="af-mono" font-size="9.6" fill="#e879f9">Local-only ffmpeg protocols · matching jellyfin-ffmpeg</text>
+
+      <!-- Runner Transcode Mounts Box -->
+      <rect x="16" y="152" width="428" height="60" rx="10" fill="url(#pc-subcard)" stroke="#34d399" stroke-opacity="0.38" stroke-width="1"/>
+      <text x="28" y="172" class="af-mono" font-size="11.5" font-weight="700" fill="#d1fae5">af-runner · /v1/peer-transcode (path-parity)</text>
+      <text x="28" y="191" class="af-mono" font-size="9.8" fill="#94a3b8">Mounts A transcode/tmp cache + binds shared media paths</text>
+      <text x="28" y="205" class="af-mono" font-size="9.6" fill="#6ee7b7">Writes HLS segments straight back to A · SIGKILL on revoke</text>
+    </g>
+
+    <!-- =================================================================== -->
+    <!-- BOTTOM CONTRACT STRIP (3 Cards, y=626..772)                         -->
+    <!-- =================================================================== -->
+    <g transform="translate(36, 626)">
+      <!-- Card 1: 8 Grant Areas -->
+      <rect x="0" y="0" width="496" height="144" rx="14" fill="url(#pc-panel)" stroke="#6366f1" stroke-opacity="0.4" stroke-width="1.2"/>
+      <rect x="0" y="14" width="4" height="116" rx="2" fill="#6366f1"/>
+      <text x="20" y="30" class="af-sans" font-size="14" font-weight="700" fill="#e0e7ff">8 Delegated Grant Areas (Zero Access by Default)</text>
+      <text x="20" y="52" class="af-mono" font-size="11" fill="#cbd5e1">services · marketplace · settings · files</text>
+      <text x="20" y="71" class="af-mono" font-size="11" fill="#cbd5e1">users · network · updates · transcoding</text>
+      <text x="20" y="96" class="af-mono" font-size="10.5" fill="#94a3b8">Levels: none / read-only / read-write (per direction)</text>
+      <text x="20" y="114" class="af-mono" font-size="10.5" fill="#94a3b8">Never grantable: auth/sessions, /peers/*, Plugin Sandbox</text>
+      <text x="20" y="132" class="af-mono" font-size="10" fill="#818cf8">Unclassified routes fail closed: 403 PEER_ROUTE_UNCLASSIFIED</text>
+
+      <!-- Card 2: Transport & Storage Guards -->
+      <rect x="516" y="0" width="496" height="144" rx="14" fill="url(#pc-panel)" stroke="#22d3ee" stroke-opacity="0.4" stroke-width="1.2"/>
+      <rect x="516" y="14" width="4" height="116" rx="2" fill="#22d3ee"/>
+      <text x="536" y="30" class="af-sans" font-size="14" font-weight="700" fill="#cffafe">Transport &amp; NFSv4.2 Storage Safeguards</text>
+      <text x="536" y="52" class="af-mono" font-size="11" fill="#cbd5e1">Debian 13 (trixie) · nfs-utils /etc/nfs.conf.d/ drop-in</text>
+      <text x="536" y="71" class="af-mono" font-size="11" fill="#cbd5e1">Ports on afpeer0 only: TCP 9443 (API) · TCP 2049 (NFS)</text>
+      <text x="536" y="96" class="af-mono" font-size="10.5" fill="#94a3b8">Direct endpoint WireGuard UDP 51821 (no relays/NAT)</text>
+      <text x="536" y="114" class="af-mono" font-size="10.5" fill="#94a3b8">Interior subfolder mount rule prevents empty-library wipes</text>
+      <text x="536" y="132" class="af-mono" font-size="10" fill="#38bdf8">15s health loop reconciles offline revocations &amp; remounts</text>
+
+      <!-- Card 3: Transcode Isolation -->
+      <rect x="1032" y="0" width="496" height="144" rx="14" fill="url(#pc-panel)" stroke="#d946ef" stroke-opacity="0.4" stroke-width="1.2"/>
+      <rect x="1032" y="14" width="4" height="116" rx="2" fill="#d946ef"/>
+      <text x="1052" y="30" class="af-sans" font-size="14" font-weight="700" fill="#fae8ff">Remote Jellyfin 12.4 Transcode Contract</text>
+      <text x="1052" y="52" class="af-mono" font-size="11" fill="#cbd5e1">Jellyfin 12.4 only (not Plex/Emby) · matching ffmpeg</text>
+      <text x="1052" y="71" class="af-mono" font-size="11" fill="#cbd5e1">Worker runs PrivateNetwork=yes + DevicePolicy=closed</text>
+      <text x="1052" y="96" class="af-mono" font-size="10.5" fill="#94a3b8">Auto-clamps max jobs: min(worker.max_jobs, worker_max)</text>
+      <text x="1052" y="114" class="af-mono" font-size="10.5" fill="#94a3b8">Secret-free /etc/aetherflow/transcode.env (never API env)</text>
+      <text x="1052" y="132" class="af-mono" font-size="10" fill="#e879f9">Every server stays independently operable if peers drop</text>
+    </g>
+  </g>
+
+  <rect x="2" y="2" width="1596" height="796" rx="24" fill="none" stroke="url(#pc-border)" stroke-width="2"/>
+  <line x1="120" y1="2.5" x2="1480" y2="2.5" stroke="url(#pc-specular)" stroke-width="1.8"/>
+</svg>

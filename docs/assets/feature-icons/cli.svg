@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Unified Admin CLI">
+  <defs>
+    <linearGradient id="ic-cli-stroke" x1="6" y1="9" x2="42" y2="39" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#c084fc"/>
+      <stop offset="55%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="ic-cli-fill" x1="6" y1="9" x2="42" y2="39" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.16"/>
+    </linearGradient>
+  </defs>
+  <!-- Terminal window -->
+  <rect x="6" y="9" width="36" height="30" rx="6" fill="url(#ic-cli-fill)" stroke="url(#ic-cli-stroke)" stroke-width="2" stroke-linejoin="round"/>
+  <line x1="6" y1="17" x2="42" y2="17" stroke="url(#ic-cli-stroke)" stroke-width="1.7"/>
+  <circle cx="11.5" cy="13" r="1.4" fill="#c084fc"/>
+  <circle cx="16.5" cy="13" r="1.4" fill="#818cf8"/>
+  <!-- Prompt chevron & cursor -->
+  <polyline points="13.5,24 19,28.5 13.5,33" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="23" y1="32.5" x2="34.5" y2="32.5" stroke="#e2e8f0" stroke-width="2.2" stroke-linecap="round"/>
+</svg>

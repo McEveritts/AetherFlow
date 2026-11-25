@@ -8,6 +8,24 @@ FlowAI is AetherFlow's integrated AI operations layer, routing chat and diagnost
 - **Action Approval Gate**: Intercepts AI-proposed service restarts and stops into `pending_actions` (**Approval Inbox**) for explicit administrator review before execution.
 - **Multi-Provider Support**: Routes requests to Gemini, OpenAI, Anthropic, or local runtimes (LM Studio, Ollama, Anthropic-Local) through a single Rust abstraction layer.
 
+## Step-by-Step Workflow
+
+1. **Configure an AI provider**: Open **Settings → FlowAI Providers**, select a cloud provider (Gemini, OpenAI, Anthropic) or local runtime (LM Studio, Ollama, Anthropic-Local), enter your API key or endpoint URL, click **Test API**, and save.
+
+   ![Step 1 — Configure an AI provider, API key or local endpoint, and test connectivity in Settings → FlowAI Providers](assets/guides/flowai/01-providers.png)
+
+2. **Ask FlowAI**: Open the **FlowAI** tab (`/?tab=ai`), type a diagnostic question in the prompt box or select a quick action, and send.
+
+   ![Step 2 — Enter a query in the FlowAI prompt box or click a quick action](assets/guides/flowai/02-ask.png)
+
+3. **Review proposed service actions**: When FlowAI detects a supported `restart` or `stop` proposal for an administrator, a **HUMAN APPROVAL REQUIRED** card appears below the reply—click **Review in Approval Inbox**.
+
+   ![Step 3 — Inspect the HUMAN APPROVAL REQUIRED card and click Review in Approval Inbox](assets/guides/flowai/03-proposal.png)
+
+4. **Approve or reject in the Approval Inbox**: Open **Approval Inbox** (`/?tab=inbox`), verify the target service and impact, and click **Approve & Execute** (or **Approve & Queue Restart** for core control-plane units) or **Reject**.
+
+   ![Step 4 — Review the queued action in the Approval Inbox and click Approve or Reject](assets/guides/flowai/04-approve.png)
+
 ---
 
 ## Architecture Overview

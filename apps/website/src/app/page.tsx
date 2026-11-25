@@ -1,21 +1,52 @@
-import { Hero } from '../components/Hero';
-import { CoreDirectives } from '../components/CoreDirectives';
-import { Architecture } from '../components/Architecture';
-import { AINativeLoop } from '../components/AINativeLoop';
-import { StatusMomentum } from '../components/StatusMomentum';
-import { CTA } from '../components/CTA';
+import { loadCatalogData } from '@/lib/catalog';
+import { inspectAvailableMedia } from '@/lib/media';
+import { MotionProvider } from '@/components/MotionProvider';
+import { Navbar } from '@/components/Navbar';
+import { HeroSection } from '@/components/HeroSection';
+import { StatsBand } from '@/components/StatsBand';
+import { FeatureGrid } from '@/components/FeatureGrid';
+import { ScreenshotGallery } from '@/components/ScreenshotGallery';
+import { ArchitectureSection } from '@/components/ArchitectureSection';
+import { PeerClusteringSection } from '@/components/PeerClusteringSection';
+import { CatalogShowcase } from '@/components/CatalogShowcase';
+import { InstallSection } from '@/components/InstallSection';
+import { WhatsNewSection } from '@/components/WhatsNewSection';
+import { Footer } from '@/components/Footer';
 
 export default function Home() {
+  const catalog = loadCatalogData();
+  const media = inspectAvailableMedia();
+
   return (
-    <main className="min-h-screen bg-[#0f1115] text-[#ececf1] selection:bg-blue-500/30">
-      <div className="mx-auto max-w-6xl px-6 py-24 space-y-32">
-        <Hero />
-        <CoreDirectives />
-        <Architecture />
-        <AINativeLoop />
-        <StatusMomentum />
-        <CTA />
+    <MotionProvider>
+      <div className="min-h-screen">
+        <Navbar />
+        <main id="main-content">
+          <HeroSection
+            heroScreenshots={{
+              dark: media.screenshots.dark.overview ?? null,
+              light: media.screenshots.light.overview ?? null,
+            }}
+          />
+          <StatsBand />
+          <FeatureGrid featureIcons={media.featureIcons} />
+          <ScreenshotGallery screenshots={media.screenshots} />
+          <ArchitectureSection
+            architectureSvgSrc={media.diagrams.architecture}
+          />
+          <PeerClusteringSection
+            peerClusteringSvgSrc={media.diagrams.peerClustering}
+          />
+          <CatalogShowcase
+            apps={catalog.apps}
+            categories={catalog.categories}
+            totalCount={catalog.totalCount}
+          />
+          <InstallSection />
+          <WhatsNewSection />
+        </main>
+        <Footer />
       </div>
-    </main>
+    </MotionProvider>
   );
 }

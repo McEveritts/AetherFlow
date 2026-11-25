@@ -1,6 +1,6 @@
 # Testing AetherFlow
 
-AetherFlow verification spans the **Rust control plane (`backend-rs`, 11 crates)**, the **Rust WASM dashboard (`frontend-rs`, 4 crates)**, the **Rust Plugin SDK (`plugins/sdk-template-rust/backend`)**, the **Python release, marketplace, and hygiene regression suites (`tests/`)**, and **Playwright browser tests (`e2e/`)**.
+AetherFlow verification spans the **Rust control plane (`backend-rs`, 12 crates)**, the **Rust WASM dashboard (`frontend-rs`, 4 crates)**, the **Rust Plugin SDK (`plugins/sdk-template-rust/backend`)**, the **Python release, marketplace, and hygiene regression suites (`tests/`)**, and **Playwright browser tests (`e2e/`)**.
 
 ---
 
@@ -16,17 +16,17 @@ Ensure your development environment provides:
 
 ## 1. Rust Control Plane & Plugin SDK Tests (`backend-rs`, `plugins/`)
 
-The 11-crate workspace (`af-models`, `af-files`, `af-db`, `af-hardware`, `af-runner`, `af-release`, `af-host`, `af-cli`, `af-services`, `af-api`, `af-librespeed`) contains unit, security, and HTTP/IPC contract tests.
+The 12-crate workspace (`af-models`, `af-files`, `af-db`, `af-hardware`, `af-runner`, `af-release`, `af-host`, `af-cli`, `af-services`, `af-api`, `af-librespeed`, `af-transcode`) contains unit, security, and HTTP/IPC contract tests. CI (`.github/workflows/ci.yml`, `.github/workflows/release.yml`) runs parallel `cargo nextest` across workspace crates (with process-per-test isolation); local `cargo test` runs use `--test-threads=1` to avoid process-global SQLite/env collisions.
 
 ```bash
 cd backend-rs
 
 # Lint the entire workspace (CI also runs a targeted --no-deps pass on core library/CLI crates)
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed --all-targets --locked -- -D warnings
+cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli -p af-librespeed -p af-transcode --all-targets --locked -- -D warnings
 
-# Run all backend workspace tests serially
-# (--test-threads=1 prevents process-global SQLite/env collisions;
+# Run all backend workspace tests serially with cargo test
+# (or run `cargo nextest run --workspace --locked` if cargo-nextest is installed;
 #  AETHERFLOW_DISABLE_BACKGROUND_WORKERS=1 keeps periodic background loops off during tests)
 JWT_SECRET="ci-test-secret-exactly-32bytes!!" \
 AES_MASTER_KEY="ci-test-aes-key-exactly-32bytes!" \
@@ -61,8 +61,11 @@ cargo test -p af-release
 # WAL-safe backups, manifests, and staged restores
 cargo test -p af-host
 
-# Unified 'af' administrative CLI and 34-step provisioner (14 Rust-native + 20 retained shell)
+# Unified 'af' administrative CLI, af cluster diagnose, and 34-step provisioner (14 Rust-native + 20 retained shell)
 cargo test -p af-cli
+
+# Distributed Jellyfin transcode shim, worker daemon, protocol, and capability probe
+cargo test -p af-transcode
 
 # Rust Plugin SDK template (standalone workspace)
 cd ../plugins/sdk-template-rust/backend
@@ -126,7 +129,7 @@ bash scripts/smoke_v4_release_lifecycle.sh
 
 ## 4. Production Release Bundle (`scripts/build_gold.sh`)
 
-`scripts/build_gold.sh` builds the WASM frontend, runs locked Rust tests for `backend-rs` and `frontend-rs`, and packages `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, external `web/dist/`, `config/`, `deploy/`, `packages/`, `plugins/telemetry-inspector/`, `.version`, and `SHA256SUMS` into `dist/gold/<version>/` (overridable via `OUTPUT_DIR`):
+`scripts/build_gold.sh` builds the WASM frontend, runs locked Rust tests for `backend-rs` and `frontend-rs`, and packages `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, `bin/af-transcode`, external `web/dist/`, `config/`, `deploy/`, `packages/`, `plugins/telemetry-inspector/`, `.version`, and `SHA256SUMS` into `dist/gold/<version>/` (overridable via `OUTPUT_DIR`):
 
 ```bash
 bash scripts/build_gold.sh
@@ -145,7 +148,7 @@ npm ci
 # Build the debug API binary if you have not already packaged dist/gold/<version>/
 cargo build --manifest-path backend-rs/Cargo.toml --locked --bin aetherflow-api
 
-# Run the default live Playwright spec (embedded.live.spec.ts) against a built binary and staged web/dist
+# Run the default live Playwright specs (*.live.spec.ts) against a built binary and staged web/dist
 # (e.g., dist/gold/<version>/linux-amd64/aetherflow-api + .../web/dist, or backend-rs/target/debug/aetherflow-api + web/dist)
 bash scripts/run_embedded_e2e.sh \
   --binary backend-rs/target/debug/aetherflow-api \
@@ -153,8 +156,8 @@ bash scripts/run_embedded_e2e.sh \
   --port 18080 --playwright
 
 # Pass a non-empty E2E_PLAYWRIGHT_SPECS override (paths relative to e2e/; note "" falls back to [.]live[.]spec[.]ts$)
-# to run fixture-backed/visual specs (or E2E_PLAYWRIGHT_SPECS="tests/e2e" for all 5 specs)
-E2E_PLAYWRIGHT_SPECS="tests/e2e/login.spec.ts tests/e2e/navigation.spec.ts tests/e2e/marketplace.install.spec.ts tests/e2e/visual.spec.ts" \
+# to run fixture-backed/visual/cluster/a11y specs (or E2E_PLAYWRIGHT_SPECS="tests/e2e" for all 39 specs)
+E2E_PLAYWRIGHT_SPECS="tests/e2e/wasm.cluster.spec.ts tests/e2e/wasm.peer-switching.spec.ts tests/e2e/wasm.a11y.spec.ts tests/e2e/visual.spec.ts" \
 bash scripts/run_embedded_e2e.sh \
   --binary backend-rs/target/debug/aetherflow-api \
   --static-dir web/dist \
@@ -165,9 +168,11 @@ bash scripts/run_embedded_e2e.sh \
 
 ### Playwright Spec Breakdown
 
-- **Live E2E (`embedded.live.spec.ts`)**: Exercises real authentication, SQLite persistence, McBrowser operations, standalone WASM worker SHA-256 hashing (`Sha256ChunkTransfer` on `'abc'`), cross-tab account-switch upload cancellation on an injected `403 CSRF_INVALID` (`retryCount === 0`), and live service-worker cache boundary tests (verifying authenticated responses stay out of `CacheStorage`).
-- **Deterministic API-fixture contract & visual specs**: `login.spec.ts`, `navigation.spec.ts`, `marketplace.install.spec.ts`, and `visual.spec.ts` run the real compiled WASM UI against mocked API responses (blocking service workers so route interception stays deterministic).
-- **Spec selection (`E2E_PLAYWRIGHT_SPECS`)**: `scripts/run_embedded_e2e.sh` defaults `E2E_PLAYWRIGHT_SPECS` via `${E2E_PLAYWRIGHT_SPECS:-[.]live[.]spec[.]ts$}`, so `--playwright` runs **only** `embedded.live.spec.ts` when unset or empty (`""`). Pass a non-empty list of spec paths relative to `e2e/` (or `E2E_PLAYWRIGHT_SPECS="tests/e2e"` / `"[.]spec[.]ts$"` for all 5 specs) to run fixture-contract and visual suites.
+`e2e/tests/e2e/` contains **39** Playwright spec files (sharded across Chromium, Firefox, and WebKit in `.github/workflows/ci.yml`):
+
+- **Live E2E (`8` `*.live.spec.ts` specs)**: `embedded.live.spec.ts`, `wasm.body.live.spec.ts`, `wasm.cache.live.spec.ts`, `wasm.custom-resources-body.live.spec.ts`, `wasm.persistence.live.spec.ts`, `wasm.share-body.live.spec.ts`, `wasm.upload.live.spec.ts`, and `wasm.worker.live.spec.ts`. Exercise real authentication, SQLite persistence, McBrowser operations, standalone WASM worker SHA-256 hashing (`Sha256ChunkTransfer` on `'abc'`), cross-tab account-switch upload cancellation on an injected `403 CSRF_INVALID` (`retryCount === 0`), and live service-worker cache boundary tests (verifying authenticated responses stay out of `CacheStorage`).
+- **Deterministic API-fixture, accessibility, Cluster & visual specs (`31` specs)**: Including `login.spec.ts`, `navigation.spec.ts`, `marketplace.install.spec.ts`, `wasm.cluster.spec.ts`, `wasm.peer-switching.spec.ts`, `wasm.a11y.spec.ts`, `wasm.operator-parity.spec.ts`, and `visual.spec.ts` — running the real compiled WASM UI against mocked API responses (blocking service workers so route interception stays deterministic).
+- **Spec selection (`E2E_PLAYWRIGHT_SPECS`)**: `scripts/run_embedded_e2e.sh` defaults `E2E_PLAYWRIGHT_SPECS` via `${E2E_PLAYWRIGHT_SPECS:-[.]live[.]spec[.]ts$}`, so `--playwright` runs the **8** `*.live.spec.ts` specs when unset or empty (`""`). Pass a non-empty list of spec paths relative to `e2e/` (or `E2E_PLAYWRIGHT_SPECS="tests/e2e"` / `"[.]spec[.]ts$"` for all 39 specs) to include fixture-contract, accessibility, and visual suites.
 
 `e2e/playwright.config.ts` requires `PLAYWRIGHT_BASE_URL` pointing to a running Rust API serving `web/dist` (supplied automatically by `run_embedded_e2e.sh`). Chromium, Firefox, and WebKit all run functional specs; `visual.spec.ts` runs on Chromium only.
 

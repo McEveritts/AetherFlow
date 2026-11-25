@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Leptos WASM UI">
+  <defs>
+    <linearGradient id="ic-wasm-stroke" x1="6" y1="8" x2="42" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="55%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="ic-wasm-fill" x1="6" y1="8" x2="42" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+  <!-- Browser frame -->
+  <rect x="6" y="8" width="36" height="32" rx="6" fill="url(#ic-wasm-fill)" stroke="url(#ic-wasm-stroke)" stroke-width="2" stroke-linejoin="round"/>
+  <line x1="6" y1="16" x2="42" y2="16" stroke="url(#ic-wasm-stroke)" stroke-width="1.8"/>
+  <circle cx="11.5" cy="12" r="1.4" fill="#38bdf8"/>
+  <circle cx="16.5" cy="12" r="1.4" fill="#818cf8"/>
+  <circle cx="21.5" cy="12" r="1.4" fill="#c084fc"/>
+  <!-- Reactive WASM isometric cube inside viewport -->
+  <polygon points="24,20 32,24.5 32,32.5 24,37 16,32.5 16,24.5" stroke="#e2e8f0" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M16 24.5 L24 29 L32 24.5 M24 29 L24 37" stroke="#67e8f9" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

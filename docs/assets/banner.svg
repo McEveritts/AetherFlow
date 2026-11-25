@@ -1,127 +1,277 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 480" width="1600" height="480" role="img" aria-labelledby="banner-title banner-desc">
+  <title id="banner-title">AetherFlow v4.0.0 — Sovereign bare-metal control plane</title>
+  <desc id="banner-desc">Hero banner for AetherFlow v4.0.0: Rust, WebAssembly, 77 native apps, and Peer clustering.</desc>
   <defs>
-    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#05060b"/>
-      <stop offset="50%" stop-color="#0a0d1a"/>
-      <stop offset="100%" stop-color="#070810"/>
+    <style>
+      .af-sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+      .af-mono { font-family: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+
+    <!-- Obsidian Canvas Background -->
+    <linearGradient id="bn-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#07070c"/>
+      <stop offset="48%" stop-color="#0b0d17"/>
+      <stop offset="100%" stop-color="#0f0f1a"/>
     </linearGradient>
-    <radialGradient id="auroraIndigo" cx="25%" cy="20%" r="55%">
-      <stop offset="0%" stop-color="#4f46e5" stop-opacity="0.28"/>
-      <stop offset="60%" stop-color="#4f46e5" stop-opacity="0.05"/>
+
+    <!-- Chromatic Outer Border -->
+    <linearGradient id="bn-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.52"/>
+      <stop offset="35%" stop-color="#6366f1" stop-opacity="0.46"/>
+      <stop offset="72%" stop-color="#d946ef" stop-opacity="0.42"/>
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0.44"/>
+    </linearGradient>
+
+    <!-- Top Specular Edge -->
+    <linearGradient id="bn-specular" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="22%" stop-color="#22d3ee" stop-opacity="0.65"/>
+      <stop offset="52%" stop-color="#818cf8" stop-opacity="0.85"/>
+      <stop offset="80%" stop-color="#d946ef" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Ambient Aurora Blooms -->
+    <radialGradient id="bn-glow-indigo" cx="18%" cy="28%" r="48%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.28"/>
+      <stop offset="55%" stop-color="#4f46e5" stop-opacity="0.06"/>
       <stop offset="100%" stop-color="#4f46e5" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="auroraViolet" cx="82%" cy="80%" r="50%">
-      <stop offset="0%" stop-color="#9333ea" stop-opacity="0.24"/>
-      <stop offset="60%" stop-color="#7c3aed" stop-opacity="0.04"/>
-      <stop offset="100%" stop-color="#7c3aed" stop-opacity="0"/>
+    <radialGradient id="bn-glow-cyan" cx="76%" cy="22%" r="44%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.22"/>
+      <stop offset="55%" stop-color="#06b6d4" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="logoGrad" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#1d4ed8"/>
-      <stop offset="55%" stop-color="#4f46e5"/>
-      <stop offset="100%" stop-color="#9333ea"/>
+    <radialGradient id="bn-glow-fuchsia" cx="84%" cy="80%" r="42%">
+      <stop offset="0%" stop-color="#d946ef" stop-opacity="0.22"/>
+      <stop offset="58%" stop-color="#8b5cf6" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Aurora Flow Ribbons -->
+    <linearGradient id="bn-ribbon-1" x1="0%" y1="50%" x2="100%" y2="20%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="22%" stop-color="#22d3ee" stop-opacity="0.72"/>
+      <stop offset="58%" stop-color="#6366f1" stop-opacity="0.9"/>
+      <stop offset="86%" stop-color="#d946ef" stop-opacity="0.78"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.45"/>
-      <stop offset="50%" stop-color="#ffffff" stop-opacity="0.08"/>
-      <stop offset="100%" stop-color="#a855f7" stop-opacity="0.4"/>
+    <linearGradient id="bn-ribbon-2" x1="0%" y1="60%" x2="100%" y2="30%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0"/>
+      <stop offset="26%" stop-color="#818cf8" stop-opacity="0.58"/>
+      <stop offset="64%" stop-color="#a855f7" stop-opacity="0.72"/>
+      <stop offset="90%" stop-color="#22d3ee" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="pillGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#4f46e5" stop-opacity="0.25"/>
-      <stop offset="100%" stop-color="#9333ea" stop-opacity="0.25"/>
+    <linearGradient id="bn-ribbon-3" x1="0%" y1="40%" x2="100%" y2="70%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0"/>
+      <stop offset="30%" stop-color="#34d399" stop-opacity="0.45"/>
+      <stop offset="70%" stop-color="#22d3ee" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
     </linearGradient>
-    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
-      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ffffff" stroke-width="0.6" stroke-opacity="0.035"/>
+    <linearGradient id="bn-ribbon-fill" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="35%" stop-color="#6366f1" stop-opacity="0.11"/>
+      <stop offset="72%" stop-color="#d946ef" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Brand Tile Gradient -->
+    <linearGradient id="bn-tile" x1="0" y1="128" x2="128" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d4ed8"/>
+      <stop offset="0.52" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#9333ea"/>
+    </linearGradient>
+    <radialGradient id="bn-tile-sheen" cx="30" cy="18" r="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bn-mark-flow" x1="10" y1="0" x2="118" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.28" stop-color="#e0f2fe" stop-opacity="0.96"/>
+      <stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+
+    <!-- Wordmark & Pill Gradients -->
+    <linearGradient id="bn-wordmark" x1="0%" y1="0%" x2="100%" y2="25%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="68%" stop-color="#eef2ff"/>
+      <stop offset="100%" stop-color="#c7d2fe"/>
+    </linearGradient>
+    <linearGradient id="bn-v4-pill" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4f46e5" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0.34"/>
+    </linearGradient>
+    <linearGradient id="bn-card-surface" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14182b" stop-opacity="0.90"/>
+      <stop offset="100%" stop-color="#0c0f1d" stop-opacity="0.92"/>
+    </linearGradient>
+
+    <!-- Subtle Architectural Grid -->
+    <pattern id="bn-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff" stroke-width="0.7" stroke-opacity="0.035"/>
     </pattern>
+
+    <!-- Clip Card -->
+    <clipPath id="bn-card-clip">
+      <rect x="2" y="2" width="1596" height="476" rx="24"/>
+    </clipPath>
+
+    <!-- Official Braided AetherFlow Logo Masks -->
+    <clipPath id="bn-left-half"><rect x="0" y="0" width="64" height="128"/></clipPath>
+    <mask id="bn-cut-peak" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="#fff"/>
+      <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="#000" stroke-width="22" stroke-linecap="round" clip-path="url(#bn-left-half)"/>
+    </mask>
+    <mask id="bn-cut-flow" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="#fff"/>
+      <path d="M64 26 L98 100" fill="none" stroke="#000" stroke-width="23"/>
+    </mask>
   </defs>
 
-  <!-- Outer Card -->
-  <rect x="2" y="2" width="1196" height="316" rx="22" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="2"/>
-  <rect x="2" y="2" width="1196" height="316" rx="22" fill="url(#auroraIndigo)"/>
-  <rect x="2" y="2" width="1196" height="316" rx="22" fill="url(#auroraViolet)"/>
-  <rect x="2" y="2" width="1196" height="316" rx="22" fill="url(#grid)"/>
+  <!-- Self-Contained Obsidian Card (Light & Dark GitHub Safe) -->
+  <g clip-path="url(#bn-card-clip)">
+    <rect x="2" y="2" width="1596" height="476" rx="24" fill="url(#bn-bg)"/>
+    <rect x="2" y="2" width="1596" height="476" rx="24" fill="url(#bn-glow-indigo)"/>
+    <rect x="2" y="2" width="1596" height="476" rx="24" fill="url(#bn-glow-cyan)"/>
+    <rect x="2" y="2" width="1596" height="476" rx="24" fill="url(#bn-glow-fuchsia)"/>
+    <rect x="2" y="2" width="1596" height="476" rx="24" fill="url(#bn-grid)"/>
 
-  <!-- Top Subtle Highlight Line -->
-  <line x1="80" y1="2" x2="1120" y2="2" stroke="#818cf8" stroke-opacity="0.5" stroke-width="1.5"/>
+    <!-- Luminous Aurora / Flow-Line Motif -->
+    <g opacity="0.95">
+      <!-- Translucent Ribbon Band -->
+      <path d="M 780 340 C 940 310, 1020 130, 1210 150 C 1365 166, 1460 72, 1620 96 L 1620 225 C 1470 205, 1370 282, 1210 264 C 1030 244, 960 368, 780 390 Z" fill="url(#bn-ribbon-fill)"/>
 
-  <!-- AetherFlow App Icon Emblem -->
-  <g transform="translate(68, 66)">
-    <defs>
-      <linearGradient id="afb-flow" x1="10" y1="0" x2="118" y2="0" gradientUnits="userSpaceOnUse">
-        <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
-        <stop offset="0.3" stop-color="#ffffff" stop-opacity="0.95"/>
-        <stop offset="1" stop-color="#ffffff"/>
-      </linearGradient>
-      <clipPath id="afb-left-half"><rect x="0" y="0" width="64" height="128"/></clipPath>
-      <mask id="afb-cut-peak" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
-        <rect width="128" height="128" fill="#fff"/>
-        <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="#000" stroke-width="22" stroke-linecap="round" clip-path="url(#afb-left-half)"/>
-      </mask>
-      <mask id="afb-cut-flow" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
-        <rect width="128" height="128" fill="#fff"/>
-        <path d="M64 26 L98 100" fill="none" stroke="#000" stroke-width="23"/>
-      </mask>
-    </defs>
-    <!-- Ambient Glow -->
-    <rect x="-6" y="-6" width="140" height="140" rx="34" fill="url(#logoGrad)" opacity="0.25"/>
-    <!-- Icon Body -->
-    <rect x="0" y="0" width="128" height="128" rx="28" fill="url(#logoGrad)" stroke="#a5b4fc" stroke-opacity="0.35" stroke-width="1.5"/>
-    <!-- Peak + Flow Mark -->
-    <g transform="translate(12.8 12.8) scale(0.8)">
-      <path d="M30 100 L64 26 L98 100" fill="none" stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#afb-cut-peak)"/>
-      <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="url(#afb-flow)" stroke-width="10" stroke-linecap="round" mask="url(#afb-cut-flow)"/>
-      <circle cx="116" cy="58" r="11" fill="#ffffff" fill-opacity="0.22"/>
-      <circle cx="116" cy="58" r="6.5" fill="#ffffff"/>
+      <!-- Primary Chromatic Flow Spine -->
+      <path d="M 760 348 C 930 318, 1018 134, 1210 156 C 1364 174, 1456 76, 1612 98" fill="none" stroke="url(#bn-ribbon-1)" stroke-width="3.2" stroke-linecap="round"/>
+      <!-- Secondary Harmonizing Flow -->
+      <path d="M 810 374 C 980 340, 1054 180, 1242 204 C 1392 224, 1480 128, 1618 152" fill="none" stroke="url(#bn-ribbon-2)" stroke-width="2.2" stroke-linecap="round"/>
+      <!-- Tertiary Emerald-Cyan Undercrossing -->
+      <path d="M 890 288 C 1030 240, 1110 302, 1272 254 C 1412 212, 1490 250, 1614 214" fill="none" stroke="url(#bn-ribbon-3)" stroke-width="1.8" stroke-linecap="round" stroke-dasharray="10 8">
+        <animate attributeName="stroke-dashoffset" from="0" to="-36" dur="6s" repeatCount="indefinite"/>
+      </path>
+      <!-- Upper Hairline Echo -->
+      <path d="M 920 170 C 1070 112, 1168 132, 1318 92 C 1435 60, 1518 68, 1616 46" fill="none" stroke="url(#bn-ribbon-1)" stroke-width="1.2" stroke-opacity="0.55" stroke-linecap="round"/>
+
+      <!-- Stylized Peer-Mesh Constellation Accent (Right Field) -->
+      <g>
+        <!-- Subtle Tri-Mesh Links -->
+        <line x1="1210" y1="156" x2="1364" y2="112" stroke="#818cf8" stroke-opacity="0.34" stroke-width="1.4" stroke-dasharray="4 4"/>
+        <line x1="1364" y1="112" x2="1454" y2="218" stroke="#d946ef" stroke-opacity="0.32" stroke-width="1.4" stroke-dasharray="4 4"/>
+        <line x1="1210" y1="156" x2="1454" y2="218" stroke="#22d3ee" stroke-opacity="0.32" stroke-width="1.4" stroke-dasharray="4 4"/>
+
+        <!-- Node 1 (Cyan) -->
+        <circle cx="1210" cy="156" r="19" fill="#22d3ee" fill-opacity="0.10" stroke="#22d3ee" stroke-opacity="0.35" stroke-width="1"/>
+        <circle cx="1210" cy="156" r="6" fill="#22d3ee">
+          <animate attributeName="opacity" values="0.75;1;0.75" dur="3.6s" repeatCount="indefinite"/>
+        </circle>
+
+        <!-- Node 2 (Indigo-Violet) -->
+        <circle cx="1364" cy="112" r="22" fill="#818cf8" fill-opacity="0.11" stroke="#818cf8" stroke-opacity="0.38" stroke-width="1"/>
+        <circle cx="1364" cy="112" r="6.5" fill="#a5b4fc">
+          <animate attributeName="opacity" values="1;0.7;1" dur="4.2s" repeatCount="indefinite"/>
+        </circle>
+
+        <!-- Node 3 (Fuchsia-Emerald Accent) -->
+        <circle cx="1454" cy="218" r="18" fill="#d946ef" fill-opacity="0.10" stroke="#e879f9" stroke-opacity="0.36" stroke-width="1"/>
+        <circle cx="1454" cy="218" r="5.5" fill="#e879f9">
+          <animate attributeName="opacity" values="0.7;1;0.7" dur="3.2s" repeatCount="indefinite"/>
+        </circle>
+
+        <!-- Micro Signal Nodes along Curves -->
+        <circle cx="1056" cy="214" r="3.5" fill="#67e8f9" fill-opacity="0.85"/>
+        <circle cx="1272" cy="254" r="3.5" fill="#34d399" fill-opacity="0.85"/>
+        <circle cx="1512" cy="116" r="3" fill="#c084fc" fill-opacity="0.8"/>
+      </g>
+    </g>
+
+    <!-- Brand Emblem (Official Peak + Flow Braided Mark) -->
+    <g transform="translate(76, 98)">
+      <!-- Outer Ambient Aura -->
+      <rect x="-10" y="-10" width="168" height="168" rx="40" fill="url(#bn-tile)" opacity="0.22"/>
+      <!-- Scaled 148x148 Icon Tile -->
+      <g transform="scale(1.15625)">
+        <rect width="128" height="128" rx="28" fill="url(#bn-tile)"/>
+        <rect width="128" height="128" rx="28" fill="url(#bn-tile-sheen)"/>
+        <rect x="0.75" y="0.75" width="126.5" height="126.5" rx="27.25" fill="none" stroke="#c7d2fe" stroke-opacity="0.4" stroke-width="1.5"/>
+        <g transform="translate(12.8 12.8) scale(0.8)">
+          <path d="M30 100 L64 26 L98 100" fill="none" stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#bn-cut-peak)"/>
+          <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="url(#bn-mark-flow)" stroke-width="10" stroke-linecap="round" mask="url(#bn-cut-flow)"/>
+          <circle cx="116" cy="58" r="11" fill="#ffffff" fill-opacity="0.24"/>
+          <circle cx="116" cy="58" r="6.5" fill="#ffffff"/>
+        </g>
+      </g>
+    </g>
+
+    <!-- Hero Typography Lockup -->
+    <g transform="translate(264, 102)">
+      <!-- Eyebrow + v4.0.0 Pill Row -->
+      <g transform="translate(0, 0)">
+        <rect x="0" y="0" width="100" height="30" rx="15" fill="url(#bn-v4-pill)" stroke="#818cf8" stroke-opacity="0.65" stroke-width="1.2"/>
+        <circle cx="18" cy="15" r="4.2" fill="#34d399">
+          <animate attributeName="opacity" values="0.6;1;0.6" dur="2.8s" repeatCount="indefinite"/>
+        </circle>
+        <text x="31" y="19.5" class="af-mono" font-size="13.5" font-weight="700" fill="#eef2ff" letter-spacing="0.4">v4.0.0</text>
+
+        <rect x="112" y="0" width="196" height="30" rx="15" fill="#13182b" fill-opacity="0.88" stroke="#334155" stroke-opacity="0.8" stroke-width="1"/>
+        <text x="210" y="19.5" text-anchor="middle" class="af-mono" font-size="12" font-weight="600" fill="#94a3b8" letter-spacing="0.4">ZERO-GO · ZERO-DOCKER</text>
+      </g>
+
+      <!-- Wordmark -->
+      <text x="-2" y="102" class="af-sans" font-size="74" font-weight="800" fill="url(#bn-wordmark)" letter-spacing="-1.8">AetherFlow</text>
+
+      <!-- Tagline -->
+      <text x="2" y="148" class="af-sans" font-size="27" font-weight="600" fill="#e2e8f0" letter-spacing="-0.3">
+        Sovereign bare-metal control plane
+      </text>
+
+      <!-- Subline -->
+      <text x="2" y="186" class="af-mono" font-size="16" font-weight="500" fill="#94a3b8" letter-spacing="0.1">
+        <tspan fill="#38bdf8" font-weight="600">Rust</tspan><tspan fill="#475569">  ·  </tspan><tspan fill="#a5b4fc" font-weight="600">WebAssembly</tspan><tspan fill="#475569">  ·  </tspan><tspan fill="#e879f9" font-weight="600">77 native apps</tspan><tspan fill="#475569">  ·  </tspan><tspan fill="#34d399" font-weight="600">Peer clustering</tspan>
+      </text>
+    </g>
+
+    <!-- Bottom Architectural Capability Strip (4 Equal Cards) -->
+    <g transform="translate(76, 356)">
+      <!-- Card 1 -->
+      <g transform="translate(0, 0)">
+        <rect x="0" y="0" width="348" height="72" rx="14" fill="url(#bn-card-surface)" stroke="#6366f1" stroke-opacity="0.34" stroke-width="1.2"/>
+        <rect x="0" y="14" width="3.5" height="44" rx="1.75" fill="#6366f1"/>
+        <circle cx="24" cy="26" r="4.5" fill="#818cf8"/>
+        <text x="38" y="30" class="af-sans" font-size="15.5" font-weight="700" fill="#f8fafc">12-Crate Rust Core</text>
+        <text x="38" y="53" class="af-mono" font-size="12" fill="#94a3b8">Axum · Tokio · SQLite WAL · Runner IPC</text>
+      </g>
+
+      <!-- Card 2 -->
+      <g transform="translate(366, 0)">
+        <rect x="0" y="0" width="348" height="72" rx="14" fill="url(#bn-card-surface)" stroke="#22d3ee" stroke-opacity="0.34" stroke-width="1.2"/>
+        <rect x="0" y="14" width="3.5" height="44" rx="1.75" fill="#22d3ee"/>
+        <circle cx="24" cy="26" r="4.5" fill="#38bdf8"/>
+        <text x="38" y="30" class="af-sans" font-size="15.5" font-weight="700" fill="#f8fafc">4-Crate Leptos WASM</text>
+        <text x="38" y="53" class="af-mono" font-size="12" fill="#94a3b8">16 Dashboard Tabs · Static web/dist</text>
+      </g>
+
+      <!-- Card 3 -->
+      <g transform="translate(732, 0)">
+        <rect x="0" y="0" width="348" height="72" rx="14" fill="url(#bn-card-surface)" stroke="#d946ef" stroke-opacity="0.34" stroke-width="1.2"/>
+        <rect x="0" y="14" width="3.5" height="44" rx="1.75" fill="#d946ef"/>
+        <circle cx="24" cy="26" r="4.5" fill="#e879f9"/>
+        <text x="38" y="30" class="af-sans" font-size="15.5" font-weight="700" fill="#f8fafc">77 Native Linux Apps</text>
+        <text x="38" y="53" class="af-mono" font-size="12" fill="#94a3b8">systemd Sandboxes · Auto-Subdomain TLS</text>
+      </g>
+
+      <!-- Card 4 -->
+      <g transform="translate(1098, 0)">
+        <rect x="0" y="0" width="350" height="72" rx="14" fill="url(#bn-card-surface)" stroke="#10b981" stroke-opacity="0.34" stroke-width="1.2"/>
+        <rect x="0" y="14" width="3.5" height="44" rx="1.75" fill="#10b981"/>
+        <circle cx="24" cy="26" r="4.5" fill="#34d399"/>
+        <text x="38" y="30" class="af-sans" font-size="15.5" font-weight="700" fill="#f8fafc">Peer WireGuard Mesh</text>
+        <text x="38" y="53" class="af-mono" font-size="12" fill="#94a3b8">afpeer0 · Grants · NFSv4.2 · GPU Offload</text>
+      </g>
     </g>
   </g>
 
-  <!-- Title & Version Badge -->
-  <g transform="translate(230, 108)">
-    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="52" font-weight="800" fill="#ffffff" letter-spacing="-1.2">AetherFlow</text>
-
-    <!-- Version Pill -->
-    <g transform="translate(292, -36)">
-      <rect x="0" y="0" width="182" height="30" rx="15" fill="url(#pillGrad)" stroke="#818cf8" stroke-opacity="0.5" stroke-width="1"/>
-      <circle cx="16" cy="15" r="4" fill="#34d399"/>
-      <text x="28" y="19.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="700" fill="#e0e7ff" letter-spacing="0.6">v4.0.0 • OBSIDIAN V2</text>
-    </g>
-
-    <!-- Tagline -->
-    <text x="2" y="38" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="19.5" font-weight="500" fill="#cbd5e1" letter-spacing="-0.2">
-      Sovereign Bare-Metal Infrastructure, Media Automation &amp; AI Control Plane
-    </text>
-    <text x="2" y="66" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#94a3b8">
-      11-Crate Rust (Axum + Tokio) + 4-Crate Leptos WASM UI • Native McBrowser • Automated Apache2 TLS Ingress
-    </text>
-  </g>
-
-  <!-- Bottom Feature Pills -->
-  <g transform="translate(68, 236)">
-    <!-- Pill 1 -->
-    <g transform="translate(0, 0)">
-      <rect x="0" y="0" width="246" height="40" rx="10" fill="#0f1428" fill-opacity="0.85" stroke="#334155" stroke-opacity="0.7" stroke-width="1"/>
-      <circle cx="20" cy="20" r="4.5" fill="#6366f1"/>
-      <text x="34" y="24.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="600" fill="#e2e8f0">Rust API + Leptos WASM</text>
-    </g>
-
-    <!-- Pill 2 -->
-    <g transform="translate(262, 0)">
-      <rect x="0" y="0" width="256" height="40" rx="10" fill="#0f1428" fill-opacity="0.85" stroke="#334155" stroke-opacity="0.7" stroke-width="1"/>
-      <circle cx="20" cy="20" r="4.5" fill="#a855f7"/>
-      <text x="34" y="24.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="600" fill="#e2e8f0">Zero-Docker • systemd</text>
-    </g>
-
-    <!-- Pill 3 -->
-    <g transform="translate(534, 0)">
-      <rect x="0" y="0" width="256" height="40" rx="10" fill="#0f1428" fill-opacity="0.85" stroke="#334155" stroke-opacity="0.7" stroke-width="1"/>
-      <circle cx="20" cy="20" r="4.5" fill="#38bdf8"/>
-      <text x="34" y="24.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="600" fill="#e2e8f0">77 Bare-Metal Packages</text>
-    </g>
-
-    <!-- Pill 4 -->
-    <g transform="translate(806, 0)">
-      <rect x="0" y="0" width="258" height="40" rx="10" fill="#0f1428" fill-opacity="0.85" stroke="#334155" stroke-opacity="0.7" stroke-width="1"/>
-      <circle cx="20" cy="20" r="4.5" fill="#10b981"/>
-      <text x="34" y="24.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="600" fill="#e2e8f0">McBrowser + FlowAI Ops</text>
-    </g>
-  </g>
+  <!-- Crisp Outer Border & Top Specular Highlight -->
+  <rect x="2" y="2" width="1596" height="476" rx="24" fill="none" stroke="url(#bn-border)" stroke-width="2"/>
+  <line x1="120" y1="2.5" x2="1480" y2="2.5" stroke="url(#bn-specular)" stroke-width="1.8"/>
 </svg>

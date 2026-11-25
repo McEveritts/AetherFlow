@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Security and Hardening">
+  <defs>
+    <linearGradient id="ic-sec-stroke" x1="9" y1="6" x2="39" y2="42" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="52%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="ic-sec-fill" x1="9" y1="6" x2="39" y2="42" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+  <!-- Hardened shield -->
+  <path d="M24 6.5 L38 11.8 V23.2 C38 32.2 31.8 38.4 24 41.5 C16.2 38.4 10 32.2 10 23.2 V11.8 Z" fill="url(#ic-sec-fill)" stroke="url(#ic-sec-stroke)" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Inner padlock -->
+  <rect x="18.5" y="22.5" width="11" height="9" rx="2.2" stroke="#f8fafc" stroke-width="1.9" stroke-linejoin="round"/>
+  <path d="M20.5 22.5 V19.5 A3.5 3.5 0 0 1 27.5 19.5 V22.5" stroke="#a7f3d0" stroke-width="1.9" stroke-linecap="round"/>
+  <circle cx="24" cy="27" r="1.4" fill="#34d399"/>
+</svg>

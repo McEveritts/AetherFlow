@@ -1,6 +1,6 @@
 # AetherFlow Operational Runbook
 
-> **Version**: v4.0.0 · **Control Plane**: 11-Crate Rust Workspace (`backend-rs`) + 4-Crate Leptos WASM Frontend (`frontend-rs`)  
+> **Version**: v4.0.0 · **Control Plane**: 12-Crate Rust Workspace (`backend-rs`) + 4-Crate Leptos WASM Frontend (`frontend-rs`)  
 > **Audience**: System administrators and operators managing AetherFlow bare-metal deployments.
 
 ---
@@ -34,10 +34,10 @@
 │                                              ▼                       │
 │  ┌────────────────────────────────────────────────────────────────┐  │
 │  │ aetherflow-api.service (Unprivileged Rust Control Plane)       │  │
-│  │  • af-api (Axum HTTP/WS, McBrowser, Plugins, External web/dist)│  │
+│  │  • af-api (Axum HTTP/WS, McBrowser, Plugins, Peer Clustering)  │  │
 │  │  • af-files (openat2 Scoped Filesystem Confinement)            │  │
 │  │  • af-hardware (Zero-Fork sysinfo + NVML GPU FFI)              │  │
-│  │  • af-services (77-App Catalog, Mutators, Workers, Cluster)    │  │
+│  │  • af-services (77-App Catalog, Mutators, Background Workers)  │  │
 │  └──────────────────┬─────────────────────────────┬───────────────┘  │
 │                     │                             │                  │
 │                     ▼                             ▼                  │
@@ -47,6 +47,7 @@
 │  │  • mcbrowser/user-<id> (0700)  │  │  • systemctl allowlists    │  │
 │  │  • AES-256-GCM secrets         │  │  • Bash + 9 opt-in Rust    │  │
 │  └────────────────────────────────┘  │  • WireGuard / Tailscale   │  │
+│                                      │  • Peer WG / NFS / Transcd │  │
 │                                      │  • Transient Self-Updater  │  │
 │                                      └────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────┘
@@ -54,10 +55,11 @@
 
 | Component | Binding / Path | Purpose |
 | :--- | :--- | :--- |
-| `aetherflow-api.service` | `127.0.0.1:8080` (Setup) / `0.0.0.0:8080` (bare) | Unprivileged Rust HTTP/WS API serving external `web/dist` WASM UI (`User=aetherflow`) |
+| `aetherflow-api.service` | `127.0.0.1:8080` (Setup) / `0.0.0.0:8080` (bare); `<tunnel_ip>:9443` when paired | Unprivileged Rust HTTP/WS API serving external `web/dist` WASM UI and `afpeer0` peer listener (`User=aetherflow`) |
 | `aetherflow-runner.service` | `/run/aetherflow/runner.sock` | Privileged root Unix socket daemon (`aetherflow-api runner`, `0660 root:aetherflow`) |
 | `aetherflow-self-update-<command>-<channel>-<8hex>.service` | Per-launch transient systemd unit | Isolated self-updater surviving `aetherflow-runner` and `aetherflow-api` restarts |
-| `af` (`/opt/AetherFlow/current/bin/af`) | CLI binary (`af-cli`) | Unified administrative CLI for packages, services, quotas, backups, and releases |
+| `af-transcode-worker.service` (optional) | `/run/aetherflow-transcode-worker/worker.sock` | Hardened Peer Clustering Jellyfin transcode worker (`bin/af-transcode`, `User=jellyfin`, `PrivateNetwork=yes`, `/etc/aetherflow/transcode.env`) |
+| `af` (`/opt/AetherFlow/current/bin/af`) | CLI binary (`af-cli`) | Unified administrative CLI for packages, services, quotas, backups, releases, and read-only `af cluster diagnose` |
 | SQLite (`af-db`) | `/var/lib/aetherflow/aetherflow.sqlite` | Bundled WAL database (`max_size(1)` writer + `max_size(8)` reader pools) |
 | McBrowser (`af-files` + `af-api::mcbrowser`) | `/var/lib/aetherflow/mcbrowser` | Capability-scoped per-user storage (`0700`) |
 
@@ -67,8 +69,8 @@
 
 ### Prerequisites
 
-- **Target OS**: Debian 12/13 (Bookworm/Trixie) or Ubuntu 22.04/24.04 LTS (`systemd`).
-- **Control Plane Runtime**: The control plane and dashboard require no Node.js, Go, or Redis daemons (compiled into `aetherflow-api`, `bin/af`, and `bin/speedtest-backend` with bundled SQLite). Individual Marketplace applications (such as Palate, Maintainerr, Seerr, Flood, n8n, The Lounge, Piped, and Uptime Kuma) install and use Node.js as required.
+- **Target OS**: Debian 12/13 (Bookworm/Trixie) or Ubuntu 22.04/24.04 LTS (`systemd`; Peer Clustering NFS/transcode requires Debian 13).
+- **Control Plane Runtime**: The control plane and dashboard require no Node.js, Go, or Redis daemons (compiled into `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, and `bin/af-transcode` with bundled SQLite). Individual Marketplace applications (such as Palate, Maintainerr, Seerr, Flood, n8n, The Lounge, Piped, and Uptime Kuma) install and use Node.js as required.
 - **Mandatory Host Runtime Dependencies**: Production hosts require `python3` and `openssl` for `af-release` Sigstore/SLSA provenance verification (`deploy/verify-provenance.py`), deferred core service restarts, `deploy/log-retention.py`, and `deploy/release-manager.sh`.
 
 ### Environment File (`/etc/aetherflow/aetherflow.env`)
@@ -81,7 +83,7 @@ Both `aetherflow-api.service` and `aetherflow-runner.service` load `/etc/aetherf
 | `AES_MASTER_KEY` | **Yes** | — | 32-byte raw, 64-char hex, or Base64 key for AES-256-GCM encryption at rest |
 | `ALLOWED_HOSTS` | **Yes** | — | Comma-separated permitted `Host` headers (`localhost,127.0.0.1,<your-domain-or-ip>`); only canonical loopback IPs (`127.0.0.0/8`, `::1`) are implicitly trusted — list your host LAN/public IP explicitly for IP-only access (`400 INVALID_HOST` otherwise) |
 | `BIND_ADDR` | Recommended | `0.0.0.0` (bare/`af provision`) / `127.0.0.1` (Setup) | **Must be `127.0.0.1` behind Apache2** so plaintext port `8080` is never exposed publicly |
-| `PORT` | No | `8080` | HTTP/WS listen port (if changed, update Apache2's reverse-proxy target away from `127.0.0.1:8080`, set `HEALTH_ENDPOINT` in `aetherflow.env` + restart `aetherflow-runner` for UI updates, and pass `HEALTH_ENDPOINT` / `--config` explicitly on `--local` deploys/rollbacks; see [Health & Readiness Checks](#health--readiness-checks)) |
+| `PORT` | No | `8080` | HTTP/WS listen port (if changed, update Apache2's reverse-proxy target away from `127.0.0.1:8080` and set `HEALTH_ENDPOINT` in `/etc/aetherflow/aetherflow.env` + restart `aetherflow-runner`; both UI/runner-socket updates and `--local` deploys/rollbacks load `HEALTH_ENDPOINT` from `aetherflow.env` unless overridden via process env or `--config`; see [Health & Readiness Checks](#health--readiness-checks)) |
 | `COOKIE_SECURE` | Recommended | `true` (`false` in `af provision` and IP/`*.local` Setup) | Enforce `Secure` attribute on `aetherflow_session` cookies in HTTPS deployments (fresh `af provision` and IP-only/`localhost`/`*.local` `AetherFlow-Setup` runs write `false` unless `COOKIE_SECURE`/`AF_TLS_ENABLED=1`/`SSL_ENABLED=1` is set) |
 | `ALLOWED_CORS_ORIGIN` | No | Localhost origins (`http://localhost:3000/8080/$PORT`, `http://127.0.0.1:3000/8080/$PORT`) | Comma-separated explicit frontend origin URLs for CORS and WebSocket `Origin` checks |
 | `AF_DB_PATH` / `DB_PATH` / `AETHERFLOW_DB_PATH` | No | `/var/lib/aetherflow/aetherflow.sqlite` | SQLite WAL database path (conflicting overrides fail closed) |
@@ -134,7 +136,7 @@ Expected response:
 - If any required check fails, both `GET /health/ready` and `GET /api/v1/auth/ready` (which sets `Cache-Control: no-store` on both `200` and `503`) return HTTP `503` with `"status": "not_ready"`. A healthy database still reports `"database": "ok"` when `"runner": "unreachable"`. Process liveness (`GET /health/live`) remains independent and returns HTTP `200`.
 - `version` is captured from the physical running executable on startup (not the mutable `/opt/AetherFlow/current` symlink).
 - `redis` reports `"disabled"` in v4.0.0 because JWT revocation and active session tracking are persisted directly in SQLite (`af-db`).
-- **Release Gate & `HEALTH_ENDPOINT` Overrides**: `deploy/release-manager.conf`, `af-release`, and the standalone `deploy/release-manager.sh` fallback all default `HEALTH_ENDPOINT` to `http://127.0.0.1:8080/health/ready`. On hosts with a custom `PORT`, update Apache2's reverse-proxy target away from `127.0.0.1:8080`, and note the two release execution paths: (a) setting `HEALTH_ENDPOINT` or `AETHERFLOW_RELEASE_CONF` (an external `KEY=VALUE` release config file outside `/opt/AetherFlow/current`) inside `/etc/aetherflow/aetherflow.env` and restarting `aetherflow-runner` governs **UI and runner-socket releases only**; (b) standalone `af release deploy|rollback --local` runs do **not** read `HEALTH_ENDPOINT` from `aetherflow.env` and will fail Stage 3 and Stage 4 readiness on `:8080` unless you pass `sudo env HEALTH_ENDPOINT=...` / `sudo env AETHERFLOW_RELEASE_CONF=...` (or `--config <external-conf>`, since Debian/Ubuntu `sudo` strips shell exports via `Defaults env_reset`); and (c) runner-socket `af release deploy` rejects shell-exported `AETHERFLOW_RELEASE_CONF` unless `--local` is passed. Any override used for deployment must report full application readiness to supply an equivalent gate. During rollback, older supported v4 readiness payloads containing `{"status":"ready"}` or `{"status":"ok"}` remain accepted.
+- **Release Gate & `HEALTH_ENDPOINT` Overrides**: `deploy/release-manager.conf`, `af-release`, and the standalone `deploy/release-manager.sh` fallback all default `HEALTH_ENDPOINT` to `http://127.0.0.1:8080/health/ready`. On hosts with a custom `PORT`, update Apache2's reverse-proxy target away from `127.0.0.1:8080` and set `HEALTH_ENDPOINT` (or `AETHERFLOW_RELEASE_CONF`) in `/etc/aetherflow/aetherflow.env` (and restart `aetherflow-runner`). Both `af-release` and `deploy/release-manager.sh` load `HEALTH_ENDPOINT` (and GitHub tokens) with unified precedence `process env > explicit --config > /etc/aetherflow/aetherflow.env > default-fallback --config > compiled default` (unless `AETHERFLOW_SKIP_ENV_FILES=1`), while runner-socket `af release deploy` continues to reject shell-exported `AETHERFLOW_RELEASE_CONF` unless `--local` is passed. Any override used for deployment must report full application readiness to supply an equivalent gate. During rollback, older supported v4 readiness payloads containing `{"status":"ready"}` or `{"status":"ok"}` remain accepted.
 
 ---
 
@@ -216,6 +218,10 @@ AetherFlow includes a built-in OpenID Connect provider for downstream applicatio
 
 ## Backup & Staged Restore (`af-host`)
 
+1. **Create or download backups from the dashboard**: Open **Settings → Backups & Restore** to trigger an online WAL-safe SQLite snapshot or start a password/TOTP re-authenticated backup download.
+
+   ![Step 1 — Create or download a WAL-safe backup in Settings → Backups & Restore](assets/guides/backups/01-backups.png)
+
 Dashboard and scheduled backups capture the AetherFlow SQLite database. `af-host` snapshots capture committed WAL data (default `VACUUM INTO`), verify **both** `PRAGMA quick_check` and `PRAGMA integrity_check`, and write archives to `/var/lib/aetherflow/backups/` (or `AETHERFLOW_BACKUP_DIR`) alongside a `.manifest.json` and `.sha256` sidecar. CLI backup commands take a bare `<backup-filename>` inside that backup directory (not an arbitrary absolute path).
 
 `af backup create` (default `--archive`, or pass `--sqlite-only` for a standalone SQLite snapshot) archives:
@@ -226,7 +232,7 @@ Dashboard and scheduled backups capture the AetherFlow SQLite database. `af-host
 - Back up `/var/lib/aetherflow/mcbrowser`, `/var/lib/aetherflow/uploads` (FileShare), Marketplace application data/databases, and Apache configuration separately, keeping McBrowser synchronized with SQLite quota records. Periodically prune verified old `<app-dir>.af-backup.*` upgrade backup trees created by Marketplace installers to avoid unbounded disk growth.
 
 > [!CAUTION]
-> Do **not** bind-mount shared host directories under `/var/lib/aetherflow/mcbrowser/user-*`. Account deletion recursively removes `user-<id>` without a `st_dev` mount-boundary guard.
+> Do **not** bind-mount shared host directories under `/var/lib/aetherflow/mcbrowser/user-*`. Although `af-files` enforces `RESOLVE_NO_XDEV` / `st_dev` mount-boundary guards during recursive account cleanup (skipping mountpoints and recording preserved paths in `admin_audit_log`), shared host media belongs under explicit `ReadWritePaths` / `AF_ALLOWED_FS_ROOTS`, never inside per-user McBrowser roots.
 
 ```bash
 # 1. Create (full host archive or standalone SQLite snapshot), list, and verify backups in /var/lib/aetherflow/backups/
@@ -299,7 +305,7 @@ See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-rele
 ## Database Maintenance
 
 - **Bundled SQLite WAL**: `af-db` pairs a serialized writer pool (`DB_POOL`, `max_size(1)`, `busy_timeout = 5000`, `PRAGMA synchronous = NORMAL`) with a dedicated read-only WAL pool (`DB_READ_POOL`, `max_size(8)`, `query_only = ON`, `busy_timeout = 750ms`).
-- **Automatic Pruning & Recovery (15-minute loop)**: Background maintenance prunes expired `oidc_auth_codes`, `oidc_device_codes`, `oidc_refresh_tokens`, `active_sessions`, `revoked_tokens`, `mfa_challenges`, old `metrics_history`, 90-day `login_history`, 90-day `streaming_bandwidth_samples`, and 90-day terminal `notification_delivery_log` rows, and runs `maintain_backup_upload_staging` (chunked backup upload cleanup), `recover_fileshare_pending_publishes` (FileShare `/var/lib/aetherflow/uploads` recovery), and `account_cleanup::recover` (durable account storage cleanup).
+- **Automatic Pruning & Recovery (15-minute loop)**: Background maintenance prunes expired `oidc_auth_codes`, `oidc_device_codes`, `oidc_refresh_tokens`, `active_sessions`, `revoked_tokens`, `mfa_challenges`, old `metrics_history`, 7-day `transcode_jobs`, 90-day `login_history`, 90-day `streaming_bandwidth_samples`, and 90-day terminal `notification_delivery_log` rows, and runs `maintain_backup_upload_staging` (chunked backup upload cleanup), `recover_fileshare_pending_publishes` (FileShare `/var/lib/aetherflow/uploads` recovery), and `account_cleanup::recover` (durable account storage cleanup).
 - **Manual WAL Checkpoint**: Requires the optional `sqlite3` CLI package (`apt-get install sqlite3`). Run as the `aetherflow` user (never as `root`, which can create `root:root`-owned `-wal`/`-shm` sidecars and block `aetherflow-api.service`):
 
 ```bash
@@ -319,4 +325,4 @@ sudo -u aetherflow sqlite3 /var/lib/aetherflow/aetherflow.sqlite "PRAGMA wal_che
 
 ## Troubleshooting
 
-See [Troubleshooting & FAQ](./troubleshooting.md) for diagnostics covering `aetherflow-api.service`, `aetherflow-runner.service`, Apache2 Subdomain Gateway routing, `ReadWritePaths` systemd sandboxing, and APT lock contention, and [Marketplace Lifecycle Log Retention](./marketplace-log-retention.md) for `/var/log/aetherflow` log rotation.
+See [Troubleshooting & FAQ](./troubleshooting.md) for diagnostics covering `aetherflow-api.service`, `aetherflow-runner.service`, Apache2 Subdomain Gateway routing, `ReadWritePaths` systemd sandboxing, and APT lock contention, [Peer Clustering](./peer-clustering.md#troubleshooting) for `afpeer0` / NFS / distributed transcoding diagnostics (`sudo af cluster diagnose <link>`), and [Marketplace Lifecycle Log Retention](./marketplace-log-retention.md) for `/var/log/aetherflow` log rotation.

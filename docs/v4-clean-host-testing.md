@@ -95,6 +95,7 @@ python3 scripts/v4_vm_matrix.py print-contract
 | **Independent Checksum Manifest** | Independent `SHA256SUMS` (`<64-hex-sha256>  aetherflow-linux-amd64.tar.gz`); never synthesized by the harness |
 | **Required Archive Entries** | `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, `.version`, `web/dist/index.html` (plus non-empty `.wasm`), `deploy/release-manager.sh`, `deploy/release-manager.conf`, `config/packages.json`, `config/package_automation.json`, `plugins/telemetry-inspector/plugin.manifest.json`, `plugins/telemetry-inspector/backend/hooks/start.sh`, `plugins/telemetry-inspector/backend/runtime.py`, `plugins/telemetry-inspector/frontend/dist/index.html` |
 | **Required Executable Entries** | `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, `deploy/release-manager.sh`, `plugins/telemetry-inspector/backend/hooks/start.sh` (each verified with an execute bit set, `(mode & 0o111) != 0`; `build_gold.sh` normalizes to `0755`) |
+| **Optional Executable Entries** | `bin/af-transcode` (verified executable and `<= GLIBC_2.35` whenever present in the bundle) |
 | **Archive Safety** | Regular files and directories only; no symlinks, hardlinks, device nodes, or `..` traversal |
 | **Max GLIBC Requirement** | `<= GLIBC_2.35` (verified via `readelf --version-info`) |
 | **Source Tarball Layout** | Validated pre-extraction via `inspect_source_tarball_layout` (`flat` -> `--strip-components=0`, `single_top_dir` -> `--strip-components=1`) and post-extraction check of `setup/modules/{00-core,02-packages,05-finalize,06-state,modern_stack}.sh` and `deploy/release-manager.{sh,conf}` |
@@ -156,6 +157,6 @@ Release drill tags (healthy update, broken candidate, interrupted candidate) are
 
 ## 6. Verification Status & Evidence Boundary
 
-- **Unit & Regression Tests**: `python3 -m unittest tests/test_v4_vm_matrix.py -v` covers **31** tests validating manifest parsing, `/var/tmp` path guardrails, QEMU command/environment isolation, NoCloud seed generation, `DEFAULT_ARTIFACT_CONTRACT` + GLIBC verification, source tarball layout detection, independent `SHA256SUMS` enforcement, mandatory phase evaluation, baseline builder invariants, and remote execution helpers.
+- **Unit & Regression Tests**: `python3 -m unittest tests/test_v4_vm_matrix.py -v` covers **32** tests validating manifest parsing, `/var/tmp` path guardrails, QEMU command/environment isolation, NoCloud seed generation, `DEFAULT_ARTIFACT_CONTRACT` + GLIBC verification, source tarball layout detection, independent `SHA256SUMS` enforcement, mandatory phase evaluation, baseline builder invariants, and remote execution helpers.
 - **Clean-Guest Boot Verification**: Official cloud images for `debian-12`, `debian-13`, `ubuntu-22.04`, and `ubuntu-24.04` have been cryptographically verified and boot-checked under QEMU/KVM.
 - **Certification Gate**: Full four-OS install/update/rollback/interrupted-recovery certification requires running `build-baseline-artifact` and `certify-matrix` against the target release commit and confirming `overall_status: "certified"` across all four targets.

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Human-Gated FlowAI">
+  <defs>
+    <linearGradient id="ic-ai-stroke" x1="8" y1="7" x2="40" y2="41" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="50%" stop-color="#a855f7"/>
+      <stop offset="100%" stop-color="#e879f9"/>
+    </linearGradient>
+    <linearGradient id="ic-ai-fill" x1="8" y1="7" x2="40" y2="41" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0.20"/>
+    </linearGradient>
+  </defs>
+  <!-- Four-point FlowAI intelligence spark -->
+  <path d="M21 8 C22 16 25 19 33 20 C25 21 22 24 21 32 C20 24 17 21 9 20 C17 19 20 16 21 8 Z" fill="url(#ic-ai-fill)" stroke="url(#ic-ai-stroke)" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Secondary micro spark -->
+  <path d="M35.5 9.5 V14.5 M33 12 H38" stroke="#67e8f9" stroke-width="1.8" stroke-linecap="round"/>
+  <!-- Human-gated approval badge -->
+  <circle cx="34" cy="34" r="7.5" fill="#10b981" fill-opacity="0.18" stroke="#34d399" stroke-width="2"/>
+  <path d="M30.8 34 L33 36.3 L37.4 31.8" stroke="#ecfdf5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

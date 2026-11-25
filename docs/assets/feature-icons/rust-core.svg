@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Rust Core">
+  <defs>
+    <linearGradient id="ic-rust-stroke" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="52%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="ic-rust-fill" x1="10" y1="10" x2="38" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+  <!-- Precision gear ring -->
+  <path d="M24 7 L26.5 11.2 A13.2 13.2 0 0 1 30.8 13 L35.5 11.5 L38 15.8 L34.8 19.6 A13.2 13.2 0 0 1 35.4 24 A13.2 13.2 0 0 1 34.8 28.4 L38 32.2 L35.5 36.5 L30.8 35 A13.2 13.2 0 0 1 26.5 36.8 L24 41 L21.5 36.8 A13.2 13.2 0 0 1 17.2 35 L12.5 36.5 L10 32.2 L13.2 28.4 A13.2 13.2 0 0 1 12.6 24 A13.2 13.2 0 0 1 13.2 19.6 L10 15.8 L12.5 11.5 L17.2 13 A13.2 13.2 0 0 1 21.5 11.2 Z" fill="url(#ic-rust-fill)" stroke="url(#ic-rust-stroke)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Inner hexagonal bare-metal core -->
+  <polygon points="24,16 31,20 31,28 24,32 17,28 17,20" stroke="#e2e8f0" stroke-width="1.8" stroke-linejoin="round"/>
+  <circle cx="24" cy="24" r="2.6" fill="#fbbf24"/>
+</svg>

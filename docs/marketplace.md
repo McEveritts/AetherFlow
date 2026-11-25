@@ -94,14 +94,27 @@ Piped and Invidious are experimental and have [additional installation requireme
 
 ## Installing, Updating & Removing Apps
 
-### Installing an App
+### Installing, Updating & Publishing an App
 
-1. Sign in as an administrator and open **Marketplace** (or run `sudo af package install <pkg>`).
-2. Select the application and click **Install**. The UI immediately dispatches `POST /api/v1/admin/packages/{id}/install` with automatic server-side port allocation (no port/configuration form modal is shown; if the default port is already taken, AetherFlow automatically assigns an available fallback port and records it in `app_ingress_configs` and the **Services** view; custom port overrides can be supplied via `sudo af package install <pkg> --port <port>`).
+1. **Find an application**: Sign in as an administrator, open **Marketplace**, and use the search box and category pills to locate a package in the 77-app catalog (or run `sudo af package list`).
 
-### Monitoring Progress
+   ![Step 1 — Filter the Marketplace catalog using the search bar and category pills](assets/guides/marketplace/01-find-app.png)
 
-The **Deployment Status** drawer renders live progress bars and logs by polling `/api/v1/auth/packages/{id}/progress` every 2 seconds until terminal receipt completion. If an operation fails, inspect the deployment drawer or **System Logs** (`/var/log/aetherflow/install-<app>.log` or `remove-<app>.log`) before retrying.
+2. **Install the application**: Click **Install** on the selected card (or run `sudo af package install <pkg>`). The UI immediately dispatches `POST /api/v1/admin/packages/{id}/install` with automatic server-side port allocation (no port/configuration form modal is shown; if the default port is already taken, AetherFlow automatically assigns an available fallback port and records it in `app_ingress_configs` and the **Services** view; custom port overrides can be supplied via `sudo af package install <pkg> --port <port>`).
+
+   ![Step 2 — Click Install on the application card to start installation](assets/guides/marketplace/02-install.png)
+
+3. **Monitor live install progress**: Follow live `[PROGRESS:<pct>]` bars and logs in the **Deployment Status** drawer, which polls `/api/v1/auth/packages/{id}/progress` every 2 seconds until terminal receipt completion. If an operation fails, inspect the deployment drawer or **System Logs** (`/var/log/aetherflow/install-<app>.log` or `remove-<app>.log`) before retrying.
+
+   ![Step 3 — Track live installation progress bars and logs in the Deployment Status drawer](assets/guides/marketplace/03-progress.png)
+
+4. **Update an installed application**: When an upstream update is detected, locate the **Update** badge on the application card and click **Update** (or run `sudo af package update <pkg>`) to run an in-place staged update while preserving configuration, allocated port, and user data.
+
+   ![Step 4 — Locate an available upgrade via the Update badge and click Update](assets/guides/marketplace/04-update.png)
+
+5. **Configure external HTTPS access (optional)**: After completing initial app setup over loopback or `http://<app>.aether.local`, click **External access** on the Marketplace card (or toggle **Enable external access** in **Network → Automatic subdomain ingress & TLS**) to publish `<app>.<baseDomain>` through the Apache2 Subdomain Gateway.
+
+   ![Step 5 — Click External access to open the subdomain ingress dialog and enable HTTPS routing](assets/guides/marketplace/05-external-access.png)
 
 ### Reinstalling and Removing an App
 

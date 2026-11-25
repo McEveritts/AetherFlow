@@ -2,6 +2,16 @@
 
 When triggered from the dashboard (`POST /api/v1/admin/system/update/run`) or via runner-mediated `af release deploy|rollback`, `aetherflow-runner.service` (`backend-rs/crates/af-runner/src/self_update.rs`) starts each update inside a unique per-launch transient systemd unit named `aetherflow-self-update-<command>-<channel>-<8hex>.service` via `systemd-run --collect`. A task running inside `aetherflow-runner` cannot survive restarting that runner, regardless of `KillMode=process`.
 
+## Triggering an Update from the Dashboard
+
+1. Open **Settings → System Updates**, select the target **channel (1)** (`stable` or `nightly`), click **Check for Updates (2)**, and click **Apply Self-Update (3)** to launch the isolated transient self-update unit.
+
+   ![Step 1 — In Settings → System Updates, select the release channel (1), check for updates (2), and click Apply Self-Update (3)](assets/guides/self-update/01-system-updates.png)
+
+2. Monitor the restart-surviving update progress and durable receipt (`operationId`, `state`, `status`, and verification outcome) until `aetherflow-api` reconnects on the new release.
+
+   ![Step 2 — Follow self-update progress and verify the durable update receipt](assets/guides/self-update/02-progress.png)
+
 ## Launch, Binary Resolution & Execution Mechanics
 
 - **Default Native Engine (`NativeRustRelease`)**: `resolve_af_cli_binary()` (`backend-rs/crates/af-runner/src/lib.rs`) checks explicit `AETHERFLOW_CLI_BIN` first, then `env::current_exe().parent()` (`bin/af`, `af`) from the runner's immutable release slot before falling back to mutable `/opt/AetherFlow/current/bin/af`, `/opt/AetherFlow/current/af`, and `/usr/local/bin/af` (the same immutable-slot precedence applies to `package_script_roots()`, `resolve_release_manager_script()`, and `resolve_sandbox_script_path()`). The transient unit runs `af [--root <root>] release <command> --channel <channel> --local --config <job_conf> --job-status-file <status_json> --job-unit <unit>` so it executes in-process without dispatching back through `/run/aetherflow/runner.sock`. Setting `AETHERFLOW_FORCE_BASH_RELEASE=1` or `AETHERFLOW_RELEASE_ENGINE=bash` runs `deploy/release-manager.sh` in the same isolated transient unit.

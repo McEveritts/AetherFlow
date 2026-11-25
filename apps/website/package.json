@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "sync-assets": "node scripts/sync-assets.mjs",
+    "predev": "node scripts/sync-assets.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/sync-assets.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "tsc --noEmit --incremental false"

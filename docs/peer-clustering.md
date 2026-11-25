@@ -1,11 +1,13 @@
 # Peer clustering
 
-Use **Cluster** (`/?tab=cluster`) to link AetherFlow servers over an AetherFlow-managed WireGuard tunnel, grant scoped remote access, manage a peer from your local dashboard, share media folders over NFSv4.2, offload Jellyfin `ffmpeg` transcoding to paired workers, and diagnose links with `af cluster diagnose`.
+Use **Cluster** (`/?tab=cluster`) to link AetherFlow servers over an AetherFlow-managed WireGuard tunnel (`afpeer0`), grant scoped remote access, manage a peer from your local dashboard, share media folders over NFSv4.2, offload Jellyfin `ffmpeg` transcoding to paired workers, and diagnose links with `af cluster diagnose`.
+
+![AetherFlow Peer Clustering Topology](./assets/peer-clustering.svg)
 
 > **Document role:** Operator guide for configuring and operating peer clustering. Architecture diagrams, [non-goals](designs/peer-clustering.md#non-goals), [alternatives considered](designs/peer-clustering.md#alternatives-considered), SQL migrations, and wire/IPC schemas live in the [peer clustering design specification](designs/peer-clustering.md).
 
 > [!WARNING]
-> **Upgrade notice (Migration 26):** Upgrading to this peer clustering release runs Migration 26, which permanently removes legacy single-master clustering (`CLUSTER_MODE`, `CLUSTER_PSK`, `cluster_nodes`, `cluster_enrollment_tokens`, and `cluster_commands`). Before upgrading, create a WAL-safe backup via **Settings → Backups & Restore** or `sudo af backup create`—never copy a live WAL-mode `.sqlite` file while `aetherflow-api.service` is running. Rolling back Migration 26 requires a stopped-service swap from `af backup restore --target-root` (see [database and backup inspection](configuration.md#database--backup-inspection) and [backup and staged restore](RUNBOOK.md#backup--staged-restore-af-host)). After upgrading, re-pair previously enrolled servers through **Cluster**.
+> **Upgrade notice (Migration 26):** Upgrading to this peer clustering release runs Migration 26, which permanently removes legacy single-master clustering (`CLUSTER_MODE`, `CLUSTER_PSK`, `cluster_nodes`, `cluster_enrollment_tokens`, and `cluster_commands`). Before upgrading, create a WAL-safe backup via **Settings → Backups & Restore** or `sudo af backup create`—never copy a live WAL-mode `.sqlite` file while `aetherflow-api.service` is running. Rolling back Migration 26 requires a stopped-service swap from `af backup restore --target-root` (see [Migrating from legacy master/worker clustering](#migrating-from-legacy-masterworker-clustering), [database and backup inspection](configuration.md#database--backup-inspection), and [backup and staged restore](RUNBOOK.md#backup--staged-restore-af-host)). After upgrading, re-pair previously enrolled servers through **Cluster**.
 
 ## Prerequisites
 
@@ -16,7 +18,7 @@ Use **Cluster** (`/?tab=cluster`) to link AetherFlow servers over an AetherFlow-
   - **SSRF and private-network guard:** Pairing validates both literal IP hosts and DNS-resolved pinned IPs, blocking loopback, link-local/cloud metadata, unspecified, multicast, broadcast/reserved, and the `afpeer0` tunnel CIDR unconditionally. RFC 1918 private, CGNAT (`100.64.0.0/10`), and IPv6 unique-local (`fc00::/7`) HTTPS origins are also blocked by default; set `AF_PEER_ALLOW_PRIVATE_PAIRING_URLS=true` in `/etc/aetherflow/aetherflow.env` and restart `aetherflow-api.service` on the initiating server when pairing over a private LAN/VLAN HTTPS origin.
   - **Explicit override:** Enter a bare `https://host[:port]` origin in the **Public HTTPS origin (optional)** field of Step 1's pairing dialog whenever `PUBLIC_URL` is unset and proxy/`Host` headers do not resolve to your public HTTPS origin.
   - **`PUBLIC_URL`:** When the dialog field is left blank, AetherFlow checks `PUBLIC_URL` in `/etc/aetherflow/aetherflow.env` first; an invalid or non-HTTPS `PUBLIC_URL` fails with `INVALID_REQUEST`.
-  - **Reverse proxy and `Host` fallback:** If `PUBLIC_URL` is unset, AetherFlow checks `X-Forwarded-Host` and `X-Forwarded-Proto` from trusted reverse proxies—either the comma-separated IPs/CIDRs listed in `TRUSTED_PROXIES` (which, when non-empty, overrides both default loopback trust and `TRUST_PROXY_HEADERS=false`/`0`) or loopback by default unless `TRUST_PROXY_HEADERS=false`/`0`. A trusted proxy sending `X-Forwarded-Proto: http` fails with `INVALID_REQUEST`. If no trusted proxy headers apply, AetherFlow falls back to a validated `Host` header (checked against `ALLOWED_HOSTS`, configured base/ingress domains, and configured origins, defaulting to `localhost:8080`; see [cookie, host, proxy, and CSRF hardening](configuration.md#cookie-host-proxy--csrf-hardening)).
+  - **Reverse proxy and `Host` fallback:** If `PUBLIC_URL` is unset, AetherFlow checks `X-Forwarded-Host` and `X-Forwarded-Proto` from trusted reverse proxies—either the comma-separated IPs/CIDRs listed in `TRUSTED_PROXIES` (which, when non-empty, overrides both default loopback trust and `TRUST_PROXY_HEADERS=false`/`0`) or loopback by default unless `TRUST_PROXY_HEADERS=false`/`0`. A trusted proxy sending `X-Forwarded-Proto: http` fails with `INVALID_REQUEST`. If no trusted proxy headers apply, AetherFlow falls back to a validated `Host` header (checked against `ALLOWED_HOSTS`, configured base/ingress domains, and configured origins, defaulting to `localhost:8080`; see [cookie, host, proxy, webhook, and CSRF hardening](configuration.md#cookie-host-proxy-webhook--csrf-hardening)).
 - **Privileged runner:** `aetherflow-runner.service` is AetherFlow's root-privileged helper daemon managing WireGuard, NFS, and systemd units on behalf of unprivileged `aetherflow-api.service` (see [system architecture](architecture.md)). Verify it is active and `/health/ready` on the local API reports `"runner": "ok"`:
 
   ```bash
@@ -43,17 +45,35 @@ Use **Cluster** (`/?tab=cluster`) to link AetherFlow servers over an AetherFlow-
 ## Pair two servers
 
 1. On the receiving server, open **Cluster** and click **Allow a server to manage this one**. Leave **Public HTTPS origin (optional)** blank to use `PUBLIC_URL` (or trusted proxy/host fallback) or enter a bare `https://host[:port]` override, and pick the reachable WireGuard endpoint. Leave **WireGuard UDP port** blank/default to use `AF_PEER_WG_PORT` (before first initialization, entering a port here overrides `AF_PEER_WG_PORT`; after initialization, a differing value fails with `KEY_MISMATCH`).
+
+   ![Step 1 — Click Allow a server to manage this one on the receiving server and confirm the HTTPS origin and WireGuard endpoint](assets/guides/peer-pairing/01-allow-server.png)
+
 2. Click **Open pairing window**, then **Copy pairing string**. Share it only with the intended administrator; the window and subsequent pending confirmation each expire after **10 minutes** (single-use).
+
+   ![Step 2 — Click Open pairing window, then Copy pairing string](assets/guides/peer-pairing/02-open-window.png)
+
 3. On the initiating server, open **Cluster**, click **Pair with a server**, paste the pairing string, set **Peer display name (optional)** if desired, pick the local WireGuard endpoint reachable by the receiver, and click **Start pairing** (on first initialization, the initiator uses `AF_PEER_WG_PORT`, default `51821`).
+
+   ![Step 3 — Open Pair with a server on the initiating server, paste the pairing string, select the WireGuard endpoint, and click Start pairing](assets/guides/peer-pairing/03-pair-with-server.png)
+
 4. Compare the six-digit verification codes shown on both dashboards. On the receiving server, set **Local peer name (optional)** if desired and click **Approve & link** only when both codes match; if they differ, click **Cancel request** (receiver) or **Cancel pairing** (initiator).
+
+   ![Step 4 — Compare the six-digit verification codes on both dashboards and click Approve & link](assets/guides/peer-pairing/04-verify-codes.png)
+
 5. Confirm the link appears healthy on both **Cluster** pages with status, software version, peer protocol compatibility, and RTT.
+
+   ![Step 5 — Confirm the healthy peer link card showing status, version, protocol compatibility, and RTT](assets/guides/peer-pairing/05-linked.png)
 
 - **Closing an unused window:** Click **Close window** before a peer submits a pairing request. (Once a request consumes the window, cancel the pending attempt with **Cancel request** or **Cancel pairing** as in Step 4.)
 - **Updating a moved peer's address:** Open **Edit endpoint** on the *other* server (whose stored remote endpoint for the moved host changed), update the address (and optional WireGuard UDP port), click **Update endpoint**, and confirm link health recovers.
 
 ## Grant access to a linked peer
 
-Pairing establishes an encrypted link with **zero access by default** (`None` across all eight areas). Open the peer's **Grants** editor in **Cluster** on the server whose resources you want to share, choose **None**, **Read-only**, or **Read and write** per area—or use **Read-only (everything)** or **Read and write (everything)**—and click **Save grant**. Any non-`None` grant unlocks baseline overview reads (readiness, system metrics, hardware/topology, inbox notifications at `/api/v1/auth/notifications`, and filtered telemetry WebSockets that stream only frames and service details permitted by granted read areas; live logs require `services: read`).
+Pairing establishes an encrypted link with **zero access by default** (`None` across all eight areas).
+
+1. Open the peer's **Grants** editor in **Cluster** on the server whose resources you want to share, choose **None**, **Read-only**, or **Read and write** per area—or use **Read-only (everything)** or **Read and write (everything)**—and click **Save grant**. Any non-`None` grant unlocks baseline overview reads (readiness, system metrics, hardware/topology, inbox notifications at `/api/v1/auth/notifications`, and filtered telemetry WebSockets that stream only frames and service details permitted by granted read areas; live logs require `services: read`).
+
+   ![Step 1 — Select None, Read-only, or Read and write per area in the peer Grants editor and click Save grant](assets/guides/peer-grants/01-grants-editor.png)
 
 | Area | Scope covered |
 | :--- | :--- |
@@ -79,7 +99,15 @@ Saving all eight areas as **None** is blocked in the UI (and rejected with `INVA
 
 ## Manage another server
 
-Once the peer grants this server access and the link is healthy, select that server from the header **Active server** switcher or click **Manage server** in **Cluster**. An identity bar displays the active server on every tab; click **Exit to This server** to return to your local dashboard.
+Once the peer grants this server access and the link is healthy:
+
+1. Select that server from the header **Active server switcher (1)** or click **Manage server (2)** on its peer card in **Cluster**.
+
+   ![Step 1 — Switch to a paired server via the Active server switcher (1) or the Manage server button (2)](assets/guides/peer-grants/02-manage-server.png)
+
+2. Confirm the colored **identity bar** displays the active remote server across every tab; click **Exit to This server** to return to your local dashboard.
+
+   ![Step 2 — Verify the active remote server in the identity bar and click Exit to This server to return locally](assets/guides/peer-grants/03-identity-bar.png)
 
 - **Permissions:** Read access lets you view an area; mutations require write access to every affected area (with `jellyfin` / `jellyfin-ffmpeg*` package updates accepting `updates: write` or `marketplace: write`, and all other Marketplace package updates requiring `marketplace: write`). Destructive confirmations always name the target server.
 - **Local-only operations and app links:**
@@ -97,10 +125,12 @@ Peer media sharing uses **NFSv4.2 over `afpeer0`** backed by runner-managed syst
 > Exporting a peer media folder (or enabling distributed transcoding) binds `nfs-server.service` exclusively to `afpeer0` via `/etc/nfs.conf.d/aetherflow-peers.conf` and adds `/etc/systemd/system/nfs-server.service.d/20-aetherflow-peers.conf` (`After=wg-quick@afpeer0.service`, `Wants=wg-quick@afpeer0.service`). Review [Host-wide NFS binding, reboot ordering, and restoring LAN NFS](#operational-limits-and-safeguards) before enabling exports on a host that serves LAN NFS clients.
 
 1. On the server holding the media, open **Cluster**, open the peer's **Storage** controls, pick the parent folder containing the library subfolder, and click **Export folder**.
-   - **Allowed roots and directory access:** Exported folders must be real non-symlink directories inside `AF_ALLOWED_FS_ROOTS` (default `/mnt,/media,/srv,/data,/home`, plus process temp/working directories when unset—set `AF_ALLOWED_FS_ROOTS` explicitly on production hosts; see [storage configuration](configuration.md#storage--native-mcbrowser-af-files)) and traversable by `User=aetherflow`. Exporting under a `0700` home directory requires granting `aetherflow` directory traverse access (for example `chmod 0710`/`0750` or an ACL) in addition to any `SupplementaryGroups` drop-in per [systemd service hardening](configuration.md#systemd-service-hardening--operator-drop-ins).
+   - **Allowed roots and directory access:** Exported folders must be real non-symlink directories inside `AF_ALLOWED_FS_ROOTS` (default `/mnt,/media,/srv,/data,/home`, plus non-service `env::current_dir()` when unset; `/tmp` is excluded by default—set `AF_ALLOWED_FS_ROOTS` explicitly on production hosts; see [storage configuration](configuration.md#storage--native-mcbrowser-af-files--af-apimcbrowser)) and traversable by `User=aetherflow`. Exporting under a `0700` home directory requires granting `aetherflow` directory traverse access (for example `chmod 0710`/`0750` or an ACL) in addition to any `SupplementaryGroups` drop-in per [systemd service hardening](configuration.md#systemd-service-hardening--operator-drop-ins).
    - **Forbidden paths and limits:** Paths cannot lie under forbidden system/peer prefixes (such as `/mnt/af-peers`, `/etc`, `/var/lib/aetherflow`, `/opt/AetherFlow`, `/usr`, `/root`, `/var/run`; see the [design specification](designs/peer-clustering.md#media-sharing-nfsv42-inside-the-tunnel) for all 18 prefixes) and cannot be exact forbidden roots (`/`, `/tmp`, `/var/tmp`, `/var`, `/home`). Each link supports up to 64 exports.
    - **Permissions:** Exports are restricted to the peer's tunnel IP and default to read-only (`ro,root_squash,secure,no_subtree_check`). Opt-in writable exports (`rw,all_squash,anonuid=<uid>,anongid=<gid>,secure,no_subtree_check`) reject root-owned directories (`uid == 0` or `gid == 0`) and run remote writes as the folder owner. Because NFS uses `sec=sys`, root on a compromised peer can spoof non-root UIDs to read files beneath read-only exports—export only folders whose entire subtree the peer is permitted to read.
 2. On the consuming server, open the same link's **Storage** controls and click **Mount folder**. AetherFlow mounts the remote export at `/mnt/af-peers/<link>/<export>` (appending a unique suffix on duplicate basenames) and displays **App library folder (inside mount)** (`/mnt/af-peers/<link>/<export>/library`) with a **Copy library path** button—intentionally hiding the bare mount root. AetherFlow does **not** create `library/`; `/library` is a placeholder example for an existing subfolder inside the exported parent directory. Request a writable mount only when the export allows writes and the application needs them.
+
+   ![Step 1 — Open the peer Storage dialog to export a media folder and mount remote peer exports](assets/guides/peer-storage/01-share-folder.png)
 3. Click **Copy library path** and point your media application at that interior subfolder (replacing the trailing `/library` segment with your actual subfolder inside the exported parent directory); do not append a second `/library` or strip it back to the bare mount root. When a mount stops, the interior folder disappears so applications can distinguish an offline library from an empty folder.
 
 Adding or removing a **Storage** export or mount automatically triggers a best-effort mount resync for active enabled transcode workers on that link.
@@ -158,6 +188,8 @@ AetherFlow offloads Jellyfin 12.4 `ffmpeg` jobs from the **controller** (the ser
    - **Worker concurrency cap and auto-clamping:** `af-transcode-worker.service` defaults to `8` concurrent jobs (`AF_TRANSCODE_WORKER_MAX_JOBS`, clamped `1..=64`, read from `/etc/aetherflow/transcode.env`) and advertises `worker_max_jobs` over link-authenticated tunnel `GET /health`. The controller automatically clamps dispatch concurrency to `effective_max_jobs = min(worker.max_jobs, worker_max_jobs)`, preventing post-`Start` busy rejections when controller **Max jobs** exceeds the worker's configured limit. To raise a worker above `8` concurrent jobs, set `AF_TRANSCODE_WORKER_MAX_JOBS=<N>` in `/etc/aetherflow/transcode.env` and restart `af-transcode-worker.service` and `aetherflow-api.service` on the worker.
    - **Link WebSocket cap:** If concurrent worker transcode jobs (1 WebSocket per job) plus management WebSockets on that link will exceed `16`, also raise `AF_PEER_MAX_WS` in `/etc/aetherflow/aetherflow.env` and restart `aetherflow-api.service` on both the worker and controller (hitting `AF_PEER_MAX_WS` fails pre-start and falls back locally).
    - **Parity test and atomic mount rollback:** Saving an enabled worker syncs transcode exports/mounts (180 s controller timeout) and automatically runs **Run parity test** whenever parity has not yet passed (subsequent saves of an already-verified worker skip auto-parity unless you click **Run parity test**). The test has the worker encode a 1-second software `libx264` clip (5-second timeout) into the shared transcode folder and verifies local readability on the controller (it does not test GPU hardware encoding or media bind mounts). If mount or bind setup fails partway through, the worker rolls back newly applied transcode and bind mounts atomically (wrapping `peer_mounts` replacement in a SQLite transaction) and persists `parity_ok = false` with `parity_error` in **Cluster**.
+
+   ![Step 2 — Enable distributed Jellyfin transcoding, configure worker settings, and verify worker status](assets/guides/peer-storage/02-transcode.png)
 
 ### Eligibility, version alignment, and failure behavior
 
@@ -300,10 +332,31 @@ sudo systemctl status af-transcode-worker.service
   - Check `jellyfin-ffmpeg` alignment and worker GPU/codec support per [Eligibility, version alignment, and failure behavior](#eligibility-version-alignment-and-failure-behavior).
   - Verify `AF_TRANSCODE_WORKER_MAX_JOBS` in `/etc/aetherflow/transcode.env` (controller auto-clamps to `effective_max_jobs`) and recover worker mounts after reboots or media-mount outages per [Dedicated transcode workers and reboot/link-flap recovery](#operational-limits-and-safeguards).
 
+## Security model
+
+Peer clustering enforces layered transport, authentication, scope, and OS-isolation boundaries (see [Security Guide](security.md#peer-clustering--distributed-transcoding) and [Threat Model](threat_model.md)):
+
+- **Public pairing bootstrap (`POST /api/v1/peer-pairing/request`)**: Single-use 10-minute pairing windows with 6-digit operator code verification, strict 4 KiB request body limit, 5 req/min/IP rate limit, 300-second clock-skew check, OS CA TLS validation with redirects/proxies disabled, and an SSRF/private-network guard (loopback, link-local/cloud metadata, multicast, broadcast/reserved, and `afpeer0` CIDR blocked unconditionally; RFC 1918, CGNAT, and IPv6 ULA blocked unless `AF_PEER_ALLOW_PRIVATE_PAIRING_URLS=true`).
+- **Dedicated tunnel & credential separation**: Peer API traffic runs strictly over the AetherFlow-managed WireGuard interface (`afpeer0`) on `<tunnel_ip>:<AF_PEER_LISTEN_PORT>` (default `9443`) pinned via `SO_BINDTODEVICE`. Link bearer tokens (`X-AF-Link-Token`) and grant bearer tokens (`X-AF-Grant-Token`) are distinct, stored in mode `0600` files under `/etc/aetherflow/peers/`, and paired with SHA-256 hashes in SQLite.
+- **Fail-closed authorization & sub-second revocation**: Links start with zero access (`None` across all 8 areas). Local-only routes (auth/session, profile/2FA, `/api/v1/admin/peers/*`, nested `/api/v1/peers/*`, OIDC mutations, Plugin Sandbox, public shares) fail closed with `PEER_SCOPE_DENIED`; unmapped routes fail closed with `PEER_ROUTE_UNCLASSIFIED`. Revoking a grant or link immediately rejects tokens, cancels active management WebSockets and in-flight HTTP proxy streams within 1 second (`<< 1 s`), and sends `SIGKILL` to active remote transcode jobs.
+- **Storage & worker isolation**: `nfs-server.service` is bound exclusively to `afpeer0` via `/etc/nfs.conf.d/aetherflow-peers.conf`, exports are IP-pinned to the peer's tunnel address (default `ro,root_squash,secure,no_subtree_check`), and `af-transcode-worker.service` runs hardened as `User=jellyfin` (`PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`, `ProtectSystem=strict`, `DevicePolicy=closed`, local-only `ffmpeg` protocols) reading only the secret-free `/etc/aetherflow/transcode.env` (never `/etc/aetherflow/aetherflow.env`).
+
+## Migrating from legacy master/worker clustering
+
+Migration 26 permanently retires the legacy single-master cluster implementation (`CLUSTER_MODE`, `CLUSTER_PSK`, `CLUSTER_ALLOW_INSECURE_LOOPBACK`, `/api/v1/admin/cluster/*`, `/cluster/v1/*`, HTTP/2 gRPC `cluster.ClusterService` on `:50051`, and SQLite tables `cluster_nodes`, `cluster_enrollment_tokens`, and `cluster_commands`). See [Upgrading Guide — Migration 26](upgrading.md#migration-26-removal-of-legacy-masterworker-clustering).
+
+1. **Before upgrading**: Create a WAL-safe backup via **Settings → Backups & Restore** or `sudo af backup create` on every node in the legacy cluster.
+2. **Upgrade each host**: Deploy v4.0.0 (`sudo af release deploy --channel stable` or **Settings → System Updates**); Migration 26 runs automatically on first `aetherflow-api` startup.
+3. **Clean up obsolete environment variables**: Remove legacy `CLUSTER_MODE`, `CLUSTER_PSK`, and `CLUSTER_ALLOW_INSECURE_LOOPBACK` entries from `/etc/aetherflow/aetherflow.env` (and any firewall rules previously opened only for TCP `50051`) and restart `aetherflow-api.service`.
+4. **Re-pair servers as peers**: Follow [Pair two servers](#pair-two-servers) in **Cluster** (`/?tab=cluster`), then grant explicit per-area permissions in **Cluster → Grants**.
+
 ## Reference
 
 - [Peer API reference](API.md#8-peer-clustering)
 - [Peer clustering configuration](configuration.md#peer-clustering-and-api-logs)
-- [Admin CLI reference](rust-admin-cli.md)
+- [Security guide](security.md#peer-clustering--distributed-transcoding)
+- [Threat model](threat_model.md)
+- [Upgrading guide (Migration 26)](upgrading.md#migration-26-removal-of-legacy-masterworker-clustering)
+- [Admin CLI reference](rust-admin-cli.md#10-read-only-peer-clustering-diagnostics-af-cluster)
 - [System architecture](architecture.md)
 - [Peer clustering design specification](designs/peer-clustering.md)

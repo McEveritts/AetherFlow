@@ -7,7 +7,7 @@
 ### Key Design Principles
 
 1. **Runner-Mediated Privileged Operations (`AF_UNIX`)**:
-   Package lifecycle (`install`, `reinstall`, `remove`, `update`, `cancel`), systemd service control (`start`, `stop`, `restart`, `reload`, `enable`, `disable`, `status`), disk quota enforcement (`setdisk` / `quota set`), systemd drop-in sandboxing (`sandbox apply`), local DNS reconciliation (`hosts`), runner health probing (`health`), and background self-update triggers (`release deploy` / `rollback`) are dispatched over `/run/aetherflow/runner.sock` (`/v1/health`, `/v1/package`, `/v1/package/cancel`, `/v1/systemctl`, `/v1/quota`, `/v1/sandbox`, `/v1/hosts`, `/v1/self-update`) using the canonical `af-models` wire structs.
+   Package lifecycle (`install`, `reinstall`, `remove`, `update`, `cancel`), systemd service control (`start`, `stop`, `restart`, `reload`, `enable`, `disable`, `status`), disk quota enforcement (`setdisk` / `quota set`), systemd drop-in sandboxing (`sandbox apply`), local DNS reconciliation (`hosts`), read-only Peer Clustering live checks (`cluster diagnose` via `/v1/peer-network` and `/v1/peer-storage`), runner health probing (`health`), and background self-update triggers (`release deploy` / `rollback`) are dispatched over `/run/aetherflow/runner.sock` (`/v1/health`, `/v1/package`, `/v1/package/cancel`, `/v1/systemctl`, `/v1/quota`, `/v1/sandbox`, `/v1/hosts`, `/v1/peer-network`, `/v1/peer-storage`, `/v1/self-update`) using the canonical `af-models` wire structs.
 2. **Shared Crate Logic**:
    - Quota block calculations reuse `af_runner::parse_quota_size_to_1k_blocks` and `af_runner::{SAFE_USERNAME, SAFE_QUOTA_SIZE}`.
    - Systemd drop-in rendering reuses `af_runner::render_systemd_sandbox_dropin` and `af_runner::get_runner_package_definition`.
@@ -212,7 +212,7 @@ af provision reset --confirm
 af cluster diagnose <link-id-or-name> [--db <path>] [--json] [--socket <path>] [--root <dir>] [--dry-run]
 ```
 
-Inspects read-only Peer Clustering state for a peer link matched by exact `id`, exact `name`, or case-insensitive `name`:
+Inspects read-only Peer Clustering state for a peer link matched by exact `id`, exact `name`, or case-insensitive `name` (see [Peer Clustering Operator Guide](./peer-clustering.md#cli-diagnostics-af-cluster-diagnose)):
 
 - **Flags**:
   - `--db <path>`: Override the SQLite database path (defaults via `af_models` DB path helpers: `AF_DB_PATH`, `DB_PATH`, `AETHERFLOW_DB_PATH`, `DATA_DIR`/`STATE_DIRECTORY`, env files, or `/var/lib/aetherflow/aetherflow.sqlite` under `--root`).

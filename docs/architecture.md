@@ -4,6 +4,8 @@ AetherFlow v4.0.0 runs a 12-crate Rust control plane (`backend-rs` -> `aetherflo
 
 ## System Overview
 
+![AetherFlow System Architecture](./assets/architecture.svg)
+
 ```mermaid
 graph TD
     User((User)) -->|"HTTPS / WSS"| Apache["Apache2 TLS Termination & Subdomain Vhosts"]
@@ -42,7 +44,7 @@ Twelve workspace crates in `backend-rs` compile into `aetherflow-api` (serving t
   - Marketplace lifecycle (`routes/marketplace/`), Native McBrowser (`mcbrowser/` — 64 GiB resumable TUS uploads, ETag-guarded UTF-8 editing up to 10 MiB, 9-format archives, public shares, media previews, and search; see [Native McBrowser](./mcbrowser.md)), and FileShare (`/var/lib/aetherflow/uploads`).
   - FlowAI multi-provider intelligence (`intelligence/`), canonical Streaming History & reconciliation (`streaming_history.rs`, `streaming_portability/`), and MediaFlow transcoding queue.
   - GitHub release update checking (`storage/updater.rs` — 5-minute cache, `X-RateLimit-Reset`/`Retry-After` backoff, `stable`/`nightly` channel filtering, branch-head SHA fallback for `nightly`), chunked backup uploads/restores, peer pairing, link health, scoped peer management, peer media storage, distributed Jellyfin transcoding, and storage quotas.
-- **Peer Links**: The API pairs servers through HTTPS and binds its peer listener to the local `afpeer0` address once a tunnel identity exists. SQLite stores link, pairing, grant, storage, and transcode worker state. The separate runner manages WireGuard, peer credentials, NFS exports/mounts, and transcode drop-ins/worker units.
+- **Peer Links & Distributed Transcoding**: The API pairs servers through HTTPS and binds its peer listener (`SO_BINDTODEVICE=afpeer0`) to the local `afpeer0` address (`AF_PEER_LISTEN_PORT`, default `9443`) once a tunnel identity exists. SQLite stores link, pairing, grant, storage, and transcode worker state. The separate runner manages WireGuard (`/v1/peer-network`), peer credentials, NFSv4.2 exports/mounts (`/v1/peer-storage`), and transcode drop-ins/worker units (`/v1/peer-transcode`). See [Peer Clustering](./peer-clustering.md) and the [peer clustering topology diagram](./assets/peer-clustering.svg).
 - **`aetherflow-api.service`**: Runs as unprivileged `User=aetherflow` (`Group=aetherflow`) with `SupplementaryGroups=systemd-journal adm`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`, `DevicePolicy=closed` (`/dev/dri`, `char-drm`, `/dev/nvidiactl`, `/dev/nvidia0` single-GPU default, `/dev/nvidia-modeset`, `/dev/nvidia-uvm`), `ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow` plus optional `-/srv -/mnt -/media -/data` and `-/opt/AetherFlow/backend/data`, `UMask=0027`, and `LimitNOFILE=65535`.
 
 ### 2. `af-runner` (`backend-rs/crates/af-runner`) — Privileged Unix Socket Daemon
@@ -59,7 +61,7 @@ Twelve workspace crates in `backend-rs` compile into `aetherflow-api` (serving t
 ### 3. `af-files` (`backend-rs/crates/af-files`) — Capability-Scoped Filesystem Sandbox
 
 - **Tenant Confinement Primitives**: Implements `BrowserFs` using Linux `openat2` and opened directory descriptors to confine per-user storage to `0700` roots under `/var/lib/aetherflow/mcbrowser/user-<id>`, rejecting symlinks at the storage root and per-user roots and guarding path mutations against traversal escapes. The higher-level HTTP/TUS upload, editor, archive, share, and search features live in `af-api::mcbrowser`.
-- **Host Path Picker Boundary**: Administrator-only host path browsing (`GET /api/v1/auth/fs` in `af-api`) defaults to `/mnt,/media,/srv,/data,/home` plus `env::temp_dir()` (`/tmp`) and `env::current_dir()` (when outside `/opt/AetherFlow` and `/var/lib/aetherflow`), or the explicit comma-separated `AF_ALLOWED_FS_ROOTS` override.
+- **Host Path Picker Boundary**: Administrator-only host path browsing (`GET /api/v1/auth/fs` in `af-api`) defaults to `/mnt,/media,/srv,/data,/home` plus `env::current_dir()` (when outside `/opt/AetherFlow` and `/var/lib/aetherflow`; `/tmp` / `env::temp_dir()` is excluded by default), or the explicit comma-separated `AF_ALLOWED_FS_ROOTS` override.
 
 ### 4. `af-db` (`backend-rs/crates/af-db`) — Bundled SQLite WAL & Envelope Encryption
 
@@ -88,7 +90,7 @@ Twelve workspace crates in `backend-rs` compile into `aetherflow-api` (serving t
 
 ### 8. `af-librespeed` (`backend-rs/crates/af-librespeed`) — Native Speedtest Backend
 
-- Compiles into the standalone `bin/speedtest-backend` binary shipped alongside `aetherflow-api` and `bin/af` in every core release bundle (replacing the external Go LibreSpeed server).
+- Compiles into the standalone `bin/speedtest-backend` binary shipped alongside `aetherflow-api`, `bin/af`, and `bin/af-transcode` in every core release bundle (replacing the external Go LibreSpeed server).
 - Provides SQLite WAL telemetry persistence (with automatic legacy BoltDB v2 migration), keyed ULID result-ID obfuscation, and PNG speedtest result badge rendering.
 
 ---
@@ -97,7 +99,7 @@ Twelve workspace crates in `backend-rs` compile into `aetherflow-api` (serving t
 
 - **Immutable Releases**: `/opt/AetherFlow/releases/<timestamp>` symlinked atomically to `/opt/AetherFlow/current`.
 - **Mutable State**: `/var/lib/aetherflow/aetherflow.sqlite` (`StateDirectory=aetherflow`, `0700`; database files created at `0640` via `UMask=0027`).
-- **Environment Secrets**: `/etc/aetherflow/aetherflow.env`, read by `systemd` PID 1 as `root` via `EnvironmentFile=` before dropping privileges to `User=aetherflow` (both `aetherflow-api.service` and `aetherflow-runner.service` load this file). `AetherFlow-Setup` creates it as `0640 root:aetherflow`; `af provision` enforces mode `0600` on created or existing files; `af-release` legacy migration writes `0600` preserving source `uid:gid` or falling back to `aetherflow:aetherflow`. Packaged systemd units also retain the legacy fallback `EnvironmentFile=-/opt/AetherFlow/current/backend/.env`. Secret-free distributed transcoding overrides live separately in `/etc/aetherflow/transcode.env` (`0640 root:jellyfin`).
+- **Environment Secrets**: `/etc/aetherflow/aetherflow.env`, read by `systemd` PID 1 as `root` via `EnvironmentFile=-/etc/aetherflow/aetherflow.env` before dropping privileges to `User=aetherflow` (both `aetherflow-api.service` and `aetherflow-runner.service` load this file directly; legacy `/opt/AetherFlow/current/backend/.env` fallbacks have been retired from both units). `AetherFlow-Setup` creates it as `0640 root:aetherflow`; `af provision` enforces mode `0600` on created or existing files; `af-release` legacy migration writes `0600` preserving source `uid:gid` or falling back to `aetherflow:aetherflow`. Secret-free distributed transcoding overrides live separately in `/etc/aetherflow/transcode.env` (`0640 root:jellyfin`).
 - **Host Runtime Dependencies**: The control plane and dashboard require no Node.js, Go, or Redis daemons. Production hosts require `python3` and `openssl` (used by `af-release` Sigstore/SLSA provenance verification, deferred core service restarts, `deploy/log-retention.py`, and `deploy/release-manager.sh`).
 - **Pull-Based CD**: `.github/workflows/release.yml` runs Gitleaks, multi-arch (`amd64` and `arm64`) release packaging, and Sigstore build provenance attestations. Local packaging uses `scripts/build_gold.sh`, which runs the Leptos WASM build (`bash scripts/build_wasm_frontend.sh --stage`), `RUST_TEST_THREADS=1 cargo test --locked --workspace` (plus `frontend-rs` workspace tests), and `cargo build --release --locked --target <rust_target> --bin aetherflow-api --bin af --bin speedtest-backend --bin af-transcode` to assemble `aetherflow-linux-<arch>.tar.gz` (default `TARGETS=amd64`) with external `web/dist` assets and `SHA256SUMS`.
 

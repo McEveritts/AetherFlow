@@ -1,0 +1,455 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" role="img" aria-labelledby="arch-title arch-desc">
+  <title id="arch-title">AetherFlow v4.0.0 — System Architecture</title>
+  <desc id="arch-desc">End-to-end architecture showing Leptos WASM browser, Apache2 ingress, unprivileged aetherflow-api with its Rust workspace crates, runner.sock strict-allowlist IPC, root aetherflow-runner, bare-metal host targets, and the afpeer0 WireGuard mesh.</desc>
+  <defs>
+    <style>
+      .af-sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+      .af-mono { font-family: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+
+    <linearGradient id="ar-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#07070c"/>
+      <stop offset="50%" stop-color="#0b0d17"/>
+      <stop offset="100%" stop-color="#0f0f1a"/>
+    </linearGradient>
+    <linearGradient id="ar-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.45"/>
+      <stop offset="45%" stop-color="#6366f1" stop-opacity="0.44"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0.42"/>
+    </linearGradient>
+    <linearGradient id="ar-specular" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="25%" stop-color="#22d3ee" stop-opacity="0.6"/>
+      <stop offset="55%" stop-color="#818cf8" stop-opacity="0.8"/>
+      <stop offset="85%" stop-color="#d946ef" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="ar-glow-1" cx="20%" cy="15%" r="45%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="ar-glow-2" cx="82%" cy="22%" r="42%">
+      <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.11"/>
+      <stop offset="100%" stop-color="#f59e0b" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="ar-glow-3" cx="50%" cy="94%" r="46%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ar-panel" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#121629" stop-opacity="0.94"/>
+      <stop offset="100%" stop-color="#0b0e1c" stop-opacity="0.96"/>
+    </linearGradient>
+    <linearGradient id="ar-crate" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#171c33" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#101425" stop-opacity="0.95"/>
+    </linearGradient>
+    <linearGradient id="ar-sock" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2a1929"/>
+      <stop offset="50%" stop-color="#1d1428"/>
+      <stop offset="100%" stop-color="#261816"/>
+    </linearGradient>
+    <pattern id="ar-grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#ffffff" stroke-width="0.6" stroke-opacity="0.03"/>
+    </pattern>
+
+    <!-- Arrowhead Markers -->
+    <marker id="ar-arrow-cyan" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="ar-arrow-indigo" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#818cf8"/>
+    </marker>
+    <marker id="ar-arrow-amber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#fbbf24"/>
+    </marker>
+    <marker id="ar-arrow-emerald" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#34d399"/>
+    </marker>
+    <marker id="ar-arrow-violet" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#c084fc"/>
+    </marker>
+
+    <clipPath id="ar-clip">
+      <rect x="2" y="2" width="1596" height="896" rx="24"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#ar-clip)">
+    <!-- Canvas -->
+    <rect x="2" y="2" width="1596" height="896" rx="24" fill="url(#ar-bg)"/>
+    <rect x="2" y="2" width="1596" height="896" rx="24" fill="url(#ar-glow-1)"/>
+    <rect x="2" y="2" width="1596" height="896" rx="24" fill="url(#ar-glow-2)"/>
+    <rect x="2" y="2" width="1596" height="896" rx="24" fill="url(#ar-glow-3)"/>
+    <rect x="2" y="2" width="1596" height="896" rx="24" fill="url(#ar-grid)"/>
+
+    <!-- Header Bar -->
+    <g transform="translate(36, 28)">
+      <text x="0" y="26" class="af-sans" font-size="26" font-weight="800" fill="#f8fafc" letter-spacing="-0.5">AetherFlow v4.0.0 — System Architecture</text>
+      <text x="0" y="50" class="af-mono" font-size="13" fill="#94a3b8">12-crate Rust backend (backend-rs) · 4-crate Leptos WASM SPA (frontend-rs) · Zero-sudo privilege separation</text>
+
+      <!-- Legend Pills (Top Right) -->
+      <g transform="translate(998, 10)">
+        <rect x="0" y="0" width="174" height="30" rx="15" fill="#13182c" stroke="#6366f1" stroke-opacity="0.55" stroke-width="1"/>
+        <circle cx="16" cy="15" r="4.5" fill="#818cf8"/>
+        <text x="28" y="19" class="af-mono" font-size="11.5" font-weight="600" fill="#e0e7ff">User=aetherflow</text>
+
+        <rect x="184" y="0" width="144" height="30" rx="15" fill="#211819" stroke="#f59e0b" stroke-opacity="0.55" stroke-width="1"/>
+        <circle cx="200" cy="15" r="4.5" fill="#fbbf24"/>
+        <text x="212" y="19" class="af-mono" font-size="11.5" font-weight="600" fill="#fef3c7">User=root</text>
+
+        <rect x="338" y="0" width="190" height="30" rx="15" fill="#0d211d" stroke="#10b981" stroke-opacity="0.55" stroke-width="1"/>
+        <circle cx="354" cy="15" r="4.5" fill="#34d399"/>
+        <text x="366" y="19" class="af-mono" font-size="11.5" font-weight="600" fill="#d1fae5">WireGuard afpeer0</text>
+      </g>
+    </g>
+
+    <!-- Subtle Header Divider -->
+    <line x1="36" y1="92" x2="1564" y2="92" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1"/>
+
+    <!-- =================================================================== -->
+    <!-- COLUMN 1: CLIENT, INGRESS & LOCAL CLI (x=36..304)                   -->
+    <!-- =================================================================== -->
+
+    <!-- 1A. Operator Browser -->
+    <g transform="translate(36, 114)">
+      <rect x="0" y="0" width="268" height="172" rx="16" fill="url(#ar-panel)" stroke="#38bdf8" stroke-opacity="0.5" stroke-width="1.4"/>
+      <rect x="0" y="0" width="268" height="34" rx="16" fill="#0f2537" fill-opacity="0.72"/>
+      <rect x="0" y="18" width="268" height="16" fill="#0f2537" fill-opacity="0.72"/>
+      <circle cx="18" cy="17" r="4.5" fill="#38bdf8"/>
+      <text x="32" y="21.5" class="af-sans" font-size="14" font-weight="700" fill="#e0f2fe">Operator Browser</text>
+      <text x="252" y="21" text-anchor="end" class="af-mono" font-size="10.5" fill="#7dd3fc">WASM</text>
+
+      <text x="16" y="56" class="af-sans" font-size="13.5" font-weight="700" fill="#f8fafc">Leptos Rust WASM SPA</text>
+      <text x="16" y="75" class="af-mono" font-size="11.5" fill="#94a3b8">16 dashboard tabs (TabId::ALL)</text>
+      <text x="16" y="92" class="af-mono" font-size="11.5" fill="#94a3b8">Served from static web/dist</text>
+
+      <!-- 4 frontend-rs crates pills -->
+      <rect x="14" y="106" width="116" height="22" rx="6" fill="#132238" stroke="#38bdf8" stroke-opacity="0.35" stroke-width="1"/>
+      <text x="72" y="121" text-anchor="middle" class="af-mono" font-size="10.5" fill="#bae6fd">af-web-core</text>
+
+      <rect x="138" y="106" width="116" height="22" rx="6" fill="#132238" stroke="#38bdf8" stroke-opacity="0.35" stroke-width="1"/>
+      <text x="196" y="121" text-anchor="middle" class="af-mono" font-size="10.5" fill="#bae6fd">af-web-worker</text>
+
+      <rect x="14" y="136" width="116" height="22" rx="6" fill="#132238" stroke="#38bdf8" stroke-opacity="0.35" stroke-width="1"/>
+      <text x="72" y="151" text-anchor="middle" class="af-mono" font-size="10.5" fill="#bae6fd">af-web-ui</text>
+
+      <rect x="138" y="136" width="116" height="22" rx="6" fill="#132238" stroke="#38bdf8" stroke-opacity="0.35" stroke-width="1"/>
+      <text x="196" y="151" text-anchor="middle" class="af-mono" font-size="10.5" fill="#bae6fd">af-web-app</text>
+    </g>
+
+    <!-- Arrow: Browser -> Apache2 -->
+    <line x1="170" y1="286" x2="170" y2="334" stroke="#38bdf8" stroke-width="2" marker-end="url(#ar-arrow-cyan)"/>
+    <rect x="114" y="298" width="112" height="22" rx="6" fill="#0b1626" stroke="#38bdf8" stroke-opacity="0.45" stroke-width="1"/>
+    <text x="170" y="313" text-anchor="middle" class="af-mono" font-size="11" font-weight="600" fill="#7dd3fc">HTTPS / WSS</text>
+
+    <!-- 1B. Apache2 Ingress -->
+    <g transform="translate(36, 342)">
+      <rect x="0" y="0" width="268" height="156" rx="16" fill="url(#ar-panel)" stroke="#818cf8" stroke-opacity="0.5" stroke-width="1.4"/>
+      <rect x="0" y="0" width="268" height="34" rx="16" fill="#1b1c3c" fill-opacity="0.78"/>
+      <rect x="0" y="18" width="268" height="16" fill="#1b1c3c" fill-opacity="0.78"/>
+      <circle cx="18" cy="17" r="4.5" fill="#818cf8"/>
+      <text x="32" y="21.5" class="af-sans" font-size="14" font-weight="700" fill="#e0e7ff">Apache2 Ingress</text>
+      <text x="252" y="21" text-anchor="end" class="af-mono" font-size="10.5" fill="#a5b4fc">TLS</text>
+
+      <text x="16" y="56" class="af-sans" font-size="13" font-weight="700" fill="#f8fafc">Auto-Subdomain Vhosts</text>
+      <text x="16" y="76" class="af-mono" font-size="11.5" fill="#cbd5e1">&lt;app&gt;.&lt;baseDomain&gt; (HTTPS)</text>
+      <text x="16" y="95" class="af-mono" font-size="11.5" fill="#cbd5e1">&lt;app&gt;.aether.local (LAN)</text>
+      <text x="16" y="116" class="af-mono" font-size="11" fill="#94a3b8">Terminates TLS · proxies HTTP/WS</text>
+      <text x="16" y="136" class="af-mono" font-size="11" fill="#a5b4fc">→ loopback 127.0.0.1:8080</text>
+    </g>
+
+    <!-- 1C. Unified Admin CLI + Standalone Companion Binaries -->
+    <g transform="translate(36, 536)">
+      <rect x="0" y="0" width="268" height="190" rx="16" fill="url(#ar-panel)" stroke="#c084fc" stroke-opacity="0.45" stroke-width="1.4"/>
+      <rect x="0" y="0" width="268" height="34" rx="16" fill="#231738" fill-opacity="0.78"/>
+      <rect x="0" y="18" width="268" height="16" fill="#231738" fill-opacity="0.78"/>
+      <circle cx="18" cy="17" r="4.5" fill="#c084fc"/>
+      <text x="32" y="21.5" class="af-sans" font-size="14" font-weight="700" fill="#f3e8ff">Workspace Binaries</text>
+      <text x="252" y="21" text-anchor="end" class="af-mono" font-size="10.5" fill="#d8b4fe">bin/</text>
+
+      <!-- af-cli -->
+      <rect x="12" y="44" width="244" height="66" rx="10" fill="url(#ar-crate)" stroke="#c084fc" stroke-opacity="0.38" stroke-width="1"/>
+      <text x="20" y="63" class="af-mono" font-size="12.5" font-weight="700" fill="#e9d5ff">af-cli</text>
+      <text x="246" y="63" text-anchor="end" class="af-mono" font-size="10.5" fill="#a5b4fc">bin/af</text>
+      <text x="20" y="81" class="af-mono" font-size="9.6" fill="#94a3b8">package · service · quota · sandbox</text>
+      <text x="20" y="97" class="af-mono" font-size="9.6" fill="#94a3b8">release · backup · cluster · provision</text>
+
+      <!-- af-librespeed -->
+      <rect x="12" y="120" width="244" height="58" rx="10" fill="url(#ar-crate)" stroke="#38bdf8" stroke-opacity="0.34" stroke-width="1"/>
+      <text x="20" y="139" class="af-mono" font-size="12.5" font-weight="700" fill="#bae6fd">af-librespeed</text>
+      <text x="246" y="139" text-anchor="end" class="af-mono" font-size="10.2" fill="#7dd3fc">speedtest-backend</text>
+      <text x="20" y="158" class="af-mono" font-size="9.8" fill="#94a3b8">Native Rust speedtest · SQLite WAL</text>
+    </g>
+
+    <!-- Arrow: Apache2 -> aetherflow-api -->
+    <line x1="304" y1="420" x2="366" y2="420" stroke="#818cf8" stroke-width="2.2" marker-end="url(#ar-arrow-indigo)"/>
+    <text x="335" y="408" text-anchor="middle" class="af-mono" font-size="10.5" font-weight="600" fill="#a5b4fc">HTTP/WS</text>
+    <text x="335" y="438" text-anchor="middle" class="af-mono" font-size="10" fill="#94a3b8">:8080</text>
+
+    <!-- =================================================================== -->
+    <!-- COLUMN 2: UNPRIVILEGED CONTROL PLANE (x=374..928, y=114..726)       -->
+    <!-- =================================================================== -->
+    <g transform="translate(374, 114)">
+      <!-- Outer Container -->
+      <rect x="0" y="0" width="554" height="612" rx="18" fill="url(#ar-panel)" stroke="#6366f1" stroke-opacity="0.58" stroke-width="1.6"/>
+
+      <!-- Service Header Banner -->
+      <rect x="0" y="0" width="554" height="58" rx="18" fill="#171936" fill-opacity="0.92"/>
+      <rect x="0" y="34" width="554" height="24" fill="#171936" fill-opacity="0.92"/>
+      <line x1="0" y1="58" x2="554" y2="58" stroke="#6366f1" stroke-opacity="0.32" stroke-width="1"/>
+      <circle cx="22" cy="24" r="5" fill="#818cf8"/>
+      <text x="36" y="29" class="af-mono" font-size="16" font-weight="700" fill="#ffffff">aetherflow-api.service</text>
+      <text x="536" y="28" text-anchor="end" class="af-mono" font-size="11" font-weight="600" fill="#a5b4fc">Unprivileged Control Plane</text>
+      <text x="22" y="48" class="af-mono" font-size="9.6" fill="#94a3b8">User=aetherflow · ProtectSystem=strict · NoNewPrivileges=yes · DevicePolicy=closed</text>
+
+      <!-- Core Crate: af-api -->
+      <g transform="translate(18, 74)">
+        <rect x="0" y="0" width="518" height="104" rx="12" fill="#161b36" stroke="#818cf8" stroke-opacity="0.55" stroke-width="1.3"/>
+        <rect x="0" y="14" width="4" height="76" rx="2" fill="#6366f1"/>
+        <text x="16" y="26" class="af-mono" font-size="14" font-weight="700" fill="#eef2ff">af-api</text>
+        <text x="502" y="26" text-anchor="end" class="af-mono" font-size="11" fill="#a5b4fc">Axum + Tokio · 127.0.0.1:8080</text>
+        <text x="16" y="48" class="af-mono" font-size="10.6" fill="#cbd5e1">Auth (HS256 JWT · TOTP · OIDC PKCE · CSRF) · Subdomain Gateway</text>
+        <text x="16" y="68" class="af-mono" font-size="10.6" fill="#cbd5e1">WS Telemetry · McBrowser TUS/Editor · FlowAI · Plugins (21000..21999)</text>
+        <text x="16" y="88" class="af-mono" font-size="10.6" fill="#6ee7b7">Peer Proxy (/api/v1/peers/*) &amp; Tunnel Listener (afpeer0:9443)</text>
+      </g>
+
+      <!-- Crate Group Grid (8 linked crates in 2x4 clean layout) -->
+      <!-- Row 1: af-db | af-files -->
+      <g transform="translate(18, 194)">
+        <rect x="0" y="0" width="251" height="86" rx="11" fill="url(#ar-crate)" stroke="#38bdf8" stroke-opacity="0.38" stroke-width="1.1"/>
+        <text x="14" y="24" class="af-mono" font-size="13" font-weight="700" fill="#7dd3fc">af-db</text>
+        <text x="237" y="24" text-anchor="end" class="af-mono" font-size="10" fill="#94a3b8">SQLite WAL</text>
+        <text x="14" y="45" class="af-mono" font-size="10.2" fill="#cbd5e1">rusqlite 1W / 8R pools (no Redis)</text>
+        <text x="14" y="63" class="af-mono" font-size="10.2" fill="#94a3b8">AES-256-GCM (enc:v1:) · sessions</text>
+        <text x="14" y="79" class="af-mono" font-size="9.4" fill="#7c8aa5">/var/lib/aetherflow/aetherflow.sqlite</text>
+
+        <rect x="267" y="0" width="251" height="86" rx="11" fill="url(#ar-crate)" stroke="#22d3ee" stroke-opacity="0.38" stroke-width="1.1"/>
+        <text x="281" y="24" class="af-mono" font-size="13" font-weight="700" fill="#67e8f9">af-files</text>
+        <text x="504" y="24" text-anchor="end" class="af-mono" font-size="10" fill="#94a3b8">McBrowser FS</text>
+        <text x="281" y="45" class="af-mono" font-size="10.2" fill="#cbd5e1">Linux openat2 BrowserFs sandbox</text>
+        <text x="281" y="63" class="af-mono" font-size="10.2" fill="#94a3b8">0700 per-user roots · no symlinks</text>
+        <text x="281" y="79" class="af-mono" font-size="9.4" fill="#7c8aa5">RESOLVE_NO_XDEV traversal guards</text>
+      </g>
+
+      <!-- Row 2: af-hardware | af-services -->
+      <g transform="translate(18, 294)">
+        <rect x="0" y="0" width="251" height="86" rx="11" fill="url(#ar-crate)" stroke="#818cf8" stroke-opacity="0.38" stroke-width="1.1"/>
+        <text x="14" y="24" class="af-mono" font-size="13" font-weight="700" fill="#a5b4fc">af-hardware</text>
+        <text x="237" y="24" text-anchor="end" class="af-mono" font-size="10" fill="#94a3b8">Telemetry</text>
+        <text x="14" y="45" class="af-mono" font-size="10.2" fill="#cbd5e1">Zero-fork /proc &amp; sysinfo metrics</text>
+        <text x="14" y="63" class="af-mono" font-size="9.8" fill="#94a3b8">libnvidia-ml.so.1 dynamic NVML FFI</text>
+        <text x="14" y="79" class="af-mono" font-size="9.4" fill="#7c8aa5">DRM sysfs GPU + /proc/diskstats</text>
+
+        <rect x="267" y="0" width="251" height="86" rx="11" fill="url(#ar-crate)" stroke="#a855f7" stroke-opacity="0.38" stroke-width="1.1"/>
+        <text x="281" y="24" class="af-mono" font-size="13" font-weight="700" fill="#d8b4fe">af-services</text>
+        <text x="504" y="24" text-anchor="end" class="af-mono" font-size="10" fill="#94a3b8">Workers</text>
+        <text x="281" y="45" class="af-mono" font-size="10.2" fill="#cbd5e1">77-app catalog · config mutators</text>
+        <text x="281" y="63" class="af-mono" font-size="10.2" fill="#94a3b8">af-heal 10s watchdog · MediaFlow</text>
+        <text x="281" y="79" class="af-mono" font-size="9.4" fill="#7c8aa5">Backup &amp; upstream release watcher</text>
+      </g>
+
+      <!-- Row 3: af-models | af-transcode -->
+      <g transform="translate(18, 394)">
+        <rect x="0" y="0" width="251" height="86" rx="11" fill="url(#ar-crate)" stroke="#64748b" stroke-opacity="0.48" stroke-width="1.1"/>
+        <text x="14" y="24" class="af-mono" font-size="13" font-weight="700" fill="#e2e8f0">af-models</text>
+        <text x="237" y="24" text-anchor="end" class="af-mono" font-size="10" fill="#94a3b8">Contracts</text>
+        <text x="14" y="45" class="af-mono" font-size="10.2" fill="#cbd5e1">Shared serde DTOs &amp; wire types</text>
+        <text x="14" y="63" class="af-mono" font-size="10.2" fill="#94a3b8">Catalog · telemetry · runner IPC</text>
+        <text x="14" y="79" class="af-mono" font-size="9.4" fill="#7c8aa5">Used by backend &amp; WASM frontend</text>
+
+        <rect x="267" y="0" width="251" height="86" rx="11" fill="url(#ar-crate)" stroke="#d946ef" stroke-opacity="0.42" stroke-width="1.1"/>
+        <text x="281" y="24" class="af-mono" font-size="13" font-weight="700" fill="#f0abfc">af-transcode</text>
+        <text x="504" y="24" text-anchor="end" class="af-mono" font-size="10" fill="#e879f9">bin + lib</text>
+        <text x="281" y="45" class="af-mono" font-size="10.2" fill="#cbd5e1">Jellyfin 12.4 FFmpeg shim &amp; worker</text>
+        <text x="281" y="63" class="af-mono" font-size="10.2" fill="#94a3b8">wincode frames · GPU render probe</text>
+        <text x="281" y="79" class="af-mono" font-size="9.4" fill="#7c8aa5">/run/aetherflow-transcode/sock</text>
+      </g>
+
+      <!-- Row 4: af-release | af-host (Shared Engine Crates) -->
+      <g transform="translate(18, 494)">
+        <rect x="0" y="0" width="251" height="98" rx="11" fill="url(#ar-crate)" stroke="#10b981" stroke-opacity="0.4" stroke-width="1.1"/>
+        <text x="14" y="24" class="af-mono" font-size="13" font-weight="700" fill="#6ee7b7">af-release</text>
+        <text x="237" y="24" text-anchor="end" class="af-mono" font-size="10" fill="#94a3b8">Updater Lib</text>
+        <text x="14" y="45" class="af-mono" font-size="10.2" fill="#cbd5e1">Pull-based atomic release swap</text>
+        <text x="14" y="63" class="af-mono" font-size="9.8" fill="#94a3b8">SHA-256 + Sigstore/SLSA v1 checks</text>
+        <text x="14" y="81" class="af-mono" font-size="9.4" fill="#7c8aa5">Shared by af-services · runner · cli</text>
+
+        <rect x="267" y="0" width="251" height="98" rx="11" fill="url(#ar-crate)" stroke="#f59e0b" stroke-opacity="0.4" stroke-width="1.1"/>
+        <text x="281" y="24" class="af-mono" font-size="13" font-weight="700" fill="#fcd34d">af-host</text>
+        <text x="504" y="24" text-anchor="end" class="af-mono" font-size="10" fill="#94a3b8">Backup Lib</text>
+        <text x="281" y="45" class="af-mono" font-size="10.2" fill="#cbd5e1">VACUUM INTO snapshots &amp; chunks</text>
+        <text x="281" y="63" class="af-mono" font-size="10.2" fill="#94a3b8">Staged restore · sentinel · tune</text>
+        <text x="281" y="81" class="af-mono" font-size="9.4" fill="#7c8aa5">Shared by af-services · runner · cli</text>
+      </g>
+    </g>
+
+    <!-- =================================================================== -->
+    <!-- PRIVILEGE BOUNDARY & STRICT-ALLOWLIST IPC (x=936..1096)             -->
+    <!-- =================================================================== -->
+
+    <!-- Vertical Dashed Security Boundary -->
+    <line x1="1016" y1="112" x2="1016" y2="736" stroke="#f59e0b" stroke-opacity="0.5" stroke-width="2" stroke-dasharray="6 6"/>
+    <rect x="944" y="114" width="144" height="24" rx="12" fill="#231812" stroke="#f59e0b" stroke-opacity="0.6" stroke-width="1"/>
+    <text x="1016" y="130" text-anchor="middle" class="af-mono" font-size="10" font-weight="700" fill="#fcd34d" letter-spacing="0.4">PRIVILEGE BOUNDARY</text>
+
+    <!-- runner.sock IPC Card straddling the boundary -->
+    <g transform="translate(942, 240)">
+      <rect x="0" y="0" width="148" height="202" rx="14" fill="url(#ar-sock)" stroke="#fbbf24" stroke-opacity="0.65" stroke-width="1.5"/>
+      <text x="74" y="24" text-anchor="middle" class="af-mono" font-size="11" font-weight="700" fill="#fbbf24">STRICT IPC</text>
+      <line x1="14" y1="34" x2="134" y2="34" stroke="#fbbf24" stroke-opacity="0.28" stroke-width="1"/>
+      <text x="74" y="54" text-anchor="middle" class="af-mono" font-size="10.2" font-weight="700" fill="#f8fafc">/run/aetherflow/</text>
+      <text x="74" y="70" text-anchor="middle" class="af-mono" font-size="10.5" font-weight="700" fill="#fcd34d">runner.sock</text>
+
+      <text x="74" y="96" text-anchor="middle" class="af-mono" font-size="9.2" fill="#cbd5e1">0660 root:aetherflow</text>
+      <text x="74" y="114" text-anchor="middle" class="af-mono" font-size="9.6" fill="#cbd5e1">SO_PEERCRED +</text>
+      <text x="74" y="129" text-anchor="middle" class="af-mono" font-size="9.6" fill="#cbd5e1">/proc/&lt;pid&gt;/exe</text>
+      <text x="74" y="152" text-anchor="middle" class="af-mono" font-size="9.4" fill="#94a3b8">Allowlisted JSON</text>
+      <text x="74" y="167" text-anchor="middle" class="af-mono" font-size="9.4" fill="#94a3b8">verbs only</text>
+      <text x="74" y="187" text-anchor="middle" class="af-mono" font-size="9.2" fill="#e879f9">X-Request-ID traced</text>
+    </g>
+
+    <!-- Arrows into & out of runner.sock -->
+    <!-- API -> runner.sock -->
+    <line x1="928" y1="320" x2="938" y2="320" stroke="#fbbf24" stroke-width="2.2" marker-end="url(#ar-arrow-amber)"/>
+    <!-- runner.sock -> aetherflow-runner -->
+    <line x1="1090" y1="320" x2="1110" y2="320" stroke="#fbbf24" stroke-width="2.2" marker-end="url(#ar-arrow-amber)"/>
+
+    <!-- af-cli -> runner.sock routed neatly along bottom-left channel -->
+    <path d="M 304 612 L 336 612 L 336 746 L 1016 746 L 1016 446" fill="none" stroke="#c084fc" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#ar-arrow-violet)"/>
+    <rect x="378" y="734" width="236" height="22" rx="6" fill="#17122b" stroke="#c084fc" stroke-opacity="0.48" stroke-width="1"/>
+    <text x="496" y="749" text-anchor="middle" class="af-mono" font-size="10.2" fill="#e9d5ff">af CLI → /run/aetherflow/runner.sock</text>
+
+    <!-- =================================================================== -->
+    <!-- COLUMN 3: PRIVILEGED RUNNER & HOST TARGETS (x=1116..1564)           -->
+    <!-- =================================================================== -->
+
+    <!-- 3A. aetherflow-runner.service -->
+    <g transform="translate(1116, 114)">
+      <rect x="0" y="0" width="448" height="232" rx="18" fill="url(#ar-panel)" stroke="#f59e0b" stroke-opacity="0.6" stroke-width="1.6"/>
+      <rect x="0" y="0" width="448" height="54" rx="18" fill="#261c14" fill-opacity="0.92"/>
+      <rect x="0" y="32" width="448" height="22" fill="#261c14" fill-opacity="0.92"/>
+      <line x1="0" y1="54" x2="448" y2="54" stroke="#f59e0b" stroke-opacity="0.34" stroke-width="1"/>
+      <circle cx="20" cy="22" r="5" fill="#fbbf24"/>
+      <text x="34" y="27" class="af-mono" font-size="15.5" font-weight="700" fill="#ffffff">aetherflow-runner.service</text>
+      <text x="34" y="45" class="af-mono" font-size="11" fill="#fcd34d">User=root · af-runner · aetherflow-api runner</text>
+
+      <!-- Allowlisted Routes 2-column grid -->
+      <text x="16" y="76" class="af-sans" font-size="12" font-weight="700" fill="#cbd5e1">Allowlisted Privileged Verbs (build_runner_router):</text>
+
+      <rect x="14" y="88" width="204" height="26" rx="6" fill="#181c2e" stroke="#f59e0b" stroke-opacity="0.28" stroke-width="1"/>
+      <text x="24" y="105" class="af-mono" font-size="10.5" fill="#fde68a">/v1/systemctl · /v1/sandbox</text>
+
+      <rect x="230" y="88" width="204" height="26" rx="6" fill="#181c2e" stroke="#f59e0b" stroke-opacity="0.28" stroke-width="1"/>
+      <text x="240" y="105" class="af-mono" font-size="10.5" fill="#fde68a">/v1/package · /v1/blueprint</text>
+
+      <rect x="14" y="122" width="204" height="26" rx="6" fill="#181c2e" stroke="#f59e0b" stroke-opacity="0.28" stroke-width="1"/>
+      <text x="24" y="139" class="af-mono" font-size="10.5" fill="#fde68a">/v1/self-update · /v1/backup</text>
+
+      <rect x="230" y="122" width="204" height="26" rx="6" fill="#181c2e" stroke="#f59e0b" stroke-opacity="0.28" stroke-width="1"/>
+      <text x="240" y="139" class="af-mono" font-size="10.5" fill="#fde68a">/v1/ingress/vhost · certbot</text>
+
+      <rect x="14" y="156" width="204" height="26" rx="6" fill="#181c2e" stroke="#10b981" stroke-opacity="0.35" stroke-width="1"/>
+      <text x="24" y="173" class="af-mono" font-size="10.5" fill="#a7f3d0">/v1/network · /v1/peer-*</text>
+
+      <rect x="230" y="156" width="204" height="26" rx="6" fill="#181c2e" stroke="#c084fc" stroke-opacity="0.35" stroke-width="1"/>
+      <text x="240" y="173" class="af-mono" font-size="10.5" fill="#e9d5ff">/v1/quota · /v1/plugins/*</text>
+
+      <text x="16" y="206" class="af-mono" font-size="10.5" fill="#94a3b8">Also handles: /v1/hosts · /v1/app-meta · /v1/health</text>
+      <text x="16" y="222" class="af-mono" font-size="10" fill="#7c8aa5">PrivateTmp · LockPersonality · SystemCallFilter</text>
+    </g>
+
+    <!-- Arrows: runner -> Bare-Metal Targets -->
+    <line x1="1228" y1="346" x2="1228" y2="386" stroke="#fbbf24" stroke-width="2" marker-end="url(#ar-arrow-amber)"/>
+    <line x1="1452" y1="346" x2="1452" y2="386" stroke="#fbbf24" stroke-width="2" marker-end="url(#ar-arrow-amber)"/>
+
+    <!-- 3B. Bare-Metal Host Execution Targets (2x2 Grid, y=394..726) -->
+    <g transform="translate(1116, 394)">
+      <rect x="0" y="0" width="448" height="332" rx="18" fill="#0d101d" fill-opacity="0.92" stroke="#334155" stroke-opacity="0.7" stroke-width="1.3"/>
+      <text x="18" y="28" class="af-sans" font-size="13.5" font-weight="700" fill="#e2e8f0">Bare-Metal Host Targets</text>
+      <text x="430" y="28" text-anchor="end" class="af-mono" font-size="10.5" fill="#94a3b8">Debian 12/13 · Ubuntu 22/24</text>
+
+      <!-- Target 1: systemd -->
+      <rect x="14" y="42" width="204" height="130" rx="12" fill="url(#ar-crate)" stroke="#818cf8" stroke-opacity="0.4" stroke-width="1.1"/>
+      <text x="26" y="65" class="af-sans" font-size="13.5" font-weight="700" fill="#e0e7ff">systemd Units</text>
+      <text x="26" y="86" class="af-mono" font-size="10.5" fill="#cbd5e1">10-aetherflow-sandbox</text>
+      <text x="26" y="103" class="af-mono" font-size="10.5" fill="#94a3b8">DynamicUser=yes plugins</text>
+      <text x="26" y="120" class="af-mono" font-size="10.5" fill="#94a3b8">wg0 + afpeer0 tunnels</text>
+      <text x="26" y="137" class="af-mono" font-size="10.5" fill="#94a3b8">POSIX setquota &amp; NFS</text>
+      <text x="26" y="156" class="af-mono" font-size="10" fill="#818cf8">Zero-Docker native</text>
+
+      <!-- Target 2: 77 Native Apps -->
+      <rect x="230" y="42" width="204" height="130" rx="12" fill="url(#ar-crate)" stroke="#d946ef" stroke-opacity="0.4" stroke-width="1.1"/>
+      <text x="242" y="65" class="af-sans" font-size="13.5" font-weight="700" fill="#fae8ff">77 Native Apps</text>
+      <text x="242" y="86" class="af-mono" font-size="10.5" fill="#cbd5e1">config/packages.json</text>
+      <text x="242" y="103" class="af-mono" font-size="10.5" fill="#94a3b8">Jellyfin · Plex · *Arr</text>
+      <text x="242" y="120" class="af-mono" font-size="10.5" fill="#94a3b8">qBit · McVNC · Palate</text>
+      <text x="242" y="137" class="af-mono" font-size="10.5" fill="#94a3b8">Locked flock installers</text>
+      <text x="242" y="156" class="af-mono" font-size="10" fill="#e879f9">+ 9 opt-in Rust recipes</text>
+
+      <!-- Target 3: Self-Update Unit -->
+      <rect x="14" y="186" width="204" height="130" rx="12" fill="url(#ar-crate)" stroke="#10b981" stroke-opacity="0.4" stroke-width="1.1"/>
+      <text x="26" y="209" class="af-sans" font-size="13.5" font-weight="700" fill="#d1fae5">Self-Update Unit</text>
+      <text x="26" y="230" class="af-mono" font-size="10.5" fill="#cbd5e1">Transient systemd unit</text>
+      <text x="26" y="247" class="af-mono" font-size="10.5" fill="#94a3b8">af-release atomic swap</text>
+      <text x="26" y="264" class="af-mono" font-size="10.5" fill="#94a3b8">/opt/AetherFlow/current</text>
+      <text x="26" y="281" class="af-mono" font-size="10.5" fill="#94a3b8">Sigstore/SLSA v1 verify</text>
+      <text x="26" y="300" class="af-mono" font-size="10" fill="#34d399">Auto-rollback on fault</text>
+
+      <!-- Target 4: Certbot SAN Sync -->
+      <rect x="230" y="186" width="204" height="130" rx="12" fill="url(#ar-crate)" stroke="#38bdf8" stroke-opacity="0.4" stroke-width="1.1"/>
+      <text x="242" y="209" class="af-sans" font-size="13.5" font-weight="700" fill="#e0f2fe">Certbot SAN Sync</text>
+      <text x="242" y="230" class="af-mono" font-size="10.5" fill="#cbd5e1">af-certbot-sync + TLS</text>
+      <text x="242" y="247" class="af-mono" font-size="10.5" fill="#94a3b8">Apache2 vhost generator</text>
+      <text x="242" y="264" class="af-mono" font-size="10.5" fill="#94a3b8">.aether.local LAN DNS</text>
+      <text x="242" y="281" class="af-mono" font-size="10.5" fill="#94a3b8">hosts/dnsmasq/Pi-hole</text>
+      <text x="242" y="300" class="af-mono" font-size="10" fill="#38bdf8">Auto-renew SAN certs</text>
+    </g>
+
+    <!-- =================================================================== -->
+    <!-- BOTTOM BAND: PEER WIREGUARD MESH (y=772..872)                       -->
+    <!-- =================================================================== -->
+
+    <!-- Mesh Connectors from af-api and Bare-Metal Host -->
+    <line x1="766" y1="726" x2="766" y2="766" stroke="#34d399" stroke-width="2" marker-start="url(#ar-arrow-emerald)" marker-end="url(#ar-arrow-emerald)"/>
+    <line x1="1340" y1="726" x2="1340" y2="766" stroke="#34d399" stroke-width="2" marker-start="url(#ar-arrow-emerald)" marker-end="url(#ar-arrow-emerald)"/>
+
+    <g transform="translate(36, 772)">
+      <rect x="0" y="0" width="1528" height="98" rx="16" fill="#0a1817" fill-opacity="0.94" stroke="#10b981" stroke-opacity="0.58" stroke-width="1.5"/>
+      <rect x="0" y="14" width="4.5" height="70" rx="2.25" fill="#10b981"/>
+
+      <!-- Left Title -->
+      <circle cx="28" cy="32" r="5.5" fill="#34d399">
+        <animate attributeName="opacity" values="0.6;1;0.6" dur="3s" repeatCount="indefinite"/>
+      </circle>
+      <text x="44" y="37" class="af-sans" font-size="16" font-weight="800" fill="#ecfdf5">Peer WireGuard Mesh (afpeer0)</text>
+      <text x="44" y="59" class="af-mono" font-size="11.5" fill="#6ee7b7">UDP 51821 · 10.231.0.0/16 · SO_BINDTODEVICE</text>
+      <text x="44" y="79" class="af-mono" font-size="11" fill="#94a3b8">Separate from wg0 · 6-digit code pairing · af cluster diagnose</text>
+
+      <!-- Animated Mesh Link Line -->
+      <line x1="472" y1="49" x2="548" y2="49" stroke="#34d399" stroke-width="2.4" stroke-dasharray="6 5" marker-start="url(#ar-arrow-emerald)" marker-end="url(#ar-arrow-emerald)">
+        <animate attributeName="stroke-dashoffset" from="0" to="-22" dur="2.2s" repeatCount="indefinite"/>
+      </line>
+
+      <!-- 3 Capabilities inside Mesh Band -->
+      <rect x="562" y="16" width="298" height="66" rx="10" fill="#0f2321" stroke="#34d399" stroke-opacity="0.35" stroke-width="1"/>
+      <text x="576" y="38" class="af-sans" font-size="13" font-weight="700" fill="#d1fae5">Delegated Grants &amp; Proxy</text>
+      <text x="576" y="57" class="af-mono" font-size="10.5" fill="#94a3b8">TCP 9443 · 8 areas (None default)</text>
+      <text x="576" y="72" class="af-mono" font-size="10" fill="#6ee7b7">Scoped HTTP/WS · &lt;1s revocation</text>
+
+      <rect x="876" y="16" width="298" height="66" rx="10" fill="#0f2321" stroke="#22d3ee" stroke-opacity="0.35" stroke-width="1"/>
+      <text x="890" y="38" class="af-sans" font-size="13" font-weight="700" fill="#cffafe">NFSv4.2 Storage Federation</text>
+      <text x="890" y="57" class="af-mono" font-size="10.5" fill="#94a3b8">TCP 2049 · /v1/peer-storage</text>
+      <text x="890" y="72" class="af-mono" font-size="10" fill="#67e8f9">/mnt/af-peers/* · sentinel gated</text>
+
+      <rect x="1190" y="16" width="322" height="66" rx="10" fill="#17162b" stroke="#d946ef" stroke-opacity="0.38" stroke-width="1"/>
+      <text x="1204" y="38" class="af-sans" font-size="13" font-weight="700" fill="#fae8ff">Other AetherFlow Peer Servers</text>
+      <text x="1204" y="57" class="af-mono" font-size="10.5" fill="#94a3b8">Jellyfin 12.4 GPU transcode offload</text>
+      <text x="1204" y="72" class="af-mono" font-size="10" fill="#f0abfc">af-transcode → af-transcode-worker</text>
+    </g>
+  </g>
+
+  <!-- Outer Card Frame -->
+  <rect x="2" y="2" width="1596" height="896" rx="24" fill="none" stroke="url(#ar-border)" stroke-width="2"/>
+  <line x1="120" y1="2.5" x2="1480" y2="2.5" stroke="url(#ar-specular)" stroke-width="1.8"/>
+</svg>

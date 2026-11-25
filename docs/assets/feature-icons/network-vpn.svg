@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Network and VPN Control">
+  <defs>
+    <linearGradient id="ic-vpn-stroke" x1="7" y1="7" x2="41" y2="41" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="55%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="ic-vpn-fill" x1="7" y1="7" x2="41" y2="41" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0.16"/>
+    </linearGradient>
+  </defs>
+  <!-- Network globe -->
+  <circle cx="24" cy="24" r="16" fill="url(#ic-vpn-fill)" stroke="url(#ic-vpn-stroke)" stroke-width="2"/>
+  <ellipse cx="24" cy="24" rx="7.5" ry="16" stroke="url(#ic-vpn-stroke)" stroke-width="1.6"/>
+  <path d="M9.5 18.5 H38.5 M9.5 29.5 H38.5" stroke="url(#ic-vpn-stroke)" stroke-width="1.6"/>
+  <!-- Encrypted tunnel signal nodes -->
+  <circle cx="24" cy="18.5" r="2.6" fill="#22d3ee"/>
+  <circle cx="31.5" cy="29.5" r="2.6" fill="#34d399"/>
+  <circle cx="16.5" cy="29.5" r="2.6" fill="#a5b4fc"/>
+</svg>

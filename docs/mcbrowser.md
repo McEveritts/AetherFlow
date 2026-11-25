@@ -2,6 +2,20 @@
 
 McBrowser is a core AetherFlow dashboard tab backed by the Rust API (`backend-rs/crates/af-api/src/mcbrowser/`) and the capability-scoped filesystem crate (`backend-rs/crates/af-files/`), rendered in the Leptos Rust WebAssembly frontend (`frontend-rs`). It requires no iframe, separate daemon, container, extra login, or Marketplace package.
 
+## Quick Walkthrough
+
+1. **Upload files**: Open **McBrowser** (`/?tab=mcbrowser`) and click the **Upload** button or drop files onto the upload drop zone (files `<= 64 MiB` upload directly; larger files enter the resumable TUS queue up to 64 GiB).
+
+   ![Step 1 — Upload files via the McBrowser Upload button or drag-and-drop zone](assets/guides/mcbrowser/01-upload.png)
+
+2. **Create a public share link**: Select a file or folder and open the **Create share** dialog to configure an optional unlock password and expiration time.
+
+   ![Step 2 — Open the Create public share dialog to set an optional password and expiry for a share link](assets/guides/mcbrowser/02-share.png)
+
+3. **Edit text files in place**: Open a UTF-8 file (up to 10 MiB) in the native Rust/Leptos code editor and click **Save** (or press `Ctrl/Cmd+S`) with ETag conflict protection.
+
+   ![Step 3 — Edit a UTF-8 file in the McBrowser code editor and click Save](assets/guides/mcbrowser/03-edit.png)
+
 ## Implemented Workflows
 
 - **Browsing, Search & Preferences**: Private per-user browsing, breadcrumbs, search scanning up to 50,000 entries and returning up to 10,000 results while skipping `.git`, `node_modules`, and similar heavy directories — note two distinct search modes:

@@ -8,12 +8,14 @@ This guide covers diagnosing and resolving common operational issues in **Aether
 
 ### 1. Systemd Service Journals
 
-AetherFlow runs two core `systemd` units (`aetherflow-api.service` and `aetherflow-runner.service`), plus dynamic transient units named `aetherflow-self-update-<command>-<channel>-<8hex>.service` during self-updates:
+AetherFlow runs two core `systemd` units (`aetherflow-api.service` and `aetherflow-runner.service`), plus dynamic transient units named `aetherflow-self-update-<command>-<channel>-<8hex>.service` during self-updates and `af-transcode-worker.service` on hosts enabled as distributed Jellyfin transcode workers:
 
 ```bash
 sudo systemctl status aetherflow-runner aetherflow-api
 sudo journalctl -u aetherflow-api -u aetherflow-runner -n 100 --no-pager
 sudo journalctl -u 'aetherflow-self-update-*' -n 100 --no-pager
+# Optional (Peer Clustering transcode workers only):
+sudo systemctl status af-transcode-worker.service
 ```
 
 > [!TIP]
@@ -134,7 +136,25 @@ Set `AES_MASTER_KEY=<64-hex-value>` (or a 32-byte `openssl rand -base64 32` valu
 
 **Resolution**:
 
-AetherFlow serializes concurrent Marketplace operations behind `/install/.af-package-executor.flock` across both executors; however, `-o DPkg::Lock::Timeout=120` waiting on external OS `apt`/`dpkg` locks is passed **only** by the 9 opt-in declarative Rust recipes (`AETHERFLOW_ENABLE_RUST_PACKAGES=1`). Default Bash installers receive an unconsumed `DPKG_LOCK_TIMEOUT=120` environment variable and fail immediately on external `dpkg` lock contention. If an orphaned `apt` process is stuck, inspect it with `ps aux | grep apt` and run `sudo dpkg --configure -a` once it finishes.
+AetherFlow serializes concurrent Marketplace operations behind `/install/.af-package-executor.flock` across both executors, and both the 9 opt-in declarative Rust recipes (`AETHERFLOW_ENABLE_RUST_PACKAGES=1`) and the default Bash `apt-get()` / `rollback_apt_packages()` wrappers (`packages/lib/versions_apt.sh`) inject `-o DPkg::Lock::Timeout=<N>` (default `120` seconds) to wait for transient external `apt`/`dpkg` locks. If an external unattended upgrade exceeds the timeout or an orphaned `apt` process is stuck, inspect it with `ps aux | grep apt` and run `sudo dpkg --configure -a` once it finishes.
+
+### 7. Peer Clustering, `afpeer0` WireGuard & Distributed Transcoding Issues
+
+**Symptom**: Pairing fails with `INVALID_REQUEST` / `ENDPOINT_UNREACHABLE` / `KEY_MISMATCH`, peer NFS mounts stall, or Jellyfin transcode jobs fall back locally instead of running on a paired worker.
+
+**Resolution**:
+
+1. Inspect the full redacted link, WireGuard handshake, grant, mount, transcode worker, and audit snapshot with the read-only CLI diagnostic command:
+   ```bash
+   sudo af cluster diagnose <link>
+   sudo wg show afpeer0
+   sudo systemctl status af-transcode-worker.service
+   ```
+2. **Private LAN/VLAN Pairing (`INVALID_REQUEST`)**: Pairing blocks RFC 1918, CGNAT (`100.64.0.0/10`), and IPv6 ULA (`fc00::/7`) HTTPS origins by default. Set `AF_PEER_ALLOW_PRIVATE_PAIRING_URLS=true` in `/etc/aetherflow/aetherflow.env` on the initiating server and restart `aetherflow-api.service`.
+3. **Request Correlation**: Every peer error banner in **Cluster** includes `request_id` (`X-Request-ID`); grep that ID across both `sudo journalctl -u aetherflow-api` and `sudo journalctl -u aetherflow-runner`.
+4. **Upgraded Jellyfin Controller Sandbox**: If Jellyfin was installed before v4.0.0 Peer Clustering, refresh its sandbox drop-in once (`sudo af sandbox apply jellyfin && sudo systemctl restart jellyfin.service`) so `-/run/aetherflow-transcode` is mounted.
+
+For the full error-code reference and recovery runbooks (including `afpeer0` identity reset, orphaned peer cleanup, and post-backup-restore reconciliation), see [Peer Clustering — Troubleshooting](./peer-clustering.md#troubleshooting).
 
 ---
 

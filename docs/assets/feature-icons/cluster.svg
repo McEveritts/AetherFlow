@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Peer Clustering">
+  <defs>
+    <linearGradient id="ic-clu-stroke" x1="8" y1="8" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="52%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="ic-clu-fill" x1="8" y1="8" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.20"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0.20"/>
+    </linearGradient>
+  </defs>
+  <!-- Encrypted WireGuard peer mesh edges -->
+  <path d="M21 16 L14.5 29 M27 16 L33.5 29 M17.5 34.5 L30.5 34.5" stroke="url(#ic-clu-stroke)" stroke-width="2" stroke-linecap="round" stroke-dasharray="3 2.5"/>
+  <!-- Top peer node -->
+  <circle cx="24" cy="12" r="5.5" fill="url(#ic-clu-fill)" stroke="#34d399" stroke-width="2"/>
+  <circle cx="24" cy="12" r="2" fill="#d1fae5"/>
+  <!-- Bottom-left peer node -->
+  <circle cx="12" cy="34.5" r="5.5" fill="url(#ic-clu-fill)" stroke="#22d3ee" stroke-width="2"/>
+  <circle cx="12" cy="34.5" r="2" fill="#cffafe"/>
+  <!-- Bottom-right peer node -->
+  <circle cx="36" cy="34.5" r="5.5" fill="url(#ic-clu-fill)" stroke="#818cf8" stroke-width="2"/>
+  <circle cx="36" cy="34.5" r="2" fill="#e0e7ff"/>
+  <!-- Center sync pulse -->
+  <circle cx="24" cy="26.5" r="2.2" fill="#34d399"/>
+</svg>

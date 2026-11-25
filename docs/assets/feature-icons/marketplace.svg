@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="AetherMarketplace">
+  <defs>
+    <linearGradient id="ic-mkt-stroke" x1="7" y1="7" x2="41" y2="41" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#818cf8"/>
+      <stop offset="55%" stop-color="#c084fc"/>
+      <stop offset="100%" stop-color="#e879f9"/>
+    </linearGradient>
+    <linearGradient id="ic-mkt-fill" x1="7" y1="7" x2="41" y2="41" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+  <!-- 3 catalog app tiles -->
+  <rect x="7" y="7" width="14" height="14" rx="3.5" fill="url(#ic-mkt-fill)" stroke="url(#ic-mkt-stroke)" stroke-width="2"/>
+  <rect x="7" y="27" width="14" height="14" rx="3.5" fill="url(#ic-mkt-fill)" stroke="url(#ic-mkt-stroke)" stroke-width="2"/>
+  <rect x="27" y="27" width="14" height="14" rx="3.5" fill="url(#ic-mkt-fill)" stroke="url(#ic-mkt-stroke)" stroke-width="2"/>
+  <!-- Featured deployable app tile (top-right) -->
+  <rect x="27" y="7" width="14" height="14" rx="3.5" fill="#22d3ee" fill-opacity="0.16" stroke="#38bdf8" stroke-width="2"/>
+  <path d="M34 11 V17 M31 14 H37" stroke="#e0f2fe" stroke-width="2" stroke-linecap="round"/>
+  <!-- Interior detail accents -->
+  <circle cx="14" cy="14" r="2" fill="#a5b4fc"/>
+  <path d="M11.5 34 H16.5 M31.5 34 H36.5" stroke="#f0abfc" stroke-width="1.8" stroke-linecap="round"/>
+</svg>

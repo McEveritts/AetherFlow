@@ -1,159 +1,248 @@
 <div align="center">
 
-![AetherFlow Banner](./docs/assets/banner.svg?v=4.0.0)
+<img src="./docs/assets/banner.svg?v=4.0.0" alt="AetherFlow — Sovereign bare-metal control plane" width="100%">
 
-[![Latest Release](https://img.shields.io/github/v/release/McEveritts/AetherFlow?include_prereleases&style=flat-square&logo=github&label=Release&color=6366f1)](https://github.com/McEveritts/AetherFlow/releases)
-[![Rust](https://img.shields.io/badge/Control_Plane-Rust_%28Axum_%2B_Tokio%29-DEA584?style=flat-square&logo=rust&logoColor=white)](./backend-rs)
-[![Admin CLI](https://img.shields.io/badge/Admin_CLI-af_%2811_Crates%29-4f46e5?style=flat-square)](./docs/rust-admin-cli.md)
-[![Frontend](https://img.shields.io/badge/Interface-Rust_WASM_%2B_Leptos_%284_Crates%29-654ff0?style=flat-square&logo=webassembly&logoColor=white)](./frontend-rs)
-[![OS Support](https://img.shields.io/badge/Target_OS-Debian_12%2F13_%7C_Ubuntu_22.04%2F24.04-A81D33?style=flat-square&logo=debian&logoColor=white)](./setup)
-[![Catalog](https://img.shields.io/badge/Bare--Metal_Catalog-77_Apps-9333ea?style=flat-square)](./packages)
+<br>
+
+[![Latest Release](https://img.shields.io/github/v/release/McEveritts/AetherFlow?style=flat-square&logo=github&label=Stable&color=6366f1)](https://github.com/McEveritts/AetherFlow/releases/latest)
+[![Nightly](https://img.shields.io/github/v/release/McEveritts/AetherFlow?include_prereleases&style=flat-square&logo=github&label=Nightly&color=8b5cf6)](https://github.com/McEveritts/AetherFlow/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/McEveritts/AetherFlow/ci.yml?branch=master&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/McEveritts/AetherFlow/actions/workflows/ci.yml)
+[![Security Gate](https://img.shields.io/github/actions/workflow/status/McEveritts/AetherFlow/security.yml?branch=master&style=flat-square&logo=githubactions&logoColor=white&label=Security)](https://github.com/McEveritts/AetherFlow/actions/workflows/security.yml)
+<br>
+[![Rust](https://img.shields.io/badge/Control_Plane-Rust_·_Axum_+_Tokio-DEA584?style=flat-square&logo=rust&logoColor=white)](./backend-rs)
+[![WebAssembly](https://img.shields.io/badge/Dashboard-Leptos_·_WebAssembly-654ff0?style=flat-square&logo=webassembly&logoColor=white)](./frontend-rs)
+[![Catalog](https://img.shields.io/badge/Marketplace-77_native_apps-9333ea?style=flat-square)](./docs/marketplace.md)
+[![OS](https://img.shields.io/badge/Debian_12%2F13_·_Ubuntu_22.04%2F24.04-A81D33?style=flat-square&logo=debian&logoColor=white)](./setup)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-10b981?style=flat-square)](./LICENSE.md)
 
-**[Quickstart](#quick-installation)** • **[Architecture](#system-architecture)** • **[77-App Catalog](#77-package-bare-metal-catalog)** • **[McBrowser, Streaming & VPN](#native-mcbrowser-streaming-intelligence--vpn-control)** • **[FlowAI](#human-gated-flowai)** • **[Documentation](#documentation)** • **[Releases](https://github.com/McEveritts/AetherFlow/releases)**
+**[Install](#-quick-install)** · **[What's new](#-whats-new-in-v400)** · **[Features](#-features)** · **[Peer Clustering](#-peer-clustering)** · **[Architecture](#-architecture)** · **[Catalog](#-77-app-native-catalog)** · **[Docs](./docs/README.md)** · **[Changelog](./CHANGELOG.md)**
 
 </div>
 
-# AetherFlow
+---
+
+**AetherFlow** turns a bare-metal Linux server into a self-hosted media and infrastructure appliance, with no containers. A memory-safe **Rust control plane** and a **Leptos WebAssembly dashboard** install, update, and supervise **77 native applications** directly through `systemd`. The same dashboard handles real-time hardware telemetry, a scoped file manager, streaming analytics, WireGuard and Tailscale networking, human-approved AI operations, and, new in v4.0.0, **peer clustering** across independent servers.
+
+<div align="center">
+  <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/overview.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/overview.png?v=4.0.0" alt="AetherFlow Overview dashboard showing live CPU, GPU, memory, network, and storage telemetry" width="100%"></picture>
+  <sub><i>Overview: live hardware telemetry, service health, and storage in one open-canvas view. Screenshots follow your GitHub theme (dark or light); 1440p, fixture data.</i></sub>
+</div>
 
 ---
 
-## Overview
+## ✨ What's new in v4.0.0
 
-**AetherFlow** is a self-hosted, bare-metal Linux infrastructure and media-server control plane. Its **Rust** backend and **Rust WebAssembly** dashboard orchestrate **77 native Linux packages**, real-time hardware telemetry, scoped tenant file management (**McBrowser**), canonical streaming analytics, automated subdomain ingress, and human-gated AI operations directly against `systemd`.
+v4.0.0 is the largest release in AetherFlow's history. It promotes **373 commits** from `nightly` to the stable `master` track ([`v3.2.7...v4.0.0`](https://github.com/McEveritts/AetherFlow/compare/v3.2.7...v4.0.0)).
 
-![AetherFlow Overview Dashboard](./docs/assets/dashboard.png?v=4.0.0)
+<img src="./docs/assets/v4-by-the-numbers.svg?v=4.0.0" alt="AetherFlow v4.0.0 by the numbers" width="100%">
 
-### Why AetherFlow v4.0.0?
+| | Since v3.2.7 |
+| :--- | :--- |
+| 🦀 **All-Rust control plane** | The Go backend is gone. A **12-crate** Rust workspace (`backend-rs`) built on Axum and Tokio ships `aetherflow-api`, the privileged runner, the `af` admin CLI, the native LibreSpeed backend, and the new `af-transcode` worker. **Zero Go, zero Redis, zero Node.js** in the control plane. |
+| 🕸️ **WebAssembly dashboard** | The Next.js UI has been replaced by a **4-crate Leptos/WASM** application (`frontend-rs`) with dedicated Web Workers, 16 dashboard tabs, and the obsidian "open canvas" design language, served as external `web/dist` assets. |
+| ⬡ **Peer Clustering** | Pair independent AetherFlow servers over a dedicated WireGuard mesh, grant scoped remote access, manage a peer from your own dashboard, share media folders over NFSv4.2, and offload Jellyfin transcoding to a paired worker. |
+| 📂 **Native McBrowser** | Capability-scoped (`openat2`) per-user file manager with resumable 64 GiB uploads, conflict-aware editing, archives, previews, and public shares. |
+| 🔐 **Supply-chain & sandboxing** | Sigstore/SLSA v1 provenance verification for every release artifact, a zero-sudo privileged runner socket, hardened `systemd` sandboxes, OIDC provider with PKCE and device flow, and DNS-pinned SSRF guards. |
+| ♻️ **Atomic self-update** | Isolated transient `systemd` update units with WAL-safe snapshots, readiness checks, durable receipts, and automatic rollback on `stable` and `nightly` channels. |
 
-- **Rust Control Plane and WASM Interface** — The **Leptos** dashboard and worker modules are built in `frontend-rs` and shipped as external `web/dist` assets beside **`aetherflow-api`**, the **`af`** administrative CLI (`bin/af`), and the Rust LibreSpeed **`speedtest-backend`** (`bin/speedtest-backend`). `aetherflow-api` serves the UI from `<exe-dir>/web/dist` by default, or from `STATIC_DIR` when explicitly set (failing closed if empty or invalid). The control plane and dashboard require no Node.js, Go, or Redis daemons (host release/maintenance tooling requires `python3` and `openssl`, and specific Marketplace apps install their own runtimes).
-- **Native McBrowser (`af-files` + `af-api::mcbrowser`)** — Built-in left-sidebar file manager combining low-level capability-scoped Linux `openat2` confinement (`af-files`) with HTTP routes in `af-api::mcbrowser` for per-user storage (`/var/lib/aetherflow/mcbrowser`, governed by SQLite storage quotas integrated with AetherFlow's `setdisk` wrapper invoking Linux `setquota` via **Storage Quotas**), resumable chunked uploads up to 64 GiB, ETag-guarded UTF-8 editing, 9-format archive tools, public shares, and search. See [Native McBrowser](./docs/mcbrowser.md).
-- **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner.service`)** — `aetherflow-api` runs as the unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations (locked Bash installers by default, plus 9 opt-in declarative Rust recipes enabled via `AETHERFLOW_ENABLE_RUST_PACKAGES=1`), `systemctl` transitions, WireGuard/Tailscale management, Linux POSIX user disk quota updates, managed plugin transient units, and isolated `aetherflow-self-update-<command>-<channel>-<8hex>.service` deployments run in `aetherflow-runner.service` (`aetherflow-api runner`) over `/run/aetherflow/runner.sock` with strict allowlists.
-- **Subdomain Ingress & LAN Split-Horizon DNS** — Configure a server `baseDomain` once to route enabled HTTP-capable Marketplace applications at `<app>.<baseDomain>` (for example `jellyfin.example.com` or `sonarr.example.com`) through **Apache2** and the streaming **AetherFlow Subdomain Gateway** (per-app external HTTPS exposure is opt-in via **Network → External Access** / `external_access_enabled`), with automated Let's Encrypt SAN updates via `af-certbot-sync` (`/usr/local/bin/af-certbot-sync`, triggered automatically on ingress syncs or on demand via `runner.sock` IPC `/v1/certbot-sync`) and `.aether.local` LAN split-horizon DNS sync (`/etc/hosts`, `dnsmasq`, Pi-hole, or AdGuard Home via `af hosts` / `runner.sock` IPC `/v1/hosts`; see [Unified Rust Admin CLI](./docs/rust-admin-cli.md)).
-- **Real-Time Telemetry & NVML FFI** — Immediate initial WebSocket state snapshots on connect, zero-fork `/proc` and `sysinfo` sampling, and dynamic `libnvidia-ml.so.1` FFI + DRM `sysfs` GPU discovery.
-- **Canonical Streaming Intelligence** — Built-in **Jellyfin** (live telemetry, session control, item-summary sync, and canonical playback history), **Plex** (live `/status/sessions` telemetry, `/identity` verification, `/library/sections` enrichment, canonical playback history, and native Plex/Tautulli JSON & CSV import), and **Emby** (staged live telemetry, artwork, and canonical history; backend session commands exist while UI controls remain Jellyfin-only and item-summary sync returns HTTP 501) streaming explorer with snapshot-consistent pagination, CSV/JSON portability (`8 MiB` archive / `10 MiB` restore envelope), and reconciliation gates. See [Streaming History Contract](./docs/streaming-history-contract.md).
-- **WireGuard & Tailscale VPN Control** — Native **WireGuard** (`wg0` peer and QR management) and **Tailscale** mesh VPN management directly from the **Network** tab. See [Network: WireGuard & Tailscale](./docs/network-vpn.md).
-- **Native Marketplace Services** — AetherFlow manages app-specific and shared Linux services through `systemd`. See [AetherMarketplace](./docs/marketplace.md) for per-app prerequisites, launch methods, and data retention policies.
+Full notes: **[v4.0.0 release notes](./docs/releases/v4.0.0.md)** · **[CHANGELOG](./CHANGELOG.md)** · **[Upgrading from v3.2.x](./docs/upgrading.md)**
+
+> [!IMPORTANT]
+> **Upgrading a v3.2.x node?** Database Migration 26 removes the legacy master/worker cluster (`CLUSTER_*` settings and `/api/v1/admin/cluster/*` routes). Take a WAL-safe backup first with `sudo af backup create`, then re-pair servers from the **Cluster** tab after the upgrade. See [Upgrading & Rollbacks](./docs/upgrading.md).
 
 ---
 
-## Platform Showcase
+## 🧭 Features
 
-| **AetherMarketplace (77 Native Apps)** | **FlowAI Infrastructure Assistant** |
+<table>
+<tr>
+<td width="50%" valign="top">
+
+<img src="./docs/assets/feature-icons/rust-core.svg" width="28" align="left">&nbsp;**Rust control plane**<br>
+`aetherflow-api` runs unprivileged as the `aetherflow` user under `ProtectSystem=strict`. Bundled SQLite in WAL mode, AES-256-GCM secret encryption (`enc:v1:`), JWT + TOTP + OIDC auth, and zero-fork `/proc` and NVML GPU telemetry.
+
+</td>
+<td width="50%" valign="top">
+
+<img src="./docs/assets/feature-icons/marketplace.svg" width="28" align="left">&nbsp;**77-app native Marketplace**<br>
+One-click bare-metal installs, in-place updates with certified version receipts, live install progress, automatic `<app>.<baseDomain>` ingress, and `*Arr` API-key discovery, all serialized behind a single package lock.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+<img src="./docs/assets/feature-icons/cluster.svg" width="28" align="left">&nbsp;**Peer Clustering**<br>
+Six-digit verified pairing over the `afpeer0` WireGuard tunnel, zero access by default with eight scoped grant areas, remote management, NFSv4.2 storage federation, and distributed Jellyfin transcoding.
+
+</td>
+<td valign="top">
+
+<img src="./docs/assets/feature-icons/mcbrowser.svg" width="28" align="left">&nbsp;**McBrowser & File Share**<br>
+Per-user `0700` roots confined with `openat2`, storage quotas, resumable TUS uploads up to 64 GiB, a 45-mode code editor with Markdown/MathML preview, 9 archive formats, and password-protected shares.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+<img src="./docs/assets/feature-icons/streaming.svg" width="28" align="left">&nbsp;**Streaming intelligence**<br>
+Live Jellyfin, Plex, and Emby sessions, canonical playback history with server-identity verification, Plex/Tautulli import, distribution charts, and CSV/JSON portability.
+
+</td>
+<td valign="top">
+
+<img src="./docs/assets/feature-icons/flowai.svg" width="28" align="left">&nbsp;**Human-gated FlowAI**<br>
+Diagnostics with Gemini, Claude, OpenAI, Ollama, or LM Studio, grounded in live telemetry. Every proposed service action waits in the **Approval Inbox** until an administrator approves it.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+<img src="./docs/assets/feature-icons/network-vpn.svg" width="28" align="left">&nbsp;**Networking & ingress**<br>
+WireGuard peers with one-time QR handoff, Tailscale routes and exit nodes, Apache2 auto-subdomain ingress, Let's Encrypt SAN sync (`af-certbot-sync`), and `.aether.local` split-horizon DNS.
+
+</td>
+<td valign="top">
+
+<img src="./docs/assets/feature-icons/security.svg" width="28" align="left">&nbsp;**Defense in depth**<br>
+Root operations go only through the allowlisted `/run/aetherflow/runner.sock` IPC. Route-scoped CSP, CSRF, DNS-rebinding-pinned outbound requests, an admin audit log, and Sigstore-verified releases.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+<img src="./docs/assets/feature-icons/cli.svg" width="28" align="left">&nbsp;**`af` admin CLI**<br>
+Packages, services, quotas, sandbox drop-ins, releases, verified backups and staged restores, host maintenance, DNS sync, `af cluster diagnose`, and the resumable `af provision` foundation.
+
+</td>
+<td valign="top">
+
+<img src="./docs/assets/feature-icons/plugins.svg" width="28" align="left">&nbsp;**Plugins SDK**<br>
+Manifest-discovered plugins run in isolated `DynamicUser=yes` transient units with scoped JWTs and proxied ports (`21000–21999`). Start from the [Rust plugin template](./plugins/sdk-template-rust/README.md).
+
+</td>
+</tr>
+</table>
+
+### Platform tour
+
+| **Marketplace** | **Cluster** |
 | :---: | :---: |
-| ![AetherMarketplace](./docs/assets/marketplace.png?v=4.0.0) | ![FlowAI Assistant](./docs/assets/flowai.png?v=4.0.0) |
-| Bare-metal package provisioning, live SSE/WS install progress, in-place app updates, automatic subdomain wiring for web apps, and automated `*Arr` API key discovery. | Diagnostics grounded in live system metrics, client-supplied or audit logs, and the administrator **Action Approval Inbox** (`pending_actions`). |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/marketplace.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/marketplace.png?v=4.0.0" alt="AetherMarketplace catalog of 77 native applications"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/cluster.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/cluster.png?v=4.0.0" alt="Cluster tab showing paired peers, link health, and grants"></picture> |
+| 77 native apps in 9 categories with live install progress and certified updates. | Paired servers, link health, protocol compatibility, RTT, grants, and transcode workers. |
+| **Streaming** | **McBrowser** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/streaming.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/streaming.png?v=4.0.0" alt="Streaming analytics with live sessions and playback history"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/mcbrowser.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/mcbrowser.png?v=4.0.0" alt="McBrowser scoped file manager"></picture> |
+| Live sessions, playback history, filters, and distribution charts. | Scoped per-user files, previews, uploads, editing, and shares. |
+| **FlowAI** | **Network** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/flowai.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/flowai.png?v=4.0.0" alt="FlowAI assistant grounded in live telemetry"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/network.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/network.png?v=4.0.0" alt="Network tab with WireGuard, Tailscale, and ingress"></picture> |
+| Multi-provider diagnostics with the human-approval gate. | WireGuard, Tailscale, interfaces, and external access. |
 
 <details>
-<summary><strong>View Multi-Provider FlowAI Configuration (Gemini, Claude, OpenAI, Ollama, LM Studio)</strong></summary>
+<summary><b>All 16 tabs: Approval Inbox, Services, File Share, MediaFlow, Users, Audit Trail, Settings, Security, Notifications, Quotas</b></summary>
 <br>
 
-![FlowAI Engine Settings](./docs/assets/ai-providers.png?v=4.0.0)
+| **Approval Inbox** | **Services** |
+| :---: | :---: |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/inbox.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/inbox.png?v=4.0.0" alt="Approval Inbox tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/services.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/services.png?v=4.0.0" alt="Services tab"></picture> |
+| Pending FlowAI and self-heal actions awaiting an administrator decision. | `systemd` status, logs, restart receipts, and update checks. |
+| **File Share** | **MediaFlow** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/fileshare.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/fileshare.png?v=4.0.0" alt="File Share tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/mediaflow.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/mediaflow.png?v=4.0.0" alt="MediaFlow tab"></picture> |
+| Managed share links, uploads, expiry, and download tracking. | Automated media scan and approval queue. |
+| **Users** | **Audit Trail** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/users.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/users.png?v=4.0.0" alt="Users tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/audit.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/audit.png?v=4.0.0" alt="Audit Trail tab"></picture> |
+| Accounts, roles, quotas, and streaming user links. | Immutable operator, FlowAI, cluster, and auth events with export. |
+| **Settings** | **Security & 2FA** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/settings.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/settings.png?v=4.0.0" alt="Settings tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/security.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/security.png?v=4.0.0" alt="Security & 2FA tab"></picture> |
+| Localization, base domain, interface preferences, and AI configuration. | TOTP, password, storage quota, and session-family revocation. |
+| **Notifications** | **Quotas** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/notifications.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/notifications.png?v=4.0.0" alt="Notifications tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/quotas.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/quotas.png?v=4.0.0" alt="Quotas tab"></picture> |
+| Inbox, rules, and delivery channels. | Per-user storage quotas backed by Linux `setquota`. |
 
 </details>
 
 ---
 
-## System Architecture
+## ⬡ Peer Clustering
 
-```mermaid
-flowchart LR
-    Operator["Operator Browser<br/>(Leptos Rust WASM SPA)"] -->|HTTPS / WSS| Ingress["Apache2 Ingress<br/>Auto-Subdomain TLS"]
-    Ingress -->|127.0.0.1:8080| API["aetherflow-api (af-api)<br/>User=aetherflow • ProtectSystem=strict"]
-    Assets["External UI assets<br/>web/dist or STATIC_DIR"] --> API
+Peer clustering links **independent** AetherFlow servers. There is no master node: each server stays sovereign and grants its peers exactly the access it chooses.
 
-    subgraph RustWorkspace["11-Crate Rust Workspace (backend-rs)"]
-        DB[("SQLite WAL (af-db)<br/>AES-256-GCM + Sessions")]
-        Files["Scoped FS Primitives (af-files)<br/>+ af-api::mcbrowser"]
-        HW["Hardware & NVML FFI (af-hardware)<br/>Zero-Fork Telemetry"]
-        Services["Catalog, Mutators, Workers & Cluster<br/>(af-services + af-host)"]
-    end
+<img src="./docs/assets/peer-clustering.svg?v=4.0.0" alt="Peer clustering topology: servers paired over the afpeer0 WireGuard mesh with grants, NFS storage federation, and Jellyfin transcode offload" width="100%">
 
-    API --> DB
-    API --> Files
-    API --> HW
-    API --> Services
+- **Verified pairing.** A single-use pairing string plus matching six-digit codes on both dashboards establishes a dedicated `afpeer0` WireGuard tunnel. Pairing requests are DNS-pinned and SSRF-guarded.
+- **Zero access by default.** Grant `None`, `Read-only`, or `Read and write` per area (`services`, `marketplace`, `settings`, `files`, `users`, `network`, `updates`, `transcoding`). Revoking a grant cancels active peer streams within a second.
+- **Remote management.** Switch the whole dashboard to a linked peer and operate it within the granted scopes.
+- **Storage federation.** Share media folders between peers over NFSv4.2, restricted to the tunnel, with health gating and media-app safeguards.
+- **Distributed transcoding.** The `af-transcode` shim sends Jellyfin `ffmpeg` jobs to `af-transcode-worker.service` on a paired GPU host.
+- **Diagnostics.** `af cluster diagnose <link>` inspects handshake, grants, exports, mounts, the transcode worker, and the audit trail.
 
-    API -->|"/run/aetherflow/runner.sock<br/>Strict Allowlist IPC"| Runner["aetherflow-runner.service<br/>(aetherflow-api runner • af-runner)"]
-    CLI["Unified Admin CLI (af / af-cli)"] -->|"/run/aetherflow/runner.sock"| Runner
+Requirements: Debian 13 on both servers, direct reachability between WireGuard endpoints, and Jellyfin 12.4 for transcode offload. Peer clustering does not provide HA or failover. → **[Peer clustering guide](./docs/peer-clustering.md)** · **[Design spec](./docs/designs/peer-clustering.md)**
 
-    subgraph BareMetal["Bare-Metal Host (Debian 12/13 • Ubuntu 22.04/24.04)"]
-        Systemd["systemd Service Manager"]
-        Catalog["77 Native Applications<br/>(Plex, Jellyfin, Arr Stack, Palate, Maintainerr, McVNC, Tailscale...)"]
-        Updater["Self-Update & Release Engine<br/>(af-release • transient systemd unit)"]
-        CertSync["Certbot SAN Auto-Sync<br/>&lt;app&gt;.&lt;baseDomain&gt;"]
-    end
+---
 
-    Runner --> Systemd
-    Runner --> Catalog
-    Runner --> Updater
-    Runner --> CertSync
-```
+## 🏗️ Architecture
 
-### 11-Crate Rust Control Plane (`backend-rs`)
+<img src="./docs/assets/architecture.svg?v=4.0.0" alt="AetherFlow architecture: Leptos WASM SPA, Apache2 ingress, unprivileged aetherflow-api, runner socket, privileged aetherflow-runner, systemd and native apps, peer mesh" width="100%">
+
+The unprivileged API never touches root directly. Every privileged action, including package installs, `systemctl` transitions, WireGuard and Tailscale changes, quotas, plugin units, and self-updates, goes through a strict allowlist on `/run/aetherflow/runner.sock` and is executed by `aetherflow-runner.service`.
+
+<details>
+<summary><b>12-crate Rust control plane (<code>backend-rs</code>)</b></summary>
+<br>
 
 | Crate | Role |
 | :--- | :--- |
-| **`af-api`** | Axum HTTP/WebSocket control plane, runtime WASM asset server, JWT/TOTP/OIDC/CSRF middlewares, McBrowser HTTP/TUS/editor/archive/share routes (`af-api::mcbrowser`), native plugin manifest discovery/port allocation/scoped JWTs/proxying (`af-api::plugins`, ports `21000..=21999`), streaming subdomain reverse proxy, FlowAI routing, and canonical streaming history endpoints. |
-| **`af-runner`** | Root Unix socket daemon (`/run/aetherflow/runner.sock`, executed as `aetherflow-api runner`), locked Bash installer supervisor + 9 opt-in declarative Rust package recipes (`AETHERFLOW_ENABLE_RUST_PACKAGES=1`), `systemctl` allowlists, WireGuard/Tailscale helpers, isolated `DynamicUser=yes` plugin units (`af-runner::plugins`), and transient self-update launcher (`aetherflow-self-update-<command>-<channel>-<8hex>.service`). |
-| **`af-files`** | Capability-scoped Linux `openat2` / `BrowserFs` filesystem confinement primitives enforcing `0700` per-user roots and traversal guards for McBrowser. |
-| **`af-db`** | Bundled `rusqlite` WAL single-writer (`max_size(1)`) + concurrent read-only (`max_size(8)`) connection pools, schema migrations, SQLite-backed JWT revocation and session tracking (no Redis dependency), and `enc:v1:` AES-256-GCM secret encryption. |
-| **`af-services`** | 77-package Marketplace catalog & update watcher, SQLite/config mutators, `af-heal` service-health watchdog, MediaFlow background media-transcoding queue worker, and TLS 1.3 mTLS cluster daemon (serving both HTTP/2 gRPC `cluster.ClusterService` and `/cluster/v1/*` HTTPS REST on default `127.0.0.1:50051`). |
-| **`af-release`** | Default pull-based atomic release engine (`Deploy`, `Rollback`, `Cleanup`, `MigrateSystemd`) with 4-tier SQLite path resolution, SHA-256 + Sigstore/SLSA v1 build provenance verification, WAL-safe pre-swap backups, permission normalization, and crash recovery. |
-| **`af-host`** | Shared host backup & verification library (`af-host.backup-manifest.v1`), WAL-consistent `VACUUM INTO` (default) / `OnlineBackupApi` snapshots, 5-digit chunk splitting, confirmed staged restore (`execute_staged_restore`), and native host maintenance (`tune`, `sentinel`, `clean-logs`, `showspace`). |
-| **`af-cli`** | Unified **`af`** administrative CLI binary (`bin/af`) for package lifecycle, systemd services, disk quotas (`setdisk`), sandbox drop-ins, releases, backups, maintenance, and the 34-step provisioner (`af provision`: 14 Rust-native foundation steps — 6 default unless named explicitly — plus 20 retained shell bootstrap steps). |
-| **`af-hardware`** | Zero-fork `sysinfo` and `/proc/diskstats` telemetry collector plus dynamic `libloading` FFI bindings to `libnvidia-ml.so.1` for NVIDIA GPU utilization, VRAM, and temperature metrics. |
-| **`af-librespeed`** | Native **`speedtest-backend`** (`bin/speedtest-backend`) replacement shipped in the core release bundle with SQLite WAL telemetry storage (plus legacy BoltDB v2 auto-migration), keyed ULID result-ID obfuscation, and PNG result badge rendering. |
-| **`af-models`** | Shared `serde` wire contracts, catalog schemas, hardware telemetry structs, and runner IPC payloads. |
+| **`af-api`** | Axum HTTP/WebSocket control plane: auth (JWT/TOTP/OIDC/CSRF), WASM asset serving, McBrowser routes, plugins, subdomain proxy, FlowAI, streaming history, and peer clustering endpoints. |
+| **`af-runner`** | Root Unix-socket daemon (`aetherflow-api runner`) with allowlisted `systemctl`, locked Bash installers plus 9 opt-in declarative Rust recipes, WireGuard/Tailscale and `afpeer0` peer-storage (NFS) helpers, `DynamicUser` plugin units, and the self-update launcher. |
+| **`af-services`** | Marketplace catalog and update watcher, config mutators, the `af-heal` watchdog, and the MediaFlow queue worker. |
+| **`af-db`** | Bundled SQLite WAL with a single writer and pooled readers, migrations, session and JWT revocation, and AES-256-GCM secret encryption. |
+| **`af-files`** | Capability-scoped `openat2` filesystem confinement for McBrowser. |
+| **`af-release`** | Atomic release engine (deploy, rollback, cleanup) with SHA-256 + Sigstore/SLSA verification and crash recovery. |
+| **`af-host`** | Versioned backup manifests, WAL-consistent snapshots, staged restore, and host maintenance (`tune`, `sentinel`, `clean-logs`, `showspace`). |
+| **`af-cli`** | The `af` administrative CLI and the `af provision` foundation. |
+| **`af-hardware`** | Zero-fork `sysinfo` / `/proc` telemetry and dynamic NVML FFI for NVIDIA GPUs. |
+| **`af-librespeed`** | Native Rust `speedtest-backend` (replaces upstream Go `speedtest-go`). |
+| **`af-transcode`** | Jellyfin `ffmpeg` shim and remote transcode worker for peer clustering. |
+| **`af-models`** | Shared `serde` wire contracts, catalog schemas, and runner IPC payloads. |
 
-### 4-Crate Rust WASM Frontend (`frontend-rs`)
+</details>
+
+<details>
+<summary><b>4-crate Leptos WebAssembly dashboard (<code>frontend-rs</code>)</b></summary>
+<br>
 
 | Crate | Role |
 | :--- | :--- |
-| **`af-web-core`** | API/WebSocket client policies, locale catalogs, draft persistence, and shared UI algorithms. |
-| **`af-web-worker`** | Dedicated WebAssembly worker modules for background search, sorting, hashing, and chunked uploads. |
-| **`af-web-ui`** | Reusable accessible Leptos controls, tables, code editor, charts, and topology views. |
-| **`af-web-app`** | Application shell, authentication, public routes, and sixteen dashboard tabs staged into `web/dist` (`STATIC_DIR`). |
+| **`af-web-core`** | API and WebSocket client policies, locale catalogs, draft persistence, shared algorithms. |
+| **`af-web-worker`** | Dedicated Web Worker modules for search, sorting, hashing, and chunked uploads. |
+| **`af-web-ui`** | Accessible Leptos controls, tables, code editor, charts, and topology views. |
+| **`af-web-app`** | Application shell, auth and public routes, and the 16 dashboard tabs: Overview, Approval Inbox, Services, Marketplace, McBrowser, File Share, Streaming, MediaFlow, FlowAI, Network, Cluster, Users, Audit Trail, Settings, Notifications, and Quotas. |
+
+</details>
 
 ---
 
-## 77-Package Bare-Metal Catalog
+## 📦 77-App Native Catalog
 
-AetherFlow manages **77 native Linux packages** across 7 functional domains (grouped into 9 Marketplace UI categories in [AetherMarketplace](./docs/marketplace.md)), serialized behind `/install/.af-package-executor.flock` with locked Bash installers by default, 9 opt-in declarative Rust recipes (`AETHERFLOW_ENABLE_RUST_PACKAGES=1`, adding `-o DPkg::Lock::Timeout=120`), and automated API key discovery for supported `*Arr` applications:
+Every app installs natively, with no Docker, and is supervised by `systemd`. Marketplace groups them into 9 categories; the full lifecycle contract is in [AetherMarketplace](./docs/marketplace.md).
 
-| Domain | Managed Applications |
+| Domain | Applications |
 | :--- | :--- |
-| **Media, IPTV & YouTube Frontends (23)** | Plex Media Server, Jellyfin, Emby, Dispatcharr, Threadfin, Navidrome, Jellyseerr (Seerr), Overseerr, Maintainerr, Requestrr, Audiobookshelf, Kavita, Calibre-Web, FileBot, Unmanic, Unpackerr, Autoscan, Recyclarr, Tautulli, Ombi, FlareSolverr, Piped *(Experimental)*, Invidious *(Experimental)* |
-| **Arr Automation Stack (8)** | Sonarr, Radarr, Lidarr, Readarr *(Retired Upstream)*, Listenarr, Prowlarr, Bazarr, Jackett |
-| **Download Clients (12)** | qBittorrent (`qbittorrent-nox`), Qui, Autobrr, Flood, SeedCross, pyLoad, rTorrent, ruTorrent, SABnzbd, NZBGet, Deluge, Transmission |
-| **Cloud & Union Storage (8)** | Nextcloud, Syncthing, File Browser, Duplicati, Rclone (`rclone-vfs`), MergerFS, Cloudplow, Paperless-ngx |
-| **Network, DNS & Mesh VPN (8)** | WireGuard, Tailscale, Pi-hole, AdGuard Home, LibreSpeed, The Lounge, ZNC, Quassel |
-| **Monitoring & Security (7)** | Grafana, Prometheus, Netdata, Uptime Kuma, Scrutiny (SMART), Vaultwarden, Fail2ban |
-| **Productivity, Culinary AI, Remote Desktop & DevOps (11)** | Palate (Culinary & Nutrition AI), n8n, Home Assistant, Gitea, Organizr, Notifiarr, McVNC (Rust GPU Remote Desktop), KasmVNC, XRDP, noVNC, X2Go |
+| **Media, IPTV & YouTube (23)** | Plex, Jellyfin, Emby, Dispatcharr, Threadfin, Navidrome, Jellyseerr (Seerr), Overseerr, Maintainerr, Requestrr, Audiobookshelf, Kavita, Calibre-Web, FileBot, Unmanic, Unpackerr, Autoscan, Recyclarr, Tautulli, Ombi, FlareSolverr, Piped *(exp.)*, Invidious *(exp.)* |
+| **Arr automation (8)** | Sonarr, Radarr, Lidarr, Readarr *(retired upstream)*, Listenarr, Prowlarr, Bazarr, Jackett |
+| **Download clients (12)** | qBittorrent, Qui, Autobrr, Flood, SeedCross, pyLoad, rTorrent, ruTorrent, SABnzbd, NZBGet, Deluge, Transmission |
+| **Cloud & storage (8)** | Nextcloud, Syncthing, File Browser, Duplicati, Rclone, MergerFS, Cloudplow, Paperless-ngx |
+| **Network, DNS & VPN (8)** | WireGuard, Tailscale, Pi-hole, AdGuard Home, LibreSpeed, The Lounge, ZNC, Quassel |
+| **Monitoring & security (7)** | Grafana, Prometheus, Netdata, Uptime Kuma, Scrutiny, Vaultwarden, Fail2ban |
+| **Productivity, remote desktop & DevOps (11)** | Palate, n8n, Home Assistant, Gitea, Organizr, Notifiarr, McVNC, KasmVNC, XRDP, noVNC, X2Go |
 
 ---
 
-## Native McBrowser, Streaming Intelligence & VPN Control
+## 🚀 Quick Install
 
-- **Scoped Tenant File Manager (`McBrowser`)** — Built-in dashboard file manager without containers or separate logins. Supports flat drag-and-drop file uploads, resumable multi-gigabyte TUS transfers (`> 64 MiB`), native Rust/Leptos UTF-8 code editing (45 syntax modes) with sanitized Markdown/MathML preview, password-protected public shares, smart UI path/filename search, and deterministic API filename search with `type:`/`case:` modifiers. See [Native McBrowser](./docs/mcbrowser.md).
-- **Canonical Streaming Analytics** — Real-time **Jellyfin**, **Plex**, and **Emby** (staged) session monitoring paired with a snapshot-consistent playback history archive, server-identity verification, asynchronous Jellyfin/Emby library metadata enrichment, CSV/JSON portability exports, native Plex/Tautulli playback import, and human-gated history reconciliation. See [Streaming History Contract](./docs/streaming-history-contract.md).
-- **WireGuard & Tailscale Control Center** — Provision one-time WireGuard client keypairs/QR codes, manage Tailscale tailnet authentication, advertised subnet routes, exit-node IP preferences, external subdomain ingress, and host network hardware inventory directly from the **Network** tab. See [Network: WireGuard & Tailscale](./docs/network-vpn.md).
-
----
-
-## Human-Gated FlowAI
-
-AetherFlow treats AI output as untrusted until verified by an operator:
-
-1. **Multi-Provider Routing** — Native support for **Google Gemini**, **Anthropic Claude**, **OpenAI**, **Ollama**, and **LM Studio** with API credentials encrypted at rest using **AES-256-GCM** (`enc:v1:`). See [FlowAI Assistant](./docs/flowai.md).
-2. **Action Approval Gate** — FlowAI inspects instantaneous hardware telemetry and client-supplied or audit logs. Supported service `stop` and `restart` proposals require administrator approval in the **Approval Inbox** (`pending_actions`) before dispatch.
-3. **Administrator Audit Log** — AetherFlow writes authentication, package lifecycle, McBrowser mutation, and manual approval events to `admin_audit_log` in SQLite. Failed audit writes are logged to the API service journal.
-
----
-
-## Quick Installation
-
-Deploy on a clean **Debian 12/13 (Bookworm/Trixie)** or **Ubuntu 22.04/24.04 LTS** server:
+On a clean **Debian 12/13** or **Ubuntu 22.04/24.04 LTS** server:
 
 ```bash
 sudo apt-get update && sudo apt-get -y upgrade
@@ -163,109 +252,93 @@ cd /opt/AetherFlow/setup
 sudo bash AetherFlow-Setup
 ```
 
-### Non-Interactive / Automated Provisioning
+Setup prints the onboarding URL (also recorded in `/root/information.info`) and writes the bootstrap token to `/var/lib/aetherflow/.setup-bootstrap-token`. Open the URL to create the first administrator, then install apps from **Marketplace**.
+
+<details>
+<summary><b>Unattended provisioning & repair</b></summary>
 
 ```bash
-# Unattended bootstrap (--username creates the Linux owner account and records it in
-# /root/information.info alongside the onboarding URL and bootstrap token path
-# /var/lib/aetherflow/.setup-bootstrap-token; the first web admin account is created
-# via web onboarding unless AETHERFLOW_WEB_ADMIN_PASSWORD is explicitly set)
+# Unattended bootstrap: --username creates the Linux owner account. The onboarding URL and
+# bootstrap token path are recorded in /root/information.info. The first web admin is created
+# via web onboarding unless AETHERFLOW_WEB_ADMIN_PASSWORD is set.
 sudo bash /opt/AetherFlow/setup/AetherFlow-Setup \
   --unattended \
   --username admin \
   --domain node.example.com
 
-# Repair specific step(s) on an existing installation while preserving saved configuration & database
-# (Run with --list-steps to view available step IDs, such as build_modern for the control plane)
+# Repair specific step(s) on an existing install while preserving configuration and database
+# (--list-steps shows step IDs, e.g. build_modern for the control plane)
 sudo bash /opt/AetherFlow/setup/AetherFlow-Setup --repair build_modern
 ```
 
-For fresh bare-metal host provisioning (APT repositories, Apache2, TLS, and initial admin setup), use `setup/AetherFlow-Setup`. For repeatable Rust-native foundation steps and day-2 administration on an installed host, use `af provision` (see [Unified Rust Admin CLI (`af`)](./docs/rust-admin-cli.md)).
+Use `setup/AetherFlow-Setup` for first-time host provisioning (APT, Apache2, TLS, initial admin). Use `af provision` for repeatable Rust-native foundation steps and day-2 administration. See the [`af` CLI reference](./docs/rust-admin-cli.md).
 
-Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./docs/upgrading.md)** and **[Self-Update Lifecycle](./docs/self-update.md)**. The updater switches the API binaries and the matching `web/dist` dashboard together while preserving the HTTP API and runner socket.
+</details>
 
----
-
-## Documentation
-
-### Core Platform & Operations
-
-| Guide | Description |
-| :--- | :--- |
-| **[About AetherFlow](./docs/about.md)** | Platform overview, architectural boundaries, and core capabilities. |
-| **[Quickstart Guide](./docs/quickstart.md)** | End-to-end walkthrough for bootstrapping your first bare-metal node. |
-| **[System Architecture](./docs/architecture.md)** | Rust control plane internals, external WASM asset serving, and the `systemd` execution model. |
-| **[Configuration Reference](./docs/configuration.md)** | Environment variables (`/etc/aetherflow/aetherflow.env`), SQLite WAL, and service tuning. |
-| **[Security & Hardening](./docs/security.md)** | TOTP 2FA, AES-256-GCM secret encryption, OIDC provider, and privilege separation. |
-| **[Threat Model](./docs/threat_model.md)** | CWE mapping, security boundaries, AI escapement mitigations, and socket sandboxing. |
-| **[Deployment Checklist](./docs/deployment_checklist.md)** | Pre-flight production security checklist, secret generation, and post-deploy verification. |
-| **[Operations Runbook](./docs/RUNBOOK.md)** | Production administration, `af` CLI workflows, health probes, backups, and recovery. |
-| **[Upgrading & Rollbacks](./docs/upgrading.md)** | Release channels (`stable` / `nightly`), atomic upgrades, and rollbacks. |
-| **[Self-Update Lifecycle](./docs/self-update.md)** | Transient `aetherflow-self-update-<command>-<channel>-<8hex>.service` execution, durable receipts, and recovery journals. |
-
-### Subsystems, Rust Crates & Marketplace
-
-| Guide | Description |
-| :--- | :--- |
-| **[Native McBrowser](./docs/mcbrowser.md)** | Capability-scoped Rust file manager (`af-files` + `af-api::mcbrowser`), resumable uploads, and path policies. |
-| **[Network: WireGuard & Tailscale](./docs/network-vpn.md)** | Managing WireGuard peers/keypairs, Tailscale mesh VPN routes, and external ingress via `aetherflow-runner`. |
-| **[FlowAI Assistant](./docs/flowai.md)** | Multi-provider LLM setup, Support diagnostics, and Approval Inbox workflow. |
-| **[Streaming History Contract](./docs/streaming-history-contract.md)** | Canonical playback history, server-identity verification, reconciliation, and CSV/JSON portability. |
-| **[Streaming Validation Gate](./docs/streaming-validation.md)** | Scoped and integrated streaming verification harness (`scripts/validate-streaming.sh`) and acceptance gates. |
-| **[AetherMarketplace](./docs/marketplace.md)** | 77-app catalog lifecycle, Palate, Maintainerr, McVNC, KasmVNC, and data retention policies. |
-| **[Marketplace Package Architecture](./packages/README.md)** | Modular `packages/common.sh` / `packages/lib/*.sh` helper contracts, integrity checks, and per-app runtime notes. |
-| **[Marketplace Lifecycle Repair](./docs/marketplace-repair.md)** | Lifecycle lock coordination, port preservation, rollback/backup contracts, and data-retention hardening. |
-| **[Marketplace Log Retention](./docs/marketplace-log-retention.md)** | Bounded periodic rotation (`aetherflow-log-retention.timer` / `deploy/log-retention.py`) for installer and heal logs. |
-| **[Jellyseerr / Seerr Upgrades](./docs/seerr-upgrades.md)** | Staged Seerr upgrades, private Node.js/pnpm builds, backups, and manual rollback. |
-| **[Experimental YouTube Frontends](./docs/experimental-youtube.md)** | Native bare-metal installation and operation of Piped and Invidious. |
-| **[Marketplace Developer Guide](./docs/marketplace-developer-guide.md)** | Authoring `common.sh` package installers and declarative Rust recipes. |
-| **[Plugins Runtime & SDK](./plugins/README.md)** | Sandboxed plugin manifest contracts, `af-runner` `DynamicUser=yes` isolation, and the [Rust plugin template](./plugins/sdk-template-rust/README.md). |
-| **[Unified Rust Admin CLI (`af`)](./docs/rust-admin-cli.md)** | Command reference and exit codes for the `af` (`af-cli`) binary and `af provision`. |
-| **[Rust Release Engine (`af-release`)](./docs/rust-release-engine.md)** | Stage-by-stage atomic release deployment, WAL-safe snapshots, provenance checks, and auto-rollback internals. |
-| **[Rust Package Executor (`af-runner`)](./docs/rust-package-executor.md)** | Declarative Rust package recipes, advisory locking, process-group cancellation, and rollback journals. |
-| **[Native Declarative Packages](./docs/v4-native-packages.md)** | Opt-in native Rust package recipes (`fail2ban`, `quassel`, `threadfin`, `znc`, `xrdp`, `x2go`, `netdata`, `mergerfs`, `rclone`) and verification checks. |
-| **[Rust Host Management (`af-host`)](./docs/rust-host-management.md)** | Versioned backup manifests, chunking, staged restore, and native host maintenance (`tune`, `sentinel`). |
-| **[Rust Migration Status](./docs/rust-migration-status.md)** | Crate-by-crate architecture and migration status matrix for v4.0.0. |
-| **[REST & WebSocket API](./docs/API.md)** | Endpoint specifications, OpenAPI 3.1 schema, WebSocket ticket handshake, SSE streams, and CSRF rules. |
-| **[WASM Frontend](./frontend-rs/README.md)** | Frontend crates, pinned build tools, runtime asset layout, and browser verification. |
-| **[Testing & Verification](./docs/testing.md)** | Running the Rust workspace tests, Playwright suites ([e2e/tests/e2e/README.md](./e2e/tests/e2e/README.md)), Python regression/contract suites ([tests/TEST_INFRA.md](./tests/TEST_INFRA.md), [tests/TEST_READY.md](./tests/TEST_READY.md)), and guest VM drills. |
-| **[Clean-Host VM Testing](./docs/v4-clean-host-testing.md)** | Clean-OS QEMU/KVM release matrix (`scripts/v4_vm_matrix.py`) and artifact contract validation. |
-| **[Lifecycle Guest Drills](./docs/v4-lifecycle-testing.md)** | Disposable systemd guest verification for release lifecycle, rollback, and quiescence (`scripts/v4_lifecycle_guest_drills.py`). |
-| **[Native Package Guest Drills](./docs/v4-native-package-testing.md)** | Disposable Debian guest drills for declarative Rust recipes and native package families (`scripts/v4_native_package_guest_drills.py`). |
-| **[Privileged Guest Drills](./docs/v4-privileged-testing.md)** | Disposable systemd guest verification for `af-host` backup, restore, and provenance recovery (`scripts/v4_privileged_guest_drills.py`). |
-| **[Troubleshooting & FAQ](./docs/troubleshooting.md)** | Common diagnostics for ingress routing, WebSocket connections, systemd sandboxes, and APT locks. |
+**Already running AetherFlow?** Switch channels and update in place from **Settings → System Updates**, or follow [Upgrading & Rollbacks](./docs/upgrading.md) and [Self-Update Lifecycle](./docs/self-update.md). The updater swaps the API binaries and the matching `web/dist` dashboard together and rolls back automatically if readiness checks fail.
 
 ---
 
-## Verification & Development
+## 📚 Documentation
+
+The full index lives in **[docs/README.md](./docs/README.md)**. Start here:
+
+| Getting started | Operating | Subsystems |
+| :--- | :--- | :--- |
+| [About AetherFlow](./docs/about.md) | [Operations Runbook](./docs/RUNBOOK.md) | [Peer Clustering](./docs/peer-clustering.md) |
+| [Quickstart](./docs/quickstart.md) | [Configuration](./docs/configuration.md) | [AetherMarketplace](./docs/marketplace.md) |
+| [Architecture](./docs/architecture.md) | [Upgrading & Rollbacks](./docs/upgrading.md) | [McBrowser](./docs/mcbrowser.md) |
+| [Deployment Checklist](./docs/deployment_checklist.md) | [Self-Update](./docs/self-update.md) | [Streaming History](./docs/streaming-history-contract.md) |
+| [Troubleshooting & FAQ](./docs/troubleshooting.md) | [`af` CLI](./docs/rust-admin-cli.md) | [FlowAI](./docs/flowai.md) |
+| [Security & Hardening](./docs/security.md) | [Threat Model](./docs/threat_model.md) | [WireGuard & Tailscale](./docs/network-vpn.md) |
+| [REST & WebSocket API](./docs/API.md) | [Testing & Verification](./docs/testing.md) | [Plugins SDK](./plugins/README.md) |
+
+---
+
+## 🛠️ Development
 
 ```bash
-# Run Rust control plane unit & contract tests across all 11 crates
+# Rust control plane: unit and contract tests across all 12 crates
 JWT_SECRET="$(openssl rand -hex 32)" \
 AES_MASTER_KEY="$(openssl rand -base64 32)" \
 ALLOWED_HOSTS="localhost,127.0.0.1" \
 AETHERFLOW_DISABLE_BACKGROUND_WORKERS=1 \
 cargo test --manifest-path backend-rs/Cargo.toml --workspace --locked -- --test-threads=1
 
-# Test and build the Rust WASM dashboard and workers
+# WASM dashboard and workers
 cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
 bash scripts/install_wasm_build_tools.sh --ensure
 bash scripts/build_wasm_frontend.sh --stage
 
-# Run release manager, marketplace, and build tool regression suites (skipping host env files)
+# Release manager, marketplace, and build-tool regression suites
 AETHERFLOW_SKIP_ENV_FILES=1 python3 tests/run_parallel_tests.py
 
-# Verify shell hygiene across all installer, setup, and lifecycle scripts
+# Shell hygiene across installer, setup, and lifecycle scripts
 python3 tests/check_shell_hygiene.py
 
-# Package the API, CLI, speedtest-backend, external web/dist assets, and SHA256SUMS
+# Package the API, CLI, speedtest-backend, web/dist, and SHA256SUMS
 bash scripts/build_gold.sh
 ```
 
+Browser suites (Playwright against the real WASM bundle) are covered in [e2e/tests/e2e/README.md](./e2e/tests/e2e/README.md). To regenerate the README screenshots, see [scripts/docs/README.md](./scripts/docs/README.md).
+
+### Release channels
+
+| Channel | Branch | Cadence |
+| :--- | :--- | :--- |
+| **`stable`** | `master` | Promoted releases (`vX.Y.Z`), currently **v4.0.0** |
+| **`nightly`** | `nightly` | Continuous prereleases (`v4.0.0-nightly.<run>.<attempt>`) with patch notes in [CHANGELOG.md](./CHANGELOG.md) |
+
+Every release artifact ships with `SHA256SUMS` and Sigstore bundles, and the updater verifies both before it switches binaries.
+
 ---
 
-## License & Security
+## 📜 License & Security
 
-- **License**: AetherFlow is distributed under the **[GNU General Public License v3.0 (GPL-3.0)](./LICENSE.md)**.
-- **Security Policy**: Review **[SECURITY.md](./SECURITY.md)** for supported v4.0.x release tracks and vulnerability disclosure guidelines.
-- **Release History**: Version history is maintained in **[CHANGELOG.md](./CHANGELOG.md)**.
+- **License:** [GNU General Public License v3.0](./LICENSE.md)
+- **Security policy:** see [SECURITY.md](./SECURITY.md) for supported release tracks and private vulnerability disclosure.
+- **History:** [CHANGELOG.md](./CHANGELOG.md) · [Releases](https://github.com/McEveritts/AetherFlow/releases)
+
+<div align="center">
+<sub>Built with 🦀 Rust and 🕸️ WebAssembly for people who own their hardware.</sub>
+</div>

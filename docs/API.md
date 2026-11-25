@@ -5,7 +5,7 @@ The AetherFlow API (`aetherflow-api`) is a **Rust (`Axum` + `Tokio`)** control p
 The authoritative OpenAPI 3.1 contract is maintained in [config/openapi-v1.yaml](../config/openapi-v1.yaml) and served at runtime from `GET /api/v1/public/openapi.yaml` and the zero-CDN Swagger UI at `GET /api/v1/public/swagger/`.
 
 > [!NOTE]
-> This HTTP/WebSocket API powers the AetherFlow WASM dashboard and can be consumed programmatically by authenticated users (`/api/v1/auth/*`) and administrators (`/api/v1/admin/*`) with valid session cookies or Bearer JWTs. By contrast, the local `af` CLI communicates with `aetherflow-runner.service` over `/run/aetherflow/runner.sock` and executes `af-release`, `af-host`, and `af-cli::provision` directly.
+> This HTTP/WebSocket API powers the AetherFlow WASM dashboard and can be consumed programmatically by authenticated users (`/api/v1/auth/*`) and administrators (`/api/v1/admin/*`) with valid session cookies or Bearer JWTs. By contrast, the local `af` CLI communicates with `aetherflow-runner.service` over `/run/aetherflow/runner.sock`, executes `af-release`, `af-host`, and `af-cli::provision` directly, and opens SQLite read-only for `af cluster diagnose`.
 
 ---
 

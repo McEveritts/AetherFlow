@@ -37,6 +37,7 @@ release/
   bin/
     af
     speedtest-backend
+    af-transcode
   config/
   deploy/
   packages/
@@ -62,7 +63,7 @@ bash scripts/run_embedded_e2e.sh \
   --port 18080 --playwright
 ```
 
-`scripts/run_embedded_e2e.sh` retains its historical filename and unconditionally keeps the privileged runner disabled (`--with-runner` exits with code `2`). By default, `--playwright` sets `E2E_PLAYWRIGHT_SPECS` to `[.]live[.]spec[.]ts$`, running only `e2e/tests/e2e/embedded.live.spec.ts` against a disposable SQLite database; pass a non-empty override (for example `E2E_PLAYWRIGHT_SPECS="tests/e2e"` or `E2E_PLAYWRIGHT_SPECS="[.]spec[.]ts$"`, since Bash `${VAR:-default}` treats `""` as unset) to run the fixture-backed and visual specs (`login.spec.ts`, `navigation.spec.ts`, `marketplace.install.spec.ts`, and `visual.spec.ts`). See [`docs/testing.md`](../docs/testing.md) for the full verification boundary.
+`scripts/run_embedded_e2e.sh` retains its historical filename and unconditionally keeps the privileged runner disabled (`--with-runner` exits with code `2`). By default, `--playwright` sets `E2E_PLAYWRIGHT_SPECS` to `[.]live[.]spec[.]ts$`, running the **8** live specs (`embedded.live.spec.ts` and `wasm.*.live.spec.ts`) against a disposable SQLite database; pass a non-empty override (for example `E2E_PLAYWRIGHT_SPECS="tests/e2e"` or `E2E_PLAYWRIGHT_SPECS="[.]spec[.]ts$"`, since Bash `${VAR:-default}` treats `""` as unset) to run all **39** specs including the **31** fixture-backed, accessibility, Cluster, peer-switching, and visual suites (`wasm.cluster.spec.ts`, `wasm.peer-switching.spec.ts`, `wasm.a11y.spec.ts`, `visual.spec.ts`, etc.). See [`docs/testing.md`](../docs/testing.md) for the full verification boundary.
 
 ## Reproducibility
 

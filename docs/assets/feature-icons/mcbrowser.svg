@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-label="Native McBrowser">
+  <defs>
+    <linearGradient id="ic-mcb-stroke" x1="6" y1="10" x2="42" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="60%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="ic-mcb-fill" x1="6" y1="10" x2="42" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+  <!-- Scoped folder silhouette -->
+  <path d="M7 14.5 C7 12.6 8.6 11 10.5 11 H18.8 L22.2 14.8 H37.5 C39.4 14.8 41 16.4 41 18.3 V34.5 C41 36.4 39.4 38 37.5 38 H10.5 C8.6 38 7 36.4 7 34.5 Z" fill="url(#ic-mcb-fill)" stroke="url(#ic-mcb-stroke)" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Built-in UTF-8 code editor chevrons -->
+  <path d="M19 23 L14.5 27 L19 31 M29 23 L33.5 27 L29 31 M25.5 21.5 L22.5 32.5" stroke="#e0f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

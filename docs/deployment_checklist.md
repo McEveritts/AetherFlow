@@ -10,11 +10,11 @@ This checklist documents the runtime architecture, configuration contracts, priv
 
 ## 1. Architecture & Filesystem Layout (FHS)
 
-AetherFlow v4.0 replaces the legacy Go (`Gin`) + separate Next.js/PM2 stack with a Rust API (`aetherflow-api`), an external WASM dashboard (`web/dist`), a native administrative CLI (`af`), and the Rust LibreSpeed companion (`speedtest-backend`). The API runs behind **Apache2** reverse-proxy ingress (`127.0.0.1:8080`) with **SQLite WAL** persistence.
+AetherFlow v4.0 replaces the legacy Go (`Gin`) + separate Next.js/PM2 stack with a Rust API (`aetherflow-api`), an external WASM dashboard (`web/dist`), a native administrative CLI (`af`), the Rust LibreSpeed companion (`speedtest-backend`), and the Jellyfin transcode binary (`af-transcode`). The API runs behind **Apache2** reverse-proxy ingress (`127.0.0.1:8080`) with **SQLite WAL** persistence.
 
 | Path | Owner / Mode | Purpose |
 | --- | --- | --- |
-| `/opt/AetherFlow/releases/<epoch>` | `root:root` (`0755`; `root:aetherflow` from initial Setup/Bash fallback) | Immutable versioned release directories containing `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, `web/dist/`, `config/`, `packages/`, `deploy/`, `plugins/telemetry-inspector/`, `.version`, and `data-snapshot/`. |
+| `/opt/AetherFlow/releases/<epoch>` | `root:root` (`0755`; `root:aetherflow` from initial Setup/Bash fallback) | Immutable versioned release directories containing `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, `bin/af-transcode`, `web/dist/`, `config/`, `packages/`, `deploy/`, `plugins/telemetry-inspector/`, `.version`, and `data-snapshot/`. |
 | `/opt/AetherFlow/current` | Symlink | Atomic symlink pointing to the active `/opt/AetherFlow/releases/<epoch>` directory. |
 | `/usr/local/bin/af` | `root:root` (`0755` wrapper script, or symlink when legacy wrapper is absent) | Installed CLI entrypoint delegating to `/opt/AetherFlow/current/bin/af` (with legacy `/opt/AetherFlow/current/af` and `af-*` fallback compatibility). |
 | `/etc/aetherflow/aetherflow.env` | `root:aetherflow` (`0640` via Setup; `0600` via `af provision`/`af-release`) | Protected environment file read by `systemd` PID 1 (`EnvironmentFile=`) containing `JWT_SECRET`, `AES_MASTER_KEY`, `AF_DB_PATH` / `DB_PATH` / `AETHERFLOW_DB_PATH`, and `ALLOWED_HOSTS`. Never overwritten by upgrades. |
@@ -47,7 +47,7 @@ Configure runtime variables in `/etc/aetherflow/aetherflow.env` (`chmod 0640`, o
 | `COOKIE_SECURE` | Set `Secure` attribute on auth cookies | `true` in production HTTPS deployments (fresh `af provision` and IP-only/`localhost`/`*.local` `AetherFlow-Setup` runs write `false` — verify `true` behind HTTPS) |
 | `AETHERFLOW_RUNNER_SOCK` | Path to the privileged runner Unix socket | `/run/aetherflow/runner.sock` |
 | `PRIVILEGED_RUNNER_ENABLED` | Enables privileged runner readiness probing alongside SQLite (`1`, `true`, `yes`, `on`, trimmed and case-insensitive) | `false` (`aetherflow-api.service` sets `true`) |
-| `AF_GITHUB_TOKEN` | Optional token for API update checks (falls back to `GITHUB_TOKEN`, `GH_TOKEN`). Note: `af-runner` does not forward GitHub tokens into transient self-update units, so UI-triggered `nightly` self-updates remain subject to GitHub's 60 req/hr unauthenticated IP cap. | Unauthenticated public API requests |
+| `AF_GITHUB_TOKEN` | Optional token for API update checks and self-updates (falls back to `GITHUB_TOKEN`, `GH_TOKEN`). `af-runner` never writes tokens into `systemd-run --setenv` or `<unit>.conf`; instead, `af-release` and `deploy/release-manager.sh` read them directly from `/etc/aetherflow/aetherflow.env` into redacted memory (unless `AETHERFLOW_SKIP_ENV_FILES=1`). | Unauthenticated public API requests |
 
 ### Generating Cryptographic Secrets
 
@@ -84,7 +84,7 @@ systemctl cat aetherflow-runner.service | grep -E "WorkingDirectory|ExecStart"
 ```
 
 > [!CAUTION]
-> **Do Not Copy the Commented `BindPaths=` Example Beneath `mcbrowser/user-*`**: The packaged `aetherflow-api.service` unit contains a legacy comment referencing `BindPaths=.../mcbrowser/user-1/Media`. Never bind-mount shared host directories under `/var/lib/aetherflow/mcbrowser/user-*`, because account deletion recursively removes `user-<id>` without a `st_dev` mount-boundary guard.
+> **Do Not Bind-Mount Shared Storage Beneath `mcbrowser/user-*`**: Never bind-mount shared host directories under `/var/lib/aetherflow/mcbrowser/user-*`. Even though `af-files` enforces `RESOLVE_NO_XDEV` / `st_dev` mount-boundary guards during recursive cleanup (skipping mountpoints and recording preserved paths in `admin_audit_log`), shared host media belongs under explicit `ReadWritePaths` / `AF_ALLOWED_FS_ROOTS`, never inside per-user McBrowser roots.
 
 ---
 
@@ -92,7 +92,7 @@ systemctl cat aetherflow-runner.service | grep -E "WorkingDirectory|ExecStart"
 
 ### Release & Self-Update Safety (`af-release` & `aetherflow-self-update-<command>-<channel>-<8hex>.service`)
 
-- CI release archives and `af-release` (`prepare_release_permissions`) normalize extracted directories to `0755`, clear group/other write bits on regular files (`(mode | 0o444) & !0o022`, preserving existing archive execute bits on `packages/*`), explicitly set `0755` on `aetherflow-api`, `af`, `bin/af`, `speedtest-backend`, `bin/speedtest-backend`, `deploy/release-manager.sh`, `deploy/verify-provenance.py`, `deploy/log-retention.py`, and `plugins/telemetry-inspector/backend/hooks/start.sh`, and verify service-user access before switching `/opt/AetherFlow/current`.
+- CI release archives and `af-release` (`prepare_release_permissions`) normalize extracted directories to `0755`, clear group/other write bits on regular files (`(mode | 0o444) & !0o022`, preserving existing archive execute bits on `packages/*`), explicitly set `0755` on `aetherflow-api`, `af`, `bin/af`, `speedtest-backend`, `bin/speedtest-backend`, `af-transcode`, `bin/af-transcode`, `deploy/release-manager.sh`, `deploy/verify-provenance.py`, `deploy/log-retention.py`, and `plugins/telemetry-inspector/backend/hooks/start.sh`, and verify service-user access before switching `/opt/AetherFlow/current`.
 - Self-updates launch in a unique transient `aetherflow-self-update-<command>-<channel>-<8hex>.service` systemd unit (`systemd-run --collect`) with `0600` job configuration and durable JSON receipts in `<data_dir>/.self-update-jobs/<unit>.json` so restarting `aetherflow-runner` and `aetherflow-api` never terminates the in-flight updater.
 - Stable deployments resolve GitHub's public `/releases/latest` redirect when the REST API is rate-limited.
 - API update checks share a 5-minute cache, cache transient failures for 1 minute, and honor `X-RateLimit-Reset` and `Retry-After` headers (`error: github_rate_limited`, `retryAt`).
@@ -100,8 +100,8 @@ systemctl cat aetherflow-runner.service | grep -E "WorkingDirectory|ExecStart"
 ### Binary Baseline & Reproducibility
 
 - Prebuilt release archives (`aetherflow-linux-amd64.tar.gz` and `aetherflow-linux-arm64.tar.gz`) must be built against the **Ubuntu 22.04 (`GLIBC 2.35`)** baseline (`.github/workflows/release.yml` and `.github/workflows/ci.yml`) so dynamically linked binaries run across the supported OS matrix: Ubuntu 22.04, Ubuntu 24.04, Debian 12, and Debian 13.
-- All release and source builds require a committed workspace `backend-rs/Cargo.lock` and compile with `--locked` (`cargo test --workspace --locked`, `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend`).
-- Release archives package `aetherflow-api`, `bin/af`, and `bin/speedtest-backend`, external `web/dist/`, canonical `config/`, `packages/`, `deploy/`, `plugins/telemetry-inspector/`, and `.version`, accompanied by `SHA256SUMS` and GitHub Sigstore/SLSA build provenance attestations.
+- All release and source builds require a committed workspace `backend-rs/Cargo.lock` and compile with `--locked` (`cargo test --workspace --locked`, `cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend --bin af-transcode`).
+- Release archives package `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, and `bin/af-transcode`, external `web/dist/`, canonical `config/`, `packages/`, `deploy/`, `plugins/telemetry-inspector/`, and `.version`, accompanied by `SHA256SUMS` and GitHub Sigstore/SLSA build provenance attestations.
 
 ### Fresh Installation (`setup/AetherFlow-Setup`)
 
@@ -139,7 +139,7 @@ During every deployment:
 3. **Stage 1.5**: Captures a WAL-safe online SQLite backup (`sqlite3 --readonly .backup` / `rusqlite::backup::Backup`), verifies `PRAGMA integrity_check == ok`, and writes `data-snapshot/MANIFEST.sha256`.
 4. **Stage 2 & 3 (Swap, Restart, Log Retention & Readiness)**:
    - Atomically swaps `/opt/AetherFlow/current` and updates `/usr/local/bin/af`.
-   - Restarts `aetherflow-runner.service` and `aetherflow-api.service` first (required), then runs `/var/log/aetherflow` ownership setup, `aetherflow-log-retention.timer` enablement, and `aetherflow-log-retention.service` start best-effort (emitting structured `WARN` entries to `deploy.log` on failure without blocking Stage 3 cutover or Stage 4 rollback), and polls `http://127.0.0.1:8080/health/ready` (the default in `deploy/release-manager.conf`, `af-release`, and the standalone `deploy/release-manager.sh` fallback).
+   - Refreshes any existing `/usr/lib/aetherflow/transcode/ffmpeg` shim atomically, restarts `aetherflow-runner.service` and `aetherflow-api.service` first (required, plus `af-transcode-worker.service` if active), then runs `/var/log/aetherflow` ownership setup, `aetherflow-log-retention.timer` enablement, and `aetherflow-log-retention.service` start best-effort (emitting structured `WARN` entries to `deploy.log` on failure without blocking Stage 3 cutover or Stage 4 rollback), and polls `http://127.0.0.1:8080/health/ready` (the default in `deploy/release-manager.conf`, `af-release`, and the standalone `deploy/release-manager.sh` fallback).
    - **Custom `PORT` / `HEALTH_ENDPOINT` & GitHub Tokens**: Both `af-release` and `deploy/release-manager.sh` unify loading of `HEALTH_ENDPOINT`, GitHub tokens (`AF_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN`), and root-only `AETHERFLOW_SKIP_PROVENANCE_VERIFY` from `/etc/aetherflow/aetherflow.env` (unless `AETHERFLOW_SKIP_ENV_FILES=1`) with exact precedence `process env > explicit --config > aetherflow.env > default-fallback --config > compiled default`. Any `HEALTH_ENDPOINT` override used for deployment must report full application readiness; rollback preserves acceptance of older supported v4 readiness replies containing `{"status":"ready"}` or `{"status":"ok"}`.
 
 ---

@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 420" width="1600" height="420" role="img" aria-labelledby="num-title num-desc">
+  <title id="num-title">AetherFlow v4.0.0 — By the Numbers</title>
+  <desc id="num-desc">Verified engineering metrics for AetherFlow v4.0.0 from v3.2.7 (2026-10-31) to v4.0.0 (2026-11-25): 492,329 lines of Rust, 373 commits, 2,233 files changed, 12 backend crates, 4 WASM frontend crates, 77 native apps, and 16 dashboard tabs.</desc>
+  <defs>
+    <style>
+      .af-sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+      .af-mono { font-family: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+
+    <linearGradient id="nm-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#07070c"/>
+      <stop offset="50%" stop-color="#0b0d17"/>
+      <stop offset="100%" stop-color="#0f0f1a"/>
+    </linearGradient>
+    <linearGradient id="nm-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.5"/>
+      <stop offset="48%" stop-color="#22d3ee" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0.48"/>
+    </linearGradient>
+    <linearGradient id="nm-specular" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0"/>
+      <stop offset="25%" stop-color="#818cf8" stop-opacity="0.75"/>
+      <stop offset="55%" stop-color="#22d3ee" stop-opacity="0.8"/>
+      <stop offset="82%" stop-color="#e879f9" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#e879f9" stop-opacity="0"/>
+    </linearGradient>
+
+    <radialGradient id="nm-glow-1" cx="16%" cy="22%" r="44%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="nm-glow-2" cx="84%" cy="76%" r="44%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="nm-card" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14182b" stop-opacity="0.94"/>
+      <stop offset="100%" stop-color="#0c0f1d" stop-opacity="0.96"/>
+    </linearGradient>
+
+    <!-- Number Gradients -->
+    <linearGradient id="nm-num-indigo" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="55%" stop-color="#a5b4fc"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="nm-num-cyan" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="60%" stop-color="#67e8f9"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="nm-num-emerald" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="60%" stop-color="#6ee7b7"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+    <linearGradient id="nm-num-fuchsia" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="60%" stop-color="#f0abfc"/>
+      <stop offset="100%" stop-color="#d946ef"/>
+    </linearGradient>
+    <linearGradient id="nm-num-amber" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="60%" stop-color="#fde68a"/>
+      <stop offset="100%" stop-color="#fbbf24"/>
+    </linearGradient>
+
+    <pattern id="nm-grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#ffffff" stroke-width="0.6" stroke-opacity="0.032"/>
+    </pattern>
+
+    <clipPath id="nm-clip">
+      <rect x="2" y="2" width="1596" height="416" rx="24"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#nm-clip)">
+    <rect x="2" y="2" width="1596" height="416" rx="24" fill="url(#nm-bg)"/>
+    <rect x="2" y="2" width="1596" height="416" rx="24" fill="url(#nm-glow-1)"/>
+    <rect x="2" y="2" width="1596" height="416" rx="24" fill="url(#nm-glow-2)"/>
+    <rect x="2" y="2" width="1596" height="416" rx="24" fill="url(#nm-grid)"/>
+
+    <!-- Header Row -->
+    <g transform="translate(36, 26)">
+      <text x="0" y="24" class="af-sans" font-size="24" font-weight="800" fill="#f8fafc" letter-spacing="-0.4">AetherFlow v4.0.0 — By the Numbers</text>
+      <text x="0" y="45" class="af-mono" font-size="12" fill="#94a3b8">Measured directly from git history (v3.2.7..v4.0.0) and repository source</text>
+
+      <!-- Date Range Pill (Top Right) -->
+      <g transform="translate(1144, 6)">
+        <rect x="0" y="0" width="384" height="34" rx="17" fill="#13182d" stroke="#818cf8" stroke-opacity="0.55" stroke-width="1.2"/>
+        <circle cx="18" cy="17" r="4.2" fill="#34d399"/>
+        <text x="32" y="21.5" class="af-mono" font-size="11.8" font-weight="600" fill="#e0e7ff">v3.2.7 → v4.0.0  ·  2026-10-31 → 2026-11-25</text>
+      </g>
+    </g>
+
+    <line x1="36" y1="84" x2="1564" y2="84" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1"/>
+
+    <!-- =================================================================== -->
+    <!-- ROW 1: 3 WIDE HERO KPI CARDS (y=102..236, height 134)               -->
+    <!-- =================================================================== -->
+    <g transform="translate(36, 102)">
+      <!-- Card 1: Lines of Rust -->
+      <g transform="translate(0, 0)">
+        <rect x="0" y="0" width="496" height="134" rx="16" fill="url(#nm-card)" stroke="#6366f1" stroke-opacity="0.48" stroke-width="1.3"/>
+        <rect x="0" y="16" width="4" height="102" rx="2" fill="#6366f1"/>
+        <text x="24" y="30" class="af-mono" font-size="11.5" font-weight="700" fill="#a5b4fc" letter-spacing="0.8">LINES OF RUST</text>
+        <text x="476" y="30" text-anchor="end" class="af-mono" font-size="11" fill="#34d399">0 Go files left</text>
+        <text x="22" y="84" class="af-sans" font-size="48" font-weight="800" fill="url(#nm-num-indigo)" letter-spacing="-1.2">492,329</text>
+        <!-- Split proportion bar (backend 84% / frontend 15.9% / plugin SDK 0.1%) -->
+        <rect x="24" y="98" width="452" height="5" rx="2.5" fill="#1e293b"/>
+        <rect x="24" y="98" width="380" height="5" rx="2.5" fill="#6366f1"/>
+        <rect x="406" y="98" width="68" height="5" rx="2.5" fill="#22d3ee"/>
+        <text x="24" y="121" class="af-mono" font-size="11" fill="#94a3b8">413,601 backend · 78,175 WASM · 553 SDK · 635 .rs files</text>
+      </g>
+
+      <!-- Card 2: Commits since v3.2.7 -->
+      <g transform="translate(516, 0)">
+        <rect x="0" y="0" width="496" height="134" rx="16" fill="url(#nm-card)" stroke="#22d3ee" stroke-opacity="0.48" stroke-width="1.3"/>
+        <rect x="0" y="16" width="4" height="102" rx="2" fill="#22d3ee"/>
+        <text x="24" y="30" class="af-mono" font-size="11.5" font-weight="700" fill="#67e8f9" letter-spacing="0.8">COMMITS SINCE v3.2.7</text>
+        <text x="476" y="30" text-anchor="end" class="af-mono" font-size="11" fill="#7dd3fc">25 days</text>
+        <text x="22" y="84" class="af-sans" font-size="48" font-weight="800" fill="url(#nm-num-cyan)" letter-spacing="-1.2">373</text>
+        <rect x="24" y="98" width="452" height="5" rx="2.5" fill="#1e293b"/>
+        <rect x="24" y="98" width="340" height="5" rx="2.5" fill="#22d3ee"/>
+        <text x="24" y="121" class="af-mono" font-size="11" fill="#94a3b8">v3.2.7..v4.0.0 · Full Go→Rust &amp; Next.js→WASM cutover</text>
+      </g>
+
+      <!-- Card 3: Files Changed -->
+      <g transform="translate(1032, 0)">
+        <rect x="0" y="0" width="496" height="134" rx="16" fill="url(#nm-card)" stroke="#10b981" stroke-opacity="0.48" stroke-width="1.3"/>
+        <rect x="0" y="16" width="4" height="102" rx="2" fill="#10b981"/>
+        <text x="24" y="30" class="af-mono" font-size="11.5" font-weight="700" fill="#6ee7b7" letter-spacing="0.8">FILES CHANGED</text>
+        <text x="476" y="30" text-anchor="end" class="af-mono" font-size="11" fill="#94a3b8">v3.2.7..v4.0.0</text>
+        <text x="22" y="84" class="af-sans" font-size="48" font-weight="800" fill="url(#nm-num-emerald)" letter-spacing="-1.2">2,233</text>
+        <!-- Additions / Deletions ratio bar (655777 vs 257910 = 71.8% vs 28.2%) -->
+        <rect x="24" y="98" width="452" height="5" rx="2.5" fill="#1e293b"/>
+        <rect x="24" y="98" width="324" height="5" rx="2.5" fill="#10b981"/>
+        <rect x="350" y="98" width="126" height="5" rx="2.5" fill="#f43f5e"/>
+        <text x="24" y="121" class="af-mono" font-size="11" fill="#94a3b8"><tspan fill="#34d399">+655,777</tspan> insertions  ·  <tspan fill="#fb7185">−257,910</tspan> deletions</text>
+      </g>
+    </g>
+
+    <!-- =================================================================== -->
+    <!-- ROW 2: 4 ARCHITECTURAL STAT CARDS (y=252..374, height 122)          -->
+    <!-- =================================================================== -->
+    <g transform="translate(36, 252)">
+      <!-- Card 4: Backend Crates -->
+      <g transform="translate(0, 0)">
+        <rect x="0" y="0" width="367" height="122" rx="16" fill="url(#nm-card)" stroke="#818cf8" stroke-opacity="0.44" stroke-width="1.2"/>
+        <text x="22" y="28" class="af-mono" font-size="11" font-weight="700" fill="#a5b4fc" letter-spacing="0.7">RUST BACKEND CRATES</text>
+        <text x="20" y="78" class="af-sans" font-size="44" font-weight="800" fill="url(#nm-num-indigo)" letter-spacing="-1">12</text>
+        <text x="92" y="64" class="af-sans" font-size="14" font-weight="700" fill="#f8fafc">backend-rs</text>
+        <text x="92" y="82" class="af-mono" font-size="11" fill="#94a3b8">4 release binaries</text>
+        <text x="22" y="106" class="af-mono" font-size="10.5" fill="#7c8aa5">aetherflow-api · af · speedtest · af-transcode</text>
+      </g>
+
+      <!-- Card 5: WASM Frontend Crates -->
+      <g transform="translate(387, 0)">
+        <rect x="0" y="0" width="367" height="122" rx="16" fill="url(#nm-card)" stroke="#38bdf8" stroke-opacity="0.44" stroke-width="1.2"/>
+        <text x="22" y="28" class="af-mono" font-size="11" font-weight="700" fill="#7dd3fc" letter-spacing="0.7">WASM FRONTEND CRATES</text>
+        <text x="22" y="78" class="af-sans" font-size="44" font-weight="800" fill="url(#nm-num-cyan)" letter-spacing="-1">4</text>
+        <text x="68" y="64" class="af-sans" font-size="14" font-weight="700" fill="#f8fafc">frontend-rs</text>
+        <text x="68" y="82" class="af-mono" font-size="11" fill="#94a3b8">Leptos · Trunk · Zero Node</text>
+        <text x="22" y="106" class="af-mono" font-size="10.5" fill="#7c8aa5">web-core · web-worker · web-ui · web-app</text>
+      </g>
+
+      <!-- Card 6: Native Apps -->
+      <g transform="translate(774, 0)">
+        <rect x="0" y="0" width="367" height="122" rx="16" fill="url(#nm-card)" stroke="#d946ef" stroke-opacity="0.44" stroke-width="1.2"/>
+        <text x="22" y="28" class="af-mono" font-size="11" font-weight="700" fill="#f0abfc" letter-spacing="0.7">NATIVE LINUX APPS</text>
+        <text x="20" y="78" class="af-sans" font-size="44" font-weight="800" fill="url(#nm-num-fuchsia)" letter-spacing="-1">77</text>
+        <text x="92" y="64" class="af-sans" font-size="14" font-weight="700" fill="#f8fafc">AetherMarketplace</text>
+        <text x="92" y="82" class="af-mono" font-size="11" fill="#94a3b8">9 catalog categories</text>
+        <text x="22" y="106" class="af-mono" font-size="10.5" fill="#7c8aa5">config/packages.json · native systemd</text>
+      </g>
+
+      <!-- Card 7: Dashboard Tabs -->
+      <g transform="translate(1161, 0)">
+        <rect x="0" y="0" width="367" height="122" rx="16" fill="url(#nm-card)" stroke="#f59e0b" stroke-opacity="0.44" stroke-width="1.2"/>
+        <text x="22" y="28" class="af-mono" font-size="11" font-weight="700" fill="#fcd34d" letter-spacing="0.7">DASHBOARD TABS</text>
+        <text x="20" y="78" class="af-sans" font-size="44" font-weight="800" fill="url(#nm-num-amber)" letter-spacing="-1">16</text>
+        <text x="92" y="64" class="af-sans" font-size="14" font-weight="700" fill="#f8fafc">TabId::ALL</text>
+        <text x="92" y="82" class="af-mono" font-size="11" fill="#94a3b8">af-web-app reactive views</text>
+        <text x="22" y="106" class="af-mono" font-size="10.5" fill="#7c8aa5">Overview · McBrowser · FlowAI · Cluster…</text>
+      </g>
+    </g>
+
+    <!-- Footer Provenance Line -->
+    <text x="800" y="400" text-anchor="middle" class="af-mono" font-size="11" fill="#7c8aa5">
+      McEveritts/AetherFlow  ·  Verified against release tags v3.2.7 (2026-10-31) → v4.0.0 (2026-11-25)  ·  GPL-3.0
+    </text>
+  </g>
+
+  <rect x="2" y="2" width="1596" height="416" rx="24" fill="none" stroke="url(#nm-border)" stroke-width="2"/>
+  <line x1="120" y1="2.5" x2="1480" y2="2.5" stroke="url(#nm-specular)" stroke-width="1.8"/>
+</svg>

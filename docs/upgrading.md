@@ -13,9 +13,19 @@ AetherFlow supports two release channels managed from **Settings → System Upda
 
 The experimental release track is retired. Existing `experimental` channel settings and CLI arguments alias to `nightly`; historical tags and releases remain available.
 
-Changing the update channel in **Settings → System Updates** does not deploy an update automatically until you click **Install Update** or run `af release deploy`.
+Changing the update channel in **Settings → System Updates** does not deploy an update automatically until you click **Apply Self-Update** or run `af release deploy`.
 
 Nightly pre-releases use unique immutable tags such as `v4.0.0-nightly.85.1`, with the workflow run and attempt identifying the exact build and commit.
+
+### Updating from the Dashboard
+
+1. Open **Settings → System Updates**, choose the release **channel (1)** (`stable` or `nightly`), click **Check for Updates (2)**, and click **Apply Self-Update (3)**.
+
+   ![Step 1 — In Settings → System Updates, select the release channel (1), check for updates (2), and click Apply Self-Update (3)](assets/guides/self-update/01-system-updates.png)
+
+2. Monitor the restart-surviving update status and durable receipt (`operationId`, `state`, `status`) until `aetherflow-api` reconnects on the target version.
+
+   ![Step 2 — Track self-update progress and inspect the durable update receipt](assets/guides/self-update/02-progress.png)
 
 ---
 
@@ -33,7 +43,16 @@ See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-rele
 
 ## Upgrading from v3.2.x to v4.0.0
 
-v4.0.0 replaces the legacy Go control plane with the 11-crate **Rust (`Axum` + `Tokio`)** workspace (`backend-rs`) compiling `aetherflow-api`, the unified `af` (`bin/af`) CLI binary, and the native Rust `speedtest-backend` (`bin/speedtest-backend`), paired with the 4-crate **Leptos Rust WebAssembly (`frontend-rs`)** dashboard shipped as external `web/dist` files. The updater switches the complete release together and preserves the existing HTTP/WebSocket API, `/run/aetherflow/runner.sock` socket, and SQLite data.
+v4.0.0 replaces the legacy Go control plane with the 12-crate **Rust (`Axum` + `Tokio`)** workspace (`backend-rs`) compiling `aetherflow-api`, the unified `af` (`bin/af`) CLI binary, the native Rust `speedtest-backend` (`bin/speedtest-backend`), and the Jellyfin transcode binary `af-transcode` (`bin/af-transcode`), paired with the 4-crate **Leptos Rust WebAssembly (`frontend-rs`)** dashboard shipped as external `web/dist` files. The updater switches the complete release together, refreshes an existing `/usr/lib/aetherflow/transcode/ffmpeg` shim atomically and restarts `af-transcode-worker.service` if active, and preserves the existing HTTP/WebSocket API, `/run/aetherflow/runner.sock` socket, and SQLite data.
+
+### Migration 26: Removal of Legacy Master/Worker Clustering
+
+> [!WARNING]
+> **Breaking change (Migration 26):** Upgrading to v4.0.0 runs SQLite Migration 26, which permanently drops the legacy single-master clustering tables (`cluster_commands`, `cluster_enrollment_tokens`, `cluster_nodes`) and removes `CLUSTER_MODE`, `CLUSTER_PSK`, `CLUSTER_ALLOW_INSECURE_LOOPBACK`, `/api/v1/admin/cluster/*`, `/cluster/v1/*`, and the HTTP/2 gRPC `cluster.ClusterService` (`:50051`).
+
+- **Pre-upgrade backup**: Before upgrading a host that previously used legacy clustering, create a WAL-safe backup via **Settings → Backups & Restore** or `sudo af backup create` (never copy a live WAL-mode `.sqlite` file while `aetherflow-api.service` is running).
+- **Rolling back across Migration 26**: Because Migration 26 drops legacy tables irreversibly, rolling back to a pre-Migration-26 schema requires a stopped-service restore from your pre-upgrade backup via `af backup restore --target-root` (see [Backup & Staged Restore](./RUNBOOK.md#backup--staged-restore-af-host)).
+- **Post-upgrade cutover**: Remove obsolete `CLUSTER_*` variables from `/etc/aetherflow/aetherflow.env` and re-pair your servers over the new `afpeer0` WireGuard mesh through **Cluster** (`/?tab=cluster`). See [Peer Clustering](./peer-clustering.md#migrating-from-legacy-masterworker-clustering).
 
 ### Live SQLite Database Path Resolution
 
@@ -46,7 +65,7 @@ Ensure `python3` and `openssl` are installed on the host before upgrading (requi
 
 Before the atomic `/opt/AetherFlow/current` symlink swap, the release engine verifies `SHA256SUMS` and Sigstore + SLSA v1 build provenance (`verify_release_provenance`), captures a read-only online SQLite backup (`rusqlite::backup::Backup` / `sqlite3 --readonly .backup`) into `${RELEASE_DIR}/data-snapshot` (`0700`/`0600`), and verifies `PRAGMA integrity_check == "ok"` without checkpointing the live WAL.
 
-- **Runner Environment Non-Forwarding (`sudo env` Required for Overrides)**: `af-runner` does not forward `AETHERFLOW_SKIP_PROVENANCE_VERIFY=1` or GitHub tokens (`AF_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`) into transient self-update units. Both are honored only in the process environment of direct `--local` CLI runs or direct `deploy/release-manager.sh` invocations — pass them with `sudo env <VAR>=<VALUE> af release ... --local` (Debian/Ubuntu `sudo` strips shell-exported variables via `Defaults env_reset`).
+- **Unified `aetherflow.env` Loading & Runner Non-Forwarding**: `af-runner` never writes GitHub tokens (`AF_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`) or `AETHERFLOW_SKIP_PROVENANCE_VERIFY` into `systemd-run --setenv` arguments or `<unit>.conf`. Instead, both `af-release` and `deploy/release-manager.sh` read `HEALTH_ENDPOINT`, GitHub tokens (into redacted memory), and root-only `AETHERFLOW_SKIP_PROVENANCE_VERIFY=1` directly from `/etc/aetherflow/aetherflow.env` (unless `AETHERFLOW_SKIP_ENV_FILES=1`) with exact precedence `process env > explicit --config > aetherflow.env > default-fallback --config > compiled default`. When overriding in a one-off `--local` invocation, pass variables via `sudo env <VAR>=<VALUE> af release ... --local` (Debian/Ubuntu `sudo` strips shell exports via `Defaults env_reset`).
 
 - **Upgrade Compatibility Notes (Ingress & Host Validation)**:
   - **IP-Only Hosts**: Because `host_validation_middleware` now implicitly trusts only canonical loopback IPs (`127.0.0.0/8`, `::1`), ensure your host's LAN/public IP is listed in `ALLOWED_HOSTS` inside `/etc/aetherflow/aetherflow.env` before upgrading if you access the dashboard directly by IP.
@@ -82,7 +101,7 @@ Both release engines keep a live database that passes `PRAGMA integrity_check`. 
 
 ## Building & Deploying from Source
 
-To compile and package `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, external `web/dist`, and `SHA256SUMS` locally into `dist/gold/<version>/` (see [Testing & Verification — Prerequisites](./testing.md#prerequisites) for required Rust/system toolchains; the build scripts locate tools installed by `install_wasm_build_tools.sh --ensure` automatically with no manual `PATH` change unless invoking `trunk` directly):
+To compile and package `aetherflow-api`, `bin/af`, `bin/speedtest-backend`, `bin/af-transcode`, external `web/dist`, and `SHA256SUMS` locally into `dist/gold/<version>/` (see [Testing & Verification — Prerequisites](./testing.md#prerequisites) for required Rust/system toolchains; the build scripts locate tools installed by `install_wasm_build_tools.sh --ensure` automatically with no manual `PATH` change unless invoking `trunk` directly):
 
 ```bash
 # Ensure pinned WASM build tools are installed

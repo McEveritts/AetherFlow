@@ -1,0 +1,217 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="sp-title sp-desc">
+  <title id="sp-title">AetherFlow v4.0.0 — Social Preview</title>
+  <desc id="sp-desc">GitHub repository social preview for McEveritts/AetherFlow v4.0.0: Sovereign bare-metal control plane in Rust and WebAssembly with 77 native apps and peer clustering.</desc>
+  <defs>
+    <style>
+      .af-sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+      .af-mono { font-family: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace; }
+    </style>
+
+    <linearGradient id="sp-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#07070c"/>
+      <stop offset="50%" stop-color="#0b0d18"/>
+      <stop offset="100%" stop-color="#0f0f1a"/>
+    </linearGradient>
+    <linearGradient id="sp-border" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.55"/>
+      <stop offset="45%" stop-color="#6366f1" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0.5"/>
+    </linearGradient>
+    <linearGradient id="sp-specular" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="22%" stop-color="#22d3ee" stop-opacity="0.72"/>
+      <stop offset="52%" stop-color="#818cf8" stop-opacity="0.9"/>
+      <stop offset="82%" stop-color="#d946ef" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0"/>
+    </linearGradient>
+
+    <radialGradient id="sp-glow-indigo" cx="18%" cy="22%" r="52%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.30"/>
+      <stop offset="55%" stop-color="#4f46e5" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#4f46e5" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sp-glow-cyan" cx="80%" cy="24%" r="45%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.24"/>
+      <stop offset="58%" stop-color="#06b6d4" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sp-glow-fuchsia" cx="82%" cy="82%" r="44%">
+      <stop offset="0%" stop-color="#d946ef" stop-opacity="0.22"/>
+      <stop offset="58%" stop-color="#8b5cf6" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Aurora Ribbons -->
+    <linearGradient id="sp-ribbon-1" x1="0%" y1="60%" x2="100%" y2="15%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="22%" stop-color="#22d3ee" stop-opacity="0.78"/>
+      <stop offset="60%" stop-color="#6366f1" stop-opacity="0.92"/>
+      <stop offset="88%" stop-color="#d946ef" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#d946ef" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="sp-ribbon-2" x1="0%" y1="60%" x2="100%" y2="30%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0"/>
+      <stop offset="30%" stop-color="#34d399" stop-opacity="0.55"/>
+      <stop offset="72%" stop-color="#22d3ee" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Brand Tile -->
+    <linearGradient id="sp-tile" x1="0" y1="128" x2="128" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d4ed8"/>
+      <stop offset="0.52" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#9333ea"/>
+    </linearGradient>
+    <radialGradient id="sp-tile-sheen" cx="30" cy="18" r="96" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sp-mark-flow" x1="10" y1="0" x2="118" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.28" stop-color="#e0f2fe" stop-opacity="0.96"/>
+      <stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+    <linearGradient id="sp-wordmark" x1="0%" y1="0%" x2="100%" y2="25%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="68%" stop-color="#eef2ff"/>
+      <stop offset="100%" stop-color="#c7d2fe"/>
+    </linearGradient>
+    <linearGradient id="sp-card" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14182b" stop-opacity="0.92"/>
+      <stop offset="100%" stop-color="#0c0f1d" stop-opacity="0.95"/>
+    </linearGradient>
+
+    <pattern id="sp-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff" stroke-width="0.7" stroke-opacity="0.036"/>
+    </pattern>
+
+    <!-- Braided Logo Masks -->
+    <clipPath id="sp-left-half"><rect x="0" y="0" width="64" height="128"/></clipPath>
+    <mask id="sp-cut-peak" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="#fff"/>
+      <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="#000" stroke-width="22" stroke-linecap="round" clip-path="url(#sp-left-half)"/>
+    </mask>
+    <mask id="sp-cut-flow" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="#fff"/>
+      <path d="M64 26 L98 100" fill="none" stroke="#000" stroke-width="23"/>
+    </mask>
+  </defs>
+
+  <!-- Full-bleed dark obsidian canvas (zero white corners on OpenGraph cards) -->
+  <rect x="0" y="0" width="1280" height="640" fill="url(#sp-bg)"/>
+  <rect x="0" y="0" width="1280" height="640" fill="url(#sp-glow-indigo)"/>
+  <rect x="0" y="0" width="1280" height="640" fill="url(#sp-glow-cyan)"/>
+  <rect x="0" y="0" width="1280" height="640" fill="url(#sp-glow-fuchsia)"/>
+  <rect x="0" y="0" width="1280" height="640" fill="url(#sp-grid)"/>
+
+  <!-- Inner Obsidian Architectural Frame -->
+  <rect x="18" y="18" width="1244" height="604" rx="26" fill="none" stroke="url(#sp-border)" stroke-width="2"/>
+  <line x1="120" y1="18.5" x2="1160" y2="18.5" stroke="url(#sp-specular)" stroke-width="2"/>
+
+  <!-- Luminous Aurora Flow Curves + Stylized 3-Node Peer Mesh Emblem (Right Field) -->
+  <g>
+    <path d="M 650 410 C 780 375, 850 180, 1005 198 C 1120 212, 1185 128, 1280 144" fill="none" stroke="url(#sp-ribbon-1)" stroke-width="3.5" stroke-linecap="round"/>
+    <path d="M 700 440 C 835 405, 895 238, 1045 256 C 1148 268, 1200 198, 1280 212" fill="none" stroke="url(#sp-ribbon-2)" stroke-width="2.4" stroke-linecap="round"/>
+    <path d="M 775 248 C 885 182, 975 194, 1090 132 C 1170 88, 1225 94, 1280 78" fill="none" stroke="url(#sp-ribbon-1)" stroke-width="1.4" stroke-opacity="0.55" stroke-linecap="round"/>
+
+    <!-- Minimal Stylized 3-Node Bare-Metal Mesh Constellation -->
+    <g transform="translate(868, 110)">
+      <!-- Mesh edges -->
+      <line x1="140" y1="54" x2="54" y2="210" stroke="#22d3ee" stroke-opacity="0.5" stroke-width="2" stroke-dasharray="6 5"/>
+      <line x1="140" y1="54" x2="256" y2="188" stroke="#818cf8" stroke-opacity="0.52" stroke-width="2" stroke-dasharray="6 5"/>
+      <line x1="54" y1="210" x2="256" y2="188" stroke="#d946ef" stroke-opacity="0.48" stroke-width="2" stroke-dasharray="6 5"/>
+
+      <!-- Node Top (Indigo) -->
+      <rect x="92" y="18" width="96" height="72" rx="16" fill="#12162b" stroke="#818cf8" stroke-opacity="0.7" stroke-width="1.6"/>
+      <circle cx="114" cy="40" r="5" fill="#818cf8"/>
+      <rect x="128" y="36" width="42" height="7" rx="3.5" fill="#a5b4fc" fill-opacity="0.65"/>
+      <rect x="108" y="58" width="64" height="6" rx="3" fill="#475569" fill-opacity="0.65"/>
+      <rect x="108" y="70" width="44" height="6" rx="3" fill="#34d399" fill-opacity="0.7"/>
+
+      <!-- Node Bottom-Left (Cyan) -->
+      <rect x="6" y="174" width="96" height="72" rx="16" fill="#0d1b29" stroke="#22d3ee" stroke-opacity="0.7" stroke-width="1.6"/>
+      <circle cx="28" cy="196" r="5" fill="#22d3ee"/>
+      <rect x="42" y="192" width="42" height="7" rx="3.5" fill="#67e8f9" fill-opacity="0.65"/>
+      <rect x="22" y="214" width="64" height="6" rx="3" fill="#475569" fill-opacity="0.65"/>
+      <rect x="22" y="226" width="52" height="6" rx="3" fill="#38bdf8" fill-opacity="0.7"/>
+
+      <!-- Node Bottom-Right (Fuchsia) -->
+      <rect x="208" y="152" width="96" height="72" rx="16" fill="#1c122a" stroke="#d946ef" stroke-opacity="0.7" stroke-width="1.6"/>
+      <circle cx="230" cy="174" r="5" fill="#e879f9"/>
+      <rect x="244" y="170" width="42" height="7" rx="3.5" fill="#f0abfc" fill-opacity="0.65"/>
+      <rect x="224" y="192" width="64" height="6" rx="3" fill="#475569" fill-opacity="0.65"/>
+      <rect x="224" y="204" width="48" height="6" rx="3" fill="#e879f9" fill-opacity="0.7"/>
+
+      <!-- Center Mesh Pulse -->
+      <circle cx="148" cy="154" r="14" fill="#10b981" fill-opacity="0.14" stroke="#34d399" stroke-opacity="0.5" stroke-width="1.2"/>
+      <circle cx="148" cy="154" r="5" fill="#34d399"/>
+    </g>
+  </g>
+
+  <!-- Top Row: Emblem + Release Pill + Repo Pill -->
+  <g transform="translate(76, 76)">
+    <!-- Official Braided Emblem (96x96) -->
+    <rect x="-8" y="-8" width="112" height="112" rx="28" fill="url(#sp-tile)" opacity="0.24"/>
+    <g transform="scale(0.75)">
+      <rect width="128" height="128" rx="28" fill="url(#sp-tile)"/>
+      <rect width="128" height="128" rx="28" fill="url(#sp-tile-sheen)"/>
+      <rect x="0.75" y="0.75" width="126.5" height="126.5" rx="27.25" fill="none" stroke="#c7d2fe" stroke-opacity="0.4" stroke-width="1.5"/>
+      <g transform="translate(12.8 12.8) scale(0.8)">
+        <path d="M30 100 L64 26 L98 100" fill="none" stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#sp-cut-peak)"/>
+        <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="url(#sp-mark-flow)" stroke-width="10" stroke-linecap="round" mask="url(#sp-cut-flow)"/>
+        <circle cx="116" cy="58" r="11" fill="#ffffff" fill-opacity="0.24"/>
+        <circle cx="116" cy="58" r="6.5" fill="#ffffff"/>
+      </g>
+    </g>
+
+    <!-- Badges beside Emblem -->
+    <g transform="translate(124, 28)">
+      <rect x="0" y="0" width="112" height="40" rx="20" fill="#4f46e5" fill-opacity="0.32" stroke="#818cf8" stroke-opacity="0.72" stroke-width="1.4"/>
+      <circle cx="20" cy="20" r="5" fill="#34d399"/>
+      <text x="34" y="25.5" class="af-mono" font-size="16" font-weight="700" fill="#eef2ff">v4.0.0</text>
+
+      <rect x="126" y="0" width="248" height="40" rx="20" fill="#13182b" fill-opacity="0.9" stroke="#334155" stroke-opacity="0.85" stroke-width="1.2"/>
+      <text x="250" y="25.5" text-anchor="middle" class="af-mono" font-size="14.5" font-weight="600" fill="#cbd5e1">McEveritts/AetherFlow</text>
+    </g>
+  </g>
+
+  <!-- Hero Title & Tagline -->
+  <g transform="translate(76, 276)">
+    <text x="-3" y="0" class="af-sans" font-size="84" font-weight="800" fill="url(#sp-wordmark)" letter-spacing="-2.2">AetherFlow</text>
+    <text x="2" y="54" class="af-sans" font-size="33" font-weight="600" fill="#e2e8f0" letter-spacing="-0.4">Sovereign bare-metal control plane</text>
+    <text x="2" y="100" class="af-mono" font-size="18.5" font-weight="600" fill="#94a3b8">
+      <tspan fill="#38bdf8">Rust</tspan><tspan fill="#475569">  ·  </tspan><tspan fill="#a5b4fc">WebAssembly</tspan><tspan fill="#475569">  ·  </tspan><tspan fill="#e879f9">77 native apps</tspan><tspan fill="#475569">  ·  </tspan><tspan fill="#34d399">Peer clustering</tspan>
+    </text>
+  </g>
+
+  <!-- Bottom 4 High-Contrast Stat Cards (Legible at OpenGraph Thumbnail Size) -->
+  <g transform="translate(76, 444)">
+    <!-- Card 1 -->
+    <rect x="0" y="0" width="268" height="118" rx="18" fill="url(#sp-card)" stroke="#6366f1" stroke-opacity="0.52" stroke-width="1.5"/>
+    <rect x="0" y="18" width="4.5" height="82" rx="2.25" fill="#6366f1"/>
+    <text x="24" y="54" class="af-sans" font-size="34" font-weight="800" fill="#ffffff">12 Crates</text>
+    <text x="24" y="84" class="af-mono" font-size="15" font-weight="600" fill="#a5b4fc">Rust Control Plane</text>
+    <text x="24" y="104" class="af-mono" font-size="12" fill="#94a3b8">Zero-Go · SQLite WAL</text>
+
+    <!-- Card 2 -->
+    <rect x="286" y="0" width="268" height="118" rx="18" fill="url(#sp-card)" stroke="#22d3ee" stroke-opacity="0.52" stroke-width="1.5"/>
+    <rect x="286" y="18" width="4.5" height="82" rx="2.25" fill="#22d3ee"/>
+    <text x="310" y="54" class="af-sans" font-size="34" font-weight="800" fill="#ffffff">4 Crates</text>
+    <text x="310" y="84" class="af-mono" font-size="15" font-weight="600" fill="#67e8f9">Leptos WASM UI</text>
+    <text x="310" y="104" class="af-mono" font-size="12" fill="#94a3b8">16 Tabs · Zero Node.js</text>
+
+    <!-- Card 3 -->
+    <rect x="572" y="0" width="268" height="118" rx="18" fill="url(#sp-card)" stroke="#d946ef" stroke-opacity="0.52" stroke-width="1.5"/>
+    <rect x="572" y="18" width="4.5" height="82" rx="2.25" fill="#d946ef"/>
+    <text x="596" y="54" class="af-sans" font-size="34" font-weight="800" fill="#ffffff">77 Apps</text>
+    <text x="596" y="84" class="af-mono" font-size="15" font-weight="600" fill="#f0abfc">Native systemd</text>
+    <text x="596" y="104" class="af-mono" font-size="12" fill="#94a3b8">Zero-Docker · Sandbox</text>
+
+    <!-- Card 4 -->
+    <rect x="858" y="0" width="270" height="118" rx="18" fill="url(#sp-card)" stroke="#10b981" stroke-opacity="0.52" stroke-width="1.5"/>
+    <rect x="858" y="18" width="4.5" height="82" rx="2.25" fill="#10b981"/>
+    <text x="882" y="54" class="af-sans" font-size="34" font-weight="800" fill="#ffffff">Peer Mesh</text>
+    <text x="882" y="84" class="af-mono" font-size="15" font-weight="600" fill="#6ee7b7">WireGuard afpeer0</text>
+    <text x="882" y="104" class="af-mono" font-size="12" fill="#94a3b8">Grants · NFS · GPU</text>
+  </g>
+</svg>

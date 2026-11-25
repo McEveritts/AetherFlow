@@ -1,0 +1,6 @@
+# Next.js build & static export outputs
+.next/
+out/
+
+# Synced media copied from ../../docs/assets by scripts/sync-assets.mjs
+public/media/
