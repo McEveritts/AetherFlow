@@ -1,6 +1,6 @@
 # AetherFlow Documentation
 
-Documentation index for **AetherFlow v4.0.0** — a 12-crate Rust bare-metal control plane (`backend-rs`) paired with a 4-crate Leptos Rust/WASM dashboard (`frontend-rs`, shipped as external `web/dist` assets) managing native Linux services under `systemd` and `Apache2`.
+Documentation index for **AetherFlow v4.0.1** — a 12-crate Rust bare-metal control plane (`backend-rs`) paired with a 4-crate Leptos Rust/WASM dashboard (`frontend-rs`, shipped as external `web/dist` assets) managing native Linux services under `systemd` and `Apache2`.
 
 ![AetherFlow System Architecture](./assets/architecture.svg)
 
@@ -36,6 +36,7 @@ Documentation index for **AetherFlow v4.0.0** — a 12-crate Rust bare-metal con
 | Document | Description |
 | :--- | :--- |
 | [System Architecture](./architecture.md) | Full 12-crate `backend-rs` and 4-crate `frontend-rs` architecture, FHS state boundaries, and pull-based release pipeline. |
+| [Design System](./design-system.md) | Unified 3-tier flat surface & control architecture, 1:1 dark/light `--af-*` semantic tokens, WCAG AA contrast guarantees, and CI drift gate. |
 | [Peer Clustering](./peer-clustering.md) | Operator guide for `afpeer0` WireGuard pairing, 8-area delegated grants, remote dashboard switching, NFSv4.2 media sharing, Jellyfin transcode offload, and `af cluster diagnose` ([diagram](./assets/peer-clustering.svg)). |
 | [API Reference](./API.md) | Versioned `/api/v1/*` REST, SSE, WebSocket, and peer proxy endpoints backed by `config/openapi-v1.yaml`. |
 | [Native McBrowser](./mcbrowser.md) | Capability-scoped per-user file manager (`af-files` + `af-api::mcbrowser`), 64 GiB TUS uploads, UTF-8 editor, 9-format archives, and public shares. |
@@ -82,6 +83,7 @@ Documentation index for **AetherFlow v4.0.0** — a 12-crate Rust bare-metal con
 | Document | Description |
 | :--- | :--- |
 | [Testing AetherFlow](./testing.md) | Full verification matrix across `backend-rs` (12 crates), `frontend-rs` (4 crates), Plugin SDK, Python suites, `build_gold.sh`, and Playwright E2E. |
+| [v4.0.1 Release Notes](./releases/v4.0.1.md) | Release summary, Unified Flat Design System, Debian 13 installer & Apache ingress hardening, Jellyfin/Peer fixes, and in-place upgrade guide for AetherFlow v4.0.1. |
 | [v4.0.0 Release Notes](./releases/v4.0.0.md) | Release summary, highlights, breaking changes, and upgrade checklist for AetherFlow v4.0.0. |
 | [Clean-Host KVM Matrix Testing](./v4-clean-host-testing.md) | Four-OS QEMU/KVM clean-host bootstrap, upgrade, rollback, and GLIBC 2.35 baseline artifact contract (`scripts/v4_vm_matrix.py`). |
 | [Lifecycle & Self-Update Guest Drills](./v4-lifecycle-testing.md) | Disposable-VM verification of transient-unit self-update cgroup survival and SQLite corruption rollback (`scripts/v4_lifecycle_guest_drills.py`). |
@@ -96,6 +98,7 @@ Historical and architectural design specifications preserved alongside the livin
 
 | Document | Description |
 | :--- | :--- |
+| [Flat Design System Specification](./designs/flat-design-system.md) | Architecture and migration record for retiring Obsidian V2 chromatic glass in favor of `.af-*` flat surfaces, semantic tokens, and CI drift enforcement. |
 | [Peer Clustering Design Specification](./designs/peer-clustering.md) | Architecture, non-goals, alternatives considered, SQL migrations (25–27), wire/IPC contracts, and transcode dispatcher design ([diagram](./assets/peer-clustering.svg)). |
 | [Peer Clustering Implementation Drift Log](./designs/peer-clustering-drift.md) | Phase-by-phase file boundary log, line-citation drift tracking, and post-implementation verification notes for P0–P9 and Bundles A–D. |
 | [v4 Post-EGM Hardening Program](./designs/v4-post-egm-hardening-program.md) | Tracks A–D security hardening specification covering gateway auth, `af-files` mount guards, plugin/metrics isolation, and FlowAI guardrails. |

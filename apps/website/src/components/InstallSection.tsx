@@ -55,7 +55,7 @@ export function InstallSection() {
               </div>
               <div className="obs-glass rounded-xl p-4">
                 <div className="font-semibold text-white">
-                  Upgrading an existing v3.2.x or v4.0.0 node?
+                  Upgrading an existing v3.2.x or v4.0.x node?
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-slate-400">
                   The isolated updater switches API binaries and matching <code className="font-mono text-indigo-200">web/dist</code> dashboard assets atomically while preserving the HTTP API and runner socket.

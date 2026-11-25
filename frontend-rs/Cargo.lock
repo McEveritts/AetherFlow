@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "af-models"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "chrono",
  "libc",
@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "af-web-app"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "af-models",
  "af-web-core",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "af-web-core"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "af-models",
  "ammonia",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "af-web-ui"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "af-web-core",
  "gloo-events",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "af-web-worker"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "af-web-core",
  "js-sys",

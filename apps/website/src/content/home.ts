@@ -17,15 +17,15 @@ export const navLinks = [
   { label: 'Peer Clustering', href: '#peer-clustering' },
   { label: 'Catalog', href: '#catalog' },
   { label: 'Install', href: '#install' },
-  { label: 'v4.0.0 Notes', href: '#whats-new' },
+  { label: 'v4.0.1 Notes', href: '#whats-new' },
 ] as const;
 
 export const heroContent = {
-  versionPill: 'v4.0.0 • Pure Rust Control Plane & Leptos WASM',
+  versionPill: 'v4.0.1 • Pure Rust Control Plane & Flat WASM UI',
   headlineLead: 'Bare-metal Linux infrastructure,',
   headlineAccent: 'orchestrated in pure Rust.',
   subheadline:
-    'AetherFlow v4.0.0 pairs a 12-crate Rust control plane (Axum + Tokio) with a 4-crate Leptos WebAssembly dashboard served from external web/dist assets. Provision 77 native systemd applications, pair independent servers over an afpeer0 WireGuard mesh, manage scoped tenant storage in McBrowser, and gate FlowAI operations behind explicit human approval.',
+    'AetherFlow v4.0.1 pairs a 12-crate Rust control plane (Axum + Tokio) with a 4-crate Leptos WebAssembly dashboard built on the Unified Flat Surface & Control System. Provision 77 native systemd applications, pair independent servers over an afpeer0 WireGuard mesh, manage scoped tenant storage in McBrowser, and gate FlowAI operations behind explicit human approval.',
   primaryCta: {
     label: 'Explore on GitHub',
     href: REPO_URL,
@@ -35,7 +35,7 @@ export const heroContent = {
     href: `${DOCS_BLOB_BASE}/docs/quickstart.md`,
   },
   releasesCta: {
-    label: 'v4.0.0 Releases',
+    label: 'v4.0.1 Releases',
     href: RELEASES_URL,
   },
   trustPills: [
@@ -118,7 +118,7 @@ export const features: FeatureItem[] = [
     title: 'Leptos Rust WASM Dashboard',
     tag: 'frontend-rs · 16 Tabs',
     summary:
-      'Built from 4 Rust WebAssembly crates via Trunk and served directly from external web/dist assets by aetherflow-api. Features Frame-0 WebSocket telemetry snapshots, background WASM workers, and the Obsidian Open Canvas UI—zero Node.js runtime required.',
+      'Built from 4 Rust WebAssembly crates via Trunk and served directly from external web/dist assets by aetherflow-api. Features Frame-0 WebSocket telemetry snapshots, background WASM workers, and the Unified Flat Surface & Control System—zero Node.js runtime required.',
     specs: ['External web/dist assets', 'Dedicated WASM workers', '6 UTC telemetry windows'],
     tone: 'violet',
     docHref: `${DOCS_BLOB_BASE}/frontend-rs/README.md`,
@@ -531,7 +531,7 @@ export const frontendCrates: CrateEntry[] = [
   },
   {
     name: 'af-web-ui',
-    role: 'Accessible Leptos component kit: obsidian controls, data ledgers, syntax-highlighted code editor, telemetry charts, and topology views.',
+    role: 'Accessible Leptos component kit: flat .af-* controls, data ledgers, syntax-highlighted code editor, telemetry charts, and topology views with CI drift enforcement.',
     tone: 'indigo',
   },
   {
@@ -632,10 +632,34 @@ export interface ChangelogHighlight {
 
 export const whatsNewHighlights: ChangelogHighlight[] = [
   {
-    badge: 'New Subsystem',
+    badge: 'v4.0.1 Design System',
+    title: 'Unified Flat Surface & Control System',
+    summary:
+      'Retired glassmorphism across all 16 dashboard tabs and standalone routes in favor of a 3-tier flat elevation hierarchy with 1:1 dark/light semantic tokens.',
+    bullets: [
+      'Zero backdrop-filter, chromatic rims, aurora gradients, grain noise, or card hover lift',
+      'Opaque steady overlays (.af-modal/.af-popover/.af-toast), WebKit Escape & popup launch fixes',
+      'Permanent Rust CI drift gate (design_contract.rs) and WCAG 2.1 AA cross-browser contrast',
+    ],
+    tone: 'violet',
+  },
+  {
+    badge: 'v4.0.1 Reliability',
+    title: 'Debian 13 Setup, Ingress, Jellyfin & Peers',
+    summary:
+      'Hardened fresh installations, Apache2 subdomain routing, Jellyfin seeding, and WireGuard peer endpoint selection.',
+    bullets: [
+      'Debian 13 vsftpd 3.0.5 + UFW alignment, OUTTO setup logging, and RFC-1123 hostname guards',
+      'Apache default-ssl hijack prevention and automatic post-install app vhost/TLS sync',
+      'Jellyfin Kestrel startup retries (--force-confmiss) and VPN/virtual NIC deprioritization',
+    ],
+    tone: 'emerald',
+  },
+  {
+    badge: 'v4 Core Subsystem',
     title: 'Peer Clustering & af-transcode',
     summary:
-      'Replaced legacy single-master clustering (retired by Migration 26) with decentralized server-to-server pairing over afpeer0.',
+      'Decentralized server-to-server pairing over afpeer0 with zero-access default grants, NFSv4.2 media federation, and Jellyfin 12.4 transcode offload.',
     bullets: [
       'Six-digit HTTPS pairing with DNS-pinned SSRF guard and automatic wireguard-tools setup',
       'Zero-access default across 8 grant areas with < 1s WebSocket & HTTP stream revocation',
@@ -644,22 +668,10 @@ export const whatsNewHighlights: ChangelogHighlight[] = [
     tone: 'cyan',
   },
   {
-    badge: 'Frontend Rewrite',
-    title: '4-Crate Leptos Rust WASM Dashboard',
-    summary:
-      'Replaced the embedded Next.js dashboard with a compiled Rust/WebAssembly SPA and Obsidian Open Canvas design system.',
-    bullets: [
-      '16 operational tabs shipped as external web/dist static assets served by aetherflow-api',
-      'Dedicated WASM workers for search, sorting, hashing, and chunked uploads',
-      'UTC-aligned telemetry charts across 6 history windows with server-side aggregation',
-    ],
-    tone: 'violet',
-  },
-  {
     badge: 'Zero-Go Cutover',
     title: '12-Crate Rust Control Plane & Native LibreSpeed',
     summary:
-      'Completed removal of all legacy Go backend code and overlays (0 .go files remain in the repository).',
+      'Memory-safe Rust binaries replace legacy Go and Redis daemons (0 .go files remain in the repository).',
     bullets: [
       'Native af-librespeed (bin/speedtest-backend) with SQLite WAL & BoltDB v2 migration',
       'Zero-CDN embedded OpenAPI 3.1 explorer and canonical root config/ layout',
@@ -671,7 +683,7 @@ export const whatsNewHighlights: ChangelogHighlight[] = [
     badge: 'Storage & Files',
     title: 'Native McBrowser & POSIX Quotas',
     summary:
-      'Built capability-scoped per-user file management directly into the control plane via af-files and af-api::mcbrowser.',
+      'Capability-scoped per-user file management built directly into the control plane via af-files and af-api::mcbrowser.',
     bullets: [
       'Linux openat2 confinement under 0700 per-user roots with traversal & symlink guards',
       '64 GiB resumable TUS uploads, ETag-guarded 10 MiB UTF-8 editor (45 syntax modes), 9 archive formats',
@@ -683,23 +695,11 @@ export const whatsNewHighlights: ChangelogHighlight[] = [
     badge: 'Security & Supply Chain',
     title: 'Zero-Sudo Runner, OIDC/PKCE & Sigstore v2',
     summary:
-      'Hardened every privilege boundary and upgraded release verification across the entire stack.',
+      'Hardened privilege boundaries and cryptographic release verification across every artifact.',
     bullets: [
       'Unprivileged aetherflow-api talking to root aetherflow-runner over /run/aetherflow/runner.sock',
       'Rekor v1 + v2 Sigstore/SLSA v1 verification, DynamicUser=yes plugin isolation, and bundled SQLite 3.54+',
       'OIDC provider with PKCE & device authorization flow plus DNS-rebinding SSRF pinning',
-    ],
-    tone: 'emerald',
-  },
-  {
-    badge: 'Media & Network',
-    title: 'Canonical Streaming, VPNs & Subdomain Ingress',
-    summary:
-      'Expanded observability, VPN orchestration, and Marketplace lifecycle reliability across all 77 packages.',
-    bullets: [
-      'Unified Jellyfin, Plex, and Emby (staged) playback archive with Plex/Tautulli import & CSV/JSON export',
-      'Native WireGuard wg0 peer/QR management, Tailscale routing, and <app>.<baseDomain> Certbot SAN sync',
-      'Certified Marketplace update receipts, 9 opt-in declarative Rust recipes, and durable rollback journals',
     ],
     tone: 'amber',
   },
@@ -730,7 +730,7 @@ export const footerColumns = [
     heading: 'Project & Security',
     links: [
       { label: 'GitHub Repository', href: REPO_URL },
-      { label: 'GitHub Releases (v4.0.0)', href: RELEASES_URL },
+      { label: 'GitHub Releases (v4.0.1)', href: RELEASES_URL },
       { label: 'Changelog', href: `${DOCS_BLOB_BASE}/CHANGELOG.md` },
       { label: 'Security Policy (SECURITY.md)', href: `${DOCS_BLOB_BASE}/SECURITY.md` },
       { label: 'Threat Model', href: `${DOCS_BLOB_BASE}/docs/threat_model.md` },

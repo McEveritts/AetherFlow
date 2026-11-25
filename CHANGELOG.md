@@ -1,3 +1,23 @@
+## Nightly Patch Notes — November 25, 2026 — v4.0.1 Flat Design System, Installer, Ingress & Peer Hardening
+
+- **Unified Flat Surface & Control System (`frontend-rs`):** Migrates the entire Leptos WebAssembly dashboard (all 16 tabs, shell chrome, editor, login, onboarding, OIDC consent, and public shares) from translucent glassmorphism to a deterministic 3-tier flat surface hierarchy backed by 1:1 dark/light `--af-*` semantic tokens, layered `@layer components` CSS, atomic control color/background transitions, WCAG 2.1 AA light/dark contrast parity, passive legacy `localStorage` tolerance for retired `atmosphere`/`card_lift` preferences across all 6 locales, and a permanent Rust CI drift gate (`af-web-ui/tests/design_contract.rs`) documented in `docs/design-system.md`.
+- **Overlays, WebKit Escape & App Launch Popups:** Keeps Command Palette, Notifications drawer, McBrowser previews, header popovers, and toasts opaque and steady on hover (`.af-modal`/`.af-drawer`/`.af-popover`/`.af-toast*`), restores `Escape` popover dismissal on WebKit/Safari, and fixes cross-realm `dyn_into` popup navigation casts in Services/Marketplace app launches.
+- **Apache2 Ingress & Post-Install TLS Sync:** Rewrites unmodified `ServerName _` placeholders in `default-ssl.conf` to the configured base domain and wildcard aliases so `aetherflow-ext-*.conf` vhosts cannot hijack the control plane, and automatically synchronizes app vhosts and TLS certificates after Marketplace package installs.
+- **Debian 13 Fresh-Install Smoothness & Hardening:** Aligns `vsftpd` with Debian 13/Ubuntu `vsftpd 3.0.5` TLS directives and UFW firewall setup, fixes interactive/unattended `OUTTO` setup logging, validates RFC-1123 hostnames and safe IPv4 discovery, drops Debian `dstat`/`pcp` bloat, guards optional Apache modules, and adds `tests/test_installer_smoothness_regressions.py`.
+- **Jellyfin & Peer Endpoint Reliability:** Retries transient Kestrel HTTP 503/socket startup handoff errors while seeding Jellyfin and restores missing conffiles via `--force-confmiss`; deprioritizes VPN, overlay, container, and hypervisor interfaces (`wg*`, `tailscale*`, `docker*`, `br-*`, `veth*`, `virbr*`, etc.) during Peer Clustering WireGuard endpoint detection.
+- **Docs, Release Pipeline & 1440p Showcase:** Refreshes README, docs index, GitHub Pages site (`apps/website/`), reproducible capture scripts (`scripts/docs/`), 42 dark/light 1440p screenshots, 33 annotated guide PNGs, and adds `cancel-in-progress` concurrency to `.github/workflows/release.yml`.
+
+---
+
+## Release v4.0.1 — November 25, 2026
+
+Promotes all post-`v4.0.0` UI, installer, ingress, Jellyfin, Peer Clustering, and documentation improvements to both `stable` (`master`) and `nightly` with zero breaking changes and seamless in-place upgrades.
+
+- **Full release notes:** [docs/releases/v4.0.1.md](./docs/releases/v4.0.1.md)
+- **Full compare:** https://github.com/McEveritts/AetherFlow/compare/v4.0.0...v4.0.1
+
+---
+
 ## Nightly Patch Notes — November 25, 2026 — Peer Clustering
 
 - The Cluster tab pairs independent Debian 13 (`trixie`) AetherFlow servers over a dedicated peer WireGuard mesh (`afpeer0`), showing link health, protocol compatibility, latency, delegated grants, and remote management controls.

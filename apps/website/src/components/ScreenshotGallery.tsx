@@ -175,7 +175,7 @@ function ViewFallbackPanel({
             : 'border-white/[0.08] text-slate-400'
         }`}
       >
-        <span>aetherflow-api v4.0.0 · external web/dist</span>
+        <span>aetherflow-api v4.0.1 · external web/dist</span>
         <span>
           screenshots/{theme}/{view.id}.png
         </span>
@@ -481,7 +481,7 @@ export function ScreenshotGallery({ screenshots }: ScreenshotGalleryProps) {
                 <img
                   key={activeKey}
                   src={activeSrc}
-                  alt={`AetherFlow v4.0.0 ${activeView.label} dashboard view (${theme} theme) — ${activeView.tagline}`}
+                  alt={`AetherFlow v4.0.1 ${activeView.label} dashboard view (${theme} theme) — ${activeView.tagline}`}
                   width={2560}
                   height={1440}
                   onError={() =>
@@ -592,7 +592,7 @@ export function ScreenshotGallery({ screenshots }: ScreenshotGalleryProps) {
             <img
               key={`lb-${activeKey}`}
               src={activeSrc}
-              alt={`AetherFlow v4.0.0 ${activeView.label} dashboard screenshot (${theme} theme) at full resolution`}
+              alt={`AetherFlow v4.0.1 ${activeView.label} dashboard screenshot (${theme} theme) at full resolution`}
               className={`max-h-[82vh] w-full object-contain ${
                 theme === 'light' ? 'bg-slate-100' : 'bg-[#07090e]'
               }`}

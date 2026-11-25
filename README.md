@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/banner.svg?v=4.0.0" alt="AetherFlow — Sovereign bare-metal control plane" width="100%">
+<img src="./docs/assets/banner.svg?v=4.0.1" alt="AetherFlow — Sovereign bare-metal control plane" width="100%">
 
 <br>
 
@@ -15,40 +15,55 @@
 [![OS](https://img.shields.io/badge/Debian_12%2F13_·_Ubuntu_22.04%2F24.04-A81D33?style=flat-square&logo=debian&logoColor=white)](./setup)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-10b981?style=flat-square)](./LICENSE.md)
 
-**[Install](#-quick-install)** · **[What's new](#-whats-new-in-v400)** · **[Features](#-features)** · **[Peer Clustering](#-peer-clustering)** · **[Architecture](#-architecture)** · **[Catalog](#-77-app-native-catalog)** · **[Docs](./docs/README.md)** · **[Changelog](./CHANGELOG.md)**
+**[Install](#-quick-install)** · **[What's new](#-whats-new-in-v401)** · **[Features](#-features)** · **[Peer Clustering](#-peer-clustering)** · **[Architecture](#-architecture)** · **[Catalog](#-77-app-native-catalog)** · **[Docs](./docs/README.md)** · **[Changelog](./CHANGELOG.md)**
 
 </div>
 
 ---
 
-**AetherFlow** turns a bare-metal Linux server into a self-hosted media and infrastructure appliance, with no containers. A memory-safe **Rust control plane** and a **Leptos WebAssembly dashboard** install, update, and supervise **77 native applications** directly through `systemd`. The same dashboard handles real-time hardware telemetry, a scoped file manager, streaming analytics, WireGuard and Tailscale networking, human-approved AI operations, and, new in v4.0.0, **peer clustering** across independent servers.
+**AetherFlow** turns a bare-metal Linux server into a self-hosted media and infrastructure appliance, with no containers. A memory-safe **Rust control plane** and a **Leptos WebAssembly dashboard** built on the **Unified Flat Surface & Control System** install, update, and supervise **77 native applications** directly through `systemd`. The same dashboard handles real-time hardware telemetry, a scoped file manager, streaming analytics, WireGuard and Tailscale networking, human-approved AI operations, and **peer clustering** across independent servers.
 
 <div align="center">
-  <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/overview.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/overview.png?v=4.0.0" alt="AetherFlow Overview dashboard showing live CPU, GPU, memory, network, and storage telemetry" width="100%"></picture>
-  <sub><i>Overview: live hardware telemetry, service health, and storage in one open-canvas view. Screenshots follow your GitHub theme (dark or light); 1440p, fixture data.</i></sub>
+  <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/overview.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/overview.png?v=4.0.1" alt="AetherFlow Overview dashboard showing live CPU, GPU, memory, network, and storage telemetry" width="100%"></picture>
+  <sub><i>Overview: live hardware telemetry, service health, and storage in the Unified Flat Surface &amp; Control System. Screenshots follow your GitHub theme (dark or light); 1440p, fixture data.</i></sub>
 </div>
 
 ---
 
-## ✨ What's new in v4.0.0
+## ✨ What's new in v4.0.1
 
-v4.0.0 is the largest release in AetherFlow's history. It promotes **373 commits** from `nightly` to the stable `master` track ([`v3.2.7...v4.0.0`](https://github.com/McEveritts/AetherFlow/compare/v3.2.7...v4.0.0)).
+v4.0.1 ships the **Unified Flat Surface & Control System** across the Leptos WebAssembly dashboard together with all post-`v4.0.0` reliability, installer, ingress, Jellyfin, and Peer Clustering fixes ([`v4.0.0...v4.0.1`](https://github.com/McEveritts/AetherFlow/compare/v4.0.0...v4.0.1)) across both **`stable` (`master`)** and **`nightly`**, with **zero breaking changes** from `v4.0.0`.
 
-<img src="./docs/assets/v4-by-the-numbers.svg?v=4.0.0" alt="AetherFlow v4.0.0 by the numbers" width="100%">
-
-| | Since v3.2.7 |
+| | Since v4.0.0 |
 | :--- | :--- |
-| 🦀 **All-Rust control plane** | The Go backend is gone. A **12-crate** Rust workspace (`backend-rs`) built on Axum and Tokio ships `aetherflow-api`, the privileged runner, the `af` admin CLI, the native LibreSpeed backend, and the new `af-transcode` worker. **Zero Go, zero Redis, zero Node.js** in the control plane. |
-| 🕸️ **WebAssembly dashboard** | The Next.js UI has been replaced by a **4-crate Leptos/WASM** application (`frontend-rs`) with dedicated Web Workers, 16 dashboard tabs, and a unified dark/light flat [Design System](./docs/design-system.md), served as external `web/dist` assets. |
-| ⬡ **Peer Clustering** | Pair independent AetherFlow servers over a dedicated WireGuard mesh, grant scoped remote access, manage a peer from your own dashboard, share media folders over NFSv4.2, and offload Jellyfin transcoding to a paired worker. |
-| 📂 **Native McBrowser** | Capability-scoped (`openat2`) per-user file manager with resumable 64 GiB uploads, conflict-aware editing, archives, previews, and public shares. |
-| 🔐 **Supply-chain & sandboxing** | Sigstore/SLSA v1 provenance verification for every release artifact, a zero-sudo privileged runner socket, hardened `systemd` sandboxes, OIDC provider with PKCE and device flow, and DNS-pinned SSRF guards. |
-| ♻️ **Atomic self-update** | Isolated transient `systemd` update units with WAL-safe snapshots, readiness checks, durable receipts, and automatic rollback on `stable` and `nightly` channels. |
+| 🎨 **Unified Flat Design System** | Retires translucent glassmorphism (`backdrop-filter`, chromatic rims, aurora gradients, grain noise, card hover lift) across all 16 tabs and standalone routes in favor of a deterministic 3-tier flat hierarchy (`--af-*` 1:1 dark/light tokens, atomic control transitions, WCAG 2.1 AA contrast parity, 6 locales) enforced by a permanent Rust CI drift gate ([Design System](./docs/design-system.md)). |
+| 🪟 **Opaque overlays & popup launches** | Keeps Command Palette, Notifications drawer, McBrowser previews, header popovers, and toasts solid and stationary on hover, restores WebKit/Safari `Escape` dismissal, and eliminates cross-realm `dyn_into` casts in Services/Marketplace app launch popups. |
+| 🌐 **Ingress & post-install TLS sync** | Rewrites unmodified `ServerName _` placeholders in `default-ssl.conf` to the configured base domain so `aetherflow-ext-*.conf` vhosts cannot hijack the control plane, and automatically synchronizes app vhosts and TLS certificates after Marketplace package installs. |
+| 🛠️ **Debian 13 fresh-install hardening** | Aligns `vsftpd` with Debian 13/Ubuntu `3.0.5` TLS directives and UFW setup, restores interactive/unattended `OUTTO` setup logging, validates RFC-1123 hostnames and safe IPv4 discovery, drops Debian `dstat`/`pcp` bloat, guards optional Apache modules, and adds 1,014 lines of installer regression tests. |
+| 🎬 **Jellyfin & Peer Clustering fixes** | Retries transient Kestrel HTTP 503/socket handoff errors during Jellyfin seeding and restores missing conffiles (`--force-confmiss`); deprioritizes VPN, overlay, container, and hypervisor interfaces (`wg*`, `tailscale*`, `docker*`, `br-*`, `veth*`, `virbr*`, etc.) during Peer Clustering WireGuard endpoint detection. |
+| 📸 **Refreshed docs & 1440p showcase** | Updates README, docs index, GitHub Pages site, reproducible capture scripts (`scripts/docs/`), 42 dark/light 1440p screenshots (21 views), 33 regenerated annotated operator guides, and release workflow `cancel-in-progress` concurrency. |
 
-Full notes: **[v4.0.0 release notes](./docs/releases/v4.0.0.md)** · **[CHANGELOG](./CHANGELOG.md)** · **[Upgrading from v3.2.x](./docs/upgrading.md)**
+Full notes: **[v4.0.1 release notes](./docs/releases/v4.0.1.md)** · **[CHANGELOG](./CHANGELOG.md)** · **[v4.0.0 release notes](./docs/releases/v4.0.0.md)** · **[Upgrading & Rollbacks](./docs/upgrading.md)**
+
+<details>
+<summary><b>Previously in v4.0.0 — Pure-Rust Zero-Go cutover, Leptos WASM & Peer Clustering (373 commits since v3.2.7)</b></summary>
+<br>
+
+<img src="./docs/assets/v4-by-the-numbers.svg?v=4.0.1" alt="AetherFlow v4.0.0 by the numbers" width="100%">
+
+| | Shipped in v4.0.0 (`v3.2.7...v4.0.0`) |
+| :--- | :--- |
+| 🦀 **All-Rust control plane** | Replaced the Go backend and Redis with a **12-crate** Rust workspace (`backend-rs`: `aetherflow-api`, privileged runner, `af` CLI, native Rust LibreSpeed, and `af-transcode`). **Zero Go, zero Redis, zero Node.js** in the control plane. |
+| 🕸️ **WebAssembly dashboard** | Replaced the Next.js UI with a **4-crate Leptos/WASM** application (`frontend-rs`) with dedicated Web Workers and 16 dashboard tabs served as external `web/dist` assets. |
+| ⬡ **Peer Clustering** | Pair independent Debian 13 AetherFlow servers over `afpeer0` WireGuard with 8 scoped grant areas, remote dashboard management, NFSv4.2 media folder sharing, and Jellyfin 12.4 transcode offload. |
+| 📂 **Native McBrowser** | Capability-scoped (`openat2`) per-user file manager with resumable 64 GiB TUS uploads, conflict-aware UTF-8 editing, 9 archive formats, previews, and password-protected public shares. |
+| 🔐 **Supply-chain & sandboxing** | Sigstore/SLSA v1 provenance verification, zero-sudo `/run/aetherflow/runner.sock`, hardened `systemd` sandboxes, OIDC/PKCE + device flow, and DNS-pinned SSRF guards. |
+| ♻️ **Atomic self-update** | Isolated transient `systemd` update units with WAL-safe snapshots, readiness checks, durable receipts, and automatic rollback on `stable` and `nightly`. |
+
+</details>
 
 > [!IMPORTANT]
-> **Upgrading a v3.2.x node?** Database Migration 26 removes the legacy master/worker cluster (`CLUSTER_*` settings and `/api/v1/admin/cluster/*` routes). Take a WAL-safe backup first with `sudo af backup create`, then re-pair servers from the **Cluster** tab after the upgrade. See [Upgrading & Rollbacks](./docs/upgrading.md).
+> **Upgrading a v3.2.x node?** Database Migration 26 removes the legacy master/worker cluster (`CLUSTER_*` settings and `/api/v1/admin/cluster/*` routes). Take a WAL-safe backup first with `sudo af backup create`, then re-pair servers from the **Cluster** tab after the upgrade. Upgrading from `v4.0.0` to `v4.0.1` has **no breaking changes**. See [Upgrading & Rollbacks](./docs/upgrading.md).
 
 ---
 
@@ -131,35 +146,41 @@ Manifest-discovered plugins run in isolated `DynamicUser=yes` transient units wi
 
 | **Marketplace** | **Cluster** |
 | :---: | :---: |
-| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/marketplace.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/marketplace.png?v=4.0.0" alt="AetherMarketplace catalog of 77 native applications"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/cluster.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/cluster.png?v=4.0.0" alt="Cluster tab showing paired peers, link health, and grants"></picture> |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/marketplace.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/marketplace.png?v=4.0.1" alt="AetherMarketplace catalog of 77 native applications"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/cluster.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/cluster.png?v=4.0.1" alt="Cluster tab showing paired peers, link health, and grants"></picture> |
 | 77 native apps in 9 categories with live install progress and certified updates. | Paired servers, link health, protocol compatibility, RTT, grants, and transcode workers. |
 | **Streaming** | **McBrowser** |
-| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/streaming.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/streaming.png?v=4.0.0" alt="Streaming analytics with live sessions and playback history"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/mcbrowser.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/mcbrowser.png?v=4.0.0" alt="McBrowser scoped file manager"></picture> |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/streaming.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/streaming.png?v=4.0.1" alt="Streaming analytics with live sessions and playback history"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/mcbrowser.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/mcbrowser.png?v=4.0.1" alt="McBrowser scoped file manager"></picture> |
 | Live sessions, playback history, filters, and distribution charts. | Scoped per-user files, previews, uploads, editing, and shares. |
 | **FlowAI** | **Network** |
-| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/flowai.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/flowai.png?v=4.0.0" alt="FlowAI assistant grounded in live telemetry"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/network.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/network.png?v=4.0.0" alt="Network tab with WireGuard, Tailscale, and ingress"></picture> |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/flowai.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/flowai.png?v=4.0.1" alt="FlowAI assistant grounded in live telemetry"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/network.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/network.png?v=4.0.1" alt="Network tab with WireGuard, Tailscale, and ingress"></picture> |
 | Multi-provider diagnostics with the human-approval gate. | WireGuard, Tailscale, interfaces, and external access. |
 
 <details>
-<summary><b>All 16 tabs: Approval Inbox, Services, File Share, MediaFlow, Users, Audit Trail, Settings, Security, Notifications, Quotas</b></summary>
+<summary><b>All 21 1440p views: Approval Inbox, Services, File Share, MediaFlow, Users, Audit Trail, Settings, Security, Notifications, Quotas, Sign-In, Command Palette, Code Editor &amp; Transcoding</b></summary>
 <br>
 
 | **Approval Inbox** | **Services** |
 | :---: | :---: |
-| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/inbox.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/inbox.png?v=4.0.0" alt="Approval Inbox tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/services.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/services.png?v=4.0.0" alt="Services tab"></picture> |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/inbox.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/inbox.png?v=4.0.1" alt="Approval Inbox tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/services.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/services.png?v=4.0.1" alt="Services tab"></picture> |
 | Pending FlowAI and self-heal actions awaiting an administrator decision. | `systemd` status, logs, restart receipts, and update checks. |
 | **File Share** | **MediaFlow** |
-| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/fileshare.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/fileshare.png?v=4.0.0" alt="File Share tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/mediaflow.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/mediaflow.png?v=4.0.0" alt="MediaFlow tab"></picture> |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/fileshare.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/fileshare.png?v=4.0.1" alt="File Share tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/mediaflow.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/mediaflow.png?v=4.0.1" alt="MediaFlow tab"></picture> |
 | Managed share links, uploads, expiry, and download tracking. | Automated media scan and approval queue. |
 | **Users** | **Audit Trail** |
-| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/users.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/users.png?v=4.0.0" alt="Users tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/audit.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/audit.png?v=4.0.0" alt="Audit Trail tab"></picture> |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/users.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/users.png?v=4.0.1" alt="Users tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/audit.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/audit.png?v=4.0.1" alt="Audit Trail tab"></picture> |
 | Accounts, roles, quotas, and streaming user links. | Immutable operator, FlowAI, cluster, and auth events with export. |
 | **Settings** | **Security & 2FA** |
-| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/settings.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/settings.png?v=4.0.0" alt="Settings tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/security.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/security.png?v=4.0.0" alt="Security & 2FA tab"></picture> |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/settings.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/settings.png?v=4.0.1" alt="Settings tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/security.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/security.png?v=4.0.1" alt="Security & 2FA tab"></picture> |
 | Localization, base domain, interface preferences, and AI configuration. | TOTP, password, storage quota, and session-family revocation. |
 | **Notifications** | **Quotas** |
-| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/notifications.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/notifications.png?v=4.0.0" alt="Notifications tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/quotas.png?v=4.0.0"><img src="./docs/assets/screenshots/dark/quotas.png?v=4.0.0" alt="Quotas tab"></picture> |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/notifications.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/notifications.png?v=4.0.1" alt="Notifications tab"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/quotas.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/quotas.png?v=4.0.1" alt="Quotas tab"></picture> |
 | Inbox, rules, and delivery channels. | Per-user storage quotas backed by Linux `setquota`. |
+| **Sign-In** | **Command Palette (`Ctrl+K`)** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/login.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/login.png?v=4.0.1" alt="Flat Sign-In route"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/command-palette.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/command-palette.png?v=4.0.1" alt="Opaque Tier 3 Command Palette modal"></picture> |
+| Flat authentication shell with unboxed luminous emblem and crisp contrast. | Opaque Tier 3 keyboard command launcher steady on hover. |
+| **McBrowser Code Editor** | **Distributed Transcoding** |
+| <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/mcbrowser-editor.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/mcbrowser-editor.png?v=4.0.1" alt="McBrowser native Rust syntax-highlighted editor"></picture> | <picture><source media="(prefers-color-scheme: light)" srcset="./docs/assets/screenshots/light/cluster-transcode.png?v=4.0.1"><img src="./docs/assets/screenshots/dark/cluster-transcode.png?v=4.0.1" alt="Cluster distributed Jellyfin transcoding workers and recent jobs"></picture> |
+| Native Rust/Leptos 45-mode syntax-highlighted editor with cross-polarity contrast. | Paired Jellyfin 12.4 GPU transcode workers, hardware encoders, and job history. |
 
 </details>
 
@@ -169,7 +190,7 @@ Manifest-discovered plugins run in isolated `DynamicUser=yes` transient units wi
 
 Peer clustering links **independent** AetherFlow servers. There is no master node: each server stays sovereign and grants its peers exactly the access it chooses.
 
-<img src="./docs/assets/peer-clustering.svg?v=4.0.0" alt="Peer clustering topology: servers paired over the afpeer0 WireGuard mesh with grants, NFS storage federation, and Jellyfin transcode offload" width="100%">
+<img src="./docs/assets/peer-clustering.svg?v=4.0.1" alt="Peer clustering topology: servers paired over the afpeer0 WireGuard mesh with grants, NFS storage federation, and Jellyfin transcode offload" width="100%">
 
 - **Verified pairing.** A single-use pairing string plus matching six-digit codes on both dashboards establishes a dedicated `afpeer0` WireGuard tunnel. Pairing requests are DNS-pinned and SSRF-guarded.
 - **Zero access by default.** Grant `None`, `Read-only`, or `Read and write` per area (`services`, `marketplace`, `settings`, `files`, `users`, `network`, `updates`, `transcoding`). Revoking a grant cancels active peer streams within a second.
@@ -184,7 +205,7 @@ Requirements: Debian 13 on both servers, direct reachability between WireGuard e
 
 ## 🏗️ Architecture
 
-<img src="./docs/assets/architecture.svg?v=4.0.0" alt="AetherFlow architecture: Leptos WASM SPA, Apache2 ingress, unprivileged aetherflow-api, runner socket, privileged aetherflow-runner, systemd and native apps, peer mesh" width="100%">
+<img src="./docs/assets/architecture.svg?v=4.0.1" alt="AetherFlow architecture: Leptos WASM SPA, Apache2 ingress, unprivileged aetherflow-api, runner socket, privileged aetherflow-runner, systemd and native apps, peer mesh" width="100%">
 
 The unprivileged API never touches root directly. Every privileged action, including package installs, `systemctl` transitions, WireGuard and Tailscale changes, quotas, plugin units, and self-updates, goes through a strict allowlist on `/run/aetherflow/runner.sock` and is executed by `aetherflow-runner.service`.
 
@@ -326,8 +347,8 @@ Browser suites (Playwright against the real WASM bundle) are covered in [e2e/tes
 
 | Channel | Branch | Cadence |
 | :--- | :--- | :--- |
-| **`stable`** | `master` | Promoted releases (`vX.Y.Z`), currently **v4.0.0** |
-| **`nightly`** | `nightly` | Continuous prereleases (`v4.0.0-nightly.<run>.<attempt>`) with patch notes in [CHANGELOG.md](./CHANGELOG.md) |
+| **`stable`** | `master` | Promoted releases (`vX.Y.Z`), currently **v4.0.1** |
+| **`nightly`** | `nightly` | Continuous prereleases (`v4.0.1-nightly.<run>.<attempt>`) with patch notes in [CHANGELOG.md](./CHANGELOG.md) |
 
 Every release artifact ships with `SHA256SUMS` and Sigstore bundles, and the updater verifies both before it switches binaries.
 
