@@ -361,13 +361,16 @@ _depends
 
     def test_local_workspace_dependencies_are_explicitly_versioned(self):
         workspace_manifest = (ROOT / "backend-rs/Cargo.toml").read_text(encoding="utf-8")
+        repo_version = (ROOT / ".version").read_text(encoding="utf-8").strip().lstrip("v")
+        self.assertRegex(repo_version, r"^\d+\.\d+\.\d+$")
+        self.assertIn(f'version = "{repo_version}"', workspace_manifest)
         local_dependencies = [
             line for line in workspace_manifest.splitlines()
             if re.match(r"^af-[a-z]+ = \{ path =", line)
         ]
         self.assertGreaterEqual(len(local_dependencies), 8)
         for dependency in local_dependencies:
-            self.assertIn('version = "=4.0.0"', dependency)
+            self.assertIn(f'version = "={repo_version}"', dependency)
 
     def test_build_gold_and_source_builders_require_cargo_lock_by_default(self):
         gold = (ROOT / "scripts/build_gold.sh").read_text(encoding="utf-8")

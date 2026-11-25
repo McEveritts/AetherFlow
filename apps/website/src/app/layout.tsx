@@ -2,9 +2,9 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { BASE_PATH, SITE_ORIGIN, withMediaPath } from '@/lib/basePath';
 
-const title = 'AetherFlow v4.0.0 — Sovereign Bare-Metal Linux Control Plane in Rust';
+const title = 'AetherFlow v4.0.1 — Sovereign Bare-Metal Linux Control Plane in Rust';
 const description =
-  'AetherFlow v4.0.0 pairs a 12-crate Rust control plane (Axum + Tokio) with a 4-crate Leptos WebAssembly dashboard. Orchestrate 77 native systemd apps, Peer Clustering over afpeer0 WireGuard, Native McBrowser, canonical streaming analytics, and human-gated FlowAI.';
+  'AetherFlow v4.0.1 pairs a 12-crate Rust control plane (Axum + Tokio) with a 4-crate Leptos WebAssembly dashboard built on the Unified Flat Surface & Control System. Orchestrate 77 native systemd apps, Peer Clustering over afpeer0 WireGuard, Native McBrowser, canonical streaming analytics, and human-gated FlowAI.';
 
 const canonicalPath = BASE_PATH ? `${BASE_PATH}/` : '/';
 const socialImage = withMediaPath('social-preview.png');
@@ -41,7 +41,7 @@ export const metadata: Metadata = {
         url: socialImage,
         width: 1200,
         height: 630,
-        alt: 'AetherFlow v4.0.0 — 12-Crate Rust Control Plane, Leptos WASM Dashboard, Peer Clustering & 77-App Bare-Metal Catalog',
+        alt: 'AetherFlow v4.0.1 — 12-Crate Rust Control Plane, Leptos WASM Dashboard, Peer Clustering & 77-App Bare-Metal Catalog',
       },
     ],
   },

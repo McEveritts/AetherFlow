@@ -34,7 +34,7 @@ export function Navbar() {
             AetherFlow
           </span>
           <span className="inline-flex rounded-full border border-indigo-400/35 bg-indigo-500/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-indigo-200">
-            v4.0.0
+            v4.0.1
           </span>
         </a>
 
@@ -119,7 +119,7 @@ export function Navbar() {
               rel="noopener noreferrer"
               className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 px-4 py-2.5 text-sm font-semibold text-white"
             >
-              <span>v4.0.0 Releases</span>
+              <span>v4.0.1 Releases</span>
               <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
             </a>
           </div>

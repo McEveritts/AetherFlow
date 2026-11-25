@@ -26,16 +26,16 @@ export function WhatsNewSection() {
         <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
           <div className="max-w-3xl">
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-amber-300">
-              Release Highlights · v3.2.7 → v4.0.0
+              Release Highlights · v4.0.1
             </p>
             <h2
               id="whats-new-heading"
               className="mt-2 text-3xl font-bold tracking-tight text-white sm:text-4xl lg:text-[2.6rem]"
             >
-              374 commits of ground-up Rust evolution
+              Unified Flat Design System &amp; v4.0.1 hardening
             </h2>
             <p className="mt-3 text-base leading-relaxed text-slate-300">
-              From the final Zero-Go cutover and Leptos WebAssembly dashboard rewrite to decentralized Peer Clustering over <code className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs text-cyan-200">afpeer0</code>.
+              Builds on v4.0.0&apos;s pure-Rust control plane and Peer Clustering over <code className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs text-cyan-200">afpeer0</code> with a crisp 3-tier flat WASM UI, Debian 13 installer smoothness, Apache2 ingress/TLS sync, Jellyfin retries, and smarter peer endpoint detection.
             </p>
           </div>
 
@@ -50,13 +50,13 @@ export function WhatsNewSection() {
               <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
             </a>
             <a
-              href={`${REPO_URL}/compare/v3.2.7...v4.0.0`}
+              href={`${REPO_URL}/compare/v4.0.0...v4.0.1`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-400/35 bg-indigo-500/12 px-4 py-2 text-sm font-medium text-indigo-100 transition-colors hover:bg-indigo-500/20"
             >
               <GitCompare className="h-4 w-4" aria-hidden="true" />
-              <span>v3.2.7...v4.0.0 diff</span>
+              <span>v4.0.0...v4.0.1 diff</span>
             </a>
           </div>
         </div>

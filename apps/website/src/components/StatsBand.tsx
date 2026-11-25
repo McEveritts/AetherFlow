@@ -28,7 +28,7 @@ export function StatsBand() {
         <div className="mb-8 flex flex-col justify-between gap-2 sm:flex-row sm:items-end">
           <div>
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
-              v4.0.0 by the Numbers
+              v4.0.1 by the Numbers
             </p>
             <h2
               id="stats-heading"
