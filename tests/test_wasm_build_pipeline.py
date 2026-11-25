@@ -581,9 +581,10 @@ cargo() {
 
     def test_security_runs_frontend_workspace_unit_tests_from_backend_directory(self):
         security = (ROOT / ".github/workflows/security.yml").read_text()
-        job = security.split("  rust-security:\n", 1)[1].split("\n  security-checks:\n", 1)[0]
-        self.assertIn("working-directory: backend-rs", job)
-        self.assertIn("cargo test --manifest-path ../frontend-rs/Cargo.toml --workspace --locked", job)
+        job = security.split("  frontend-rs-security:\n", 1)[1].split("\n  npm-security:\n", 1)[0]
+        self.assertIn("cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked", job)
+        self.assertIn("cargo deny --manifest-path frontend-rs/Cargo.toml --locked", job)
+        self.assertIn("cargo audit --file frontend-rs/Cargo.lock", job)
 
     def test_ensure_has_unprivileged_cache_fallback_and_pinned_rustup(self):
         installer = (ROOT / "scripts/install_wasm_build_tools.sh").read_text()

@@ -30,8 +30,10 @@ class RustCacheWorkflowTests(unittest.TestCase):
     def test_rust_jobs_cache_downloads_without_compiled_artifacts(self):
         jobs = {
             "ci.yml": {
-                "backend-rs": '          workspaces: "backend-rs -> target"\n',
+                "frontend-rs-checks": '          workspaces: "frontend-rs -> target"\n',
                 "frontend-rs": '          workspaces: "frontend-rs -> target"\n',
+                "backend-rs-checks": '          workspaces: "backend-rs -> target"\n',
+                "backend-rs": '          workspaces: "backend-rs -> target"\n',
             },
             "release.yml": {
                 "security-frontend": '          workspaces: "frontend-rs -> target"\n',
@@ -42,11 +44,8 @@ class RustCacheWorkflowTests(unittest.TestCase):
                 "package-armv7-speedtest": '          workspaces: "backend-rs -> target"\n',
             },
             "security.yml": {
-                "rust-security": (
-                    "          workspaces: |\n"
-                    "            backend-rs -> target\n"
-                    "            frontend-rs -> target\n"
-                ),
+                "rust-security": '          workspaces: "backend-rs -> target"\n',
+                "frontend-rs-security": '          workspaces: "frontend-rs -> target"\n',
             },
         }
         for filename, job_workspaces in jobs.items():
@@ -517,8 +516,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_security_checks_frontend_wasm_supply_chain(self):
         workflow = (WORKFLOW.parent / "security.yml").read_text()
         self.assertIn("targets: wasm32-unknown-unknown", workflow)
-        self.assertIn("cargo deny --manifest-path ../frontend-rs/Cargo.toml --locked check advisories bans licenses sources", workflow)
-        self.assertIn("cargo audit --file ../frontend-rs/Cargo.lock", workflow)
+        self.assertIn("cargo deny --manifest-path frontend-rs/Cargo.toml --locked check advisories bans licenses sources", workflow)
+        self.assertIn("cargo audit --file frontend-rs/Cargo.lock", workflow)
 
     def test_legacy_capitalized_branch_is_nightly(self):
         identity = self.resolve(GITHUB_REF="refs/heads/Nightly", GITHUB_REF_NAME="Nightly")

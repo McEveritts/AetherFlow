@@ -15,12 +15,12 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         self.assertIn("serviceWorkers: 'block'", config)
         for browser in ("chromium", "firefox", "webkit"):
             self.assertIn(f"name: '{browser}'", config)
-        ci_workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("playwright install --with-deps chromium firefox webkit", ci_workflow)
-        release_workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        self.assertIn("browser: [chromium, firefox, webkit]", release_workflow)
-        self.assertIn('npx playwright install --with-deps "${PLAYWRIGHT_BROWSER}"', release_workflow)
-        self.assertIn("--project=${{ matrix.browser }} [.]live[.]spec[.]ts$", release_workflow)
+        for filename in ("ci.yml", "release.yml"):
+            workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            with self.subTest(workflow=filename):
+                self.assertIn("browser: [chromium, firefox, webkit]", workflow)
+                self.assertIn('npx playwright install --with-deps "${PLAYWRIGHT_BROWSER}"', workflow)
+                self.assertIn("--project=${{ matrix.browser }} [.]live[.]spec[.]ts$", workflow)
         live = (ROOT / "e2e/tests/e2e/embedded.live.spec.ts").read_text(encoding="utf-8")
         self.assertIn("test.use({ serviceWorkers: 'allow' })", live)
         self.assertIn("Real service-worker cache boundaries", live)
@@ -67,7 +67,7 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertNotIn("\n  frontend:\n", ci)
         self.assertNotIn("working-directory: frontend", ci)
-        wasm = ci.split("  frontend-rs:\n", 1)[1].split("\n  backend-rs:\n", 1)[0]
+        wasm = ci.split("  frontend-rs:\n", 1)[1].split("\n  backend-rs-checks:\n", 1)[0]
         backend = ci.split("  backend-rs:\n", 1)[1].split("\n  embedded-e2e:\n", 1)[0]
         self.assertIn("scripts/install_wasm_build_tools.sh", wasm)
         self.assertIn("scripts/build_wasm_frontend.sh --stage", wasm)
@@ -136,10 +136,10 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         self.assertIn("git ls-files '*.go' '*go.mod' '*go.sum'", sec_text)
         self.assertIn("cargo deny --locked check advisories bans licenses sources", sec_text)
         self.assertIn("cargo audit --file Cargo.lock", sec_text)
-        self.assertIn("cargo fmt --manifest-path ../frontend-rs/Cargo.toml --all -- --check", sec_text)
-        self.assertIn("cargo clippy --manifest-path ../frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings", sec_text)
-        self.assertIn("cargo clippy --manifest-path ../frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked -- -D warnings", sec_text)
-        self.assertIn("python3 ../scripts/finalize_wasm_assets.py --self-test", sec_text)
+        self.assertIn("cargo fmt --manifest-path frontend-rs/Cargo.toml --all -- --check", sec_text)
+        self.assertIn("cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings", sec_text)
+        self.assertIn("cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked -- -D warnings", sec_text)
+        self.assertIn("python3 scripts/finalize_wasm_assets.py --self-test", sec_text)
         self.assertIn("-p af-librespeed", sec_text)
         self.assertIn("npm audit --workspaces --include-workspace-root --omit=dev --audit-level=high", sec_text)
         for forbidden in (

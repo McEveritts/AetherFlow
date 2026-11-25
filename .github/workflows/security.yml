@@ -68,14 +68,11 @@ jobs:
         with:
           toolchain: "1.99.1"
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown
 
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: |
-            backend-rs -> target
-            frontend-rs -> target
+          workspaces: "backend-rs -> target"
           cache-targets: "false"
 
       - name: Verify Zero-Go Repository Hygiene
@@ -122,18 +119,6 @@ jobs:
           cargo clippy --manifest-path "$TMP_SDK/sec-verify-plugin/backend/Cargo.toml" --all-targets --locked -- -D warnings
           cargo test --manifest-path "$TMP_SDK/sec-verify-plugin/backend/Cargo.toml" --locked
 
-      - name: Verify Rust WASM Frontend Security
-        run: |
-          cargo fmt --manifest-path ../frontend-rs/Cargo.toml --all -- --check
-          cargo clippy --manifest-path ../frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings
-          cargo clippy --manifest-path ../frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked -- -D warnings
-          cargo deny --manifest-path ../frontend-rs/Cargo.toml --locked check advisories bans licenses sources
-          cargo audit --file ../frontend-rs/Cargo.lock
-          python3 ../scripts/finalize_wasm_assets.py --self-test
-
-      - name: Rust WASM Frontend Workspace Unit Tests
-        run: cargo test --manifest-path ../frontend-rs/Cargo.toml --workspace --locked
-
       - name: Rust Security Unit & Contract Tests
         env:
           JWT_SECRET: ci-test-secret-exactly-32bytes!!
@@ -143,6 +128,44 @@ jobs:
           TMPDIR: /tmp
         run: |
           cargo test --workspace --locked -- --test-threads=1
+
+  frontend-rs-security:
+    name: Rust WASM Frontend SAST & Advisory Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
+        with:
+          toolchain: "1.99.1"
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "frontend-rs -> target"
+          cache-targets: "false"
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-audit@0.22.2, cargo-deny@0.20.2
+
+      - name: Verify Rust WASM Frontend Security
+        run: |
+          cargo fmt --manifest-path frontend-rs/Cargo.toml --all -- --check
+          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings
+          cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --target wasm32-unknown-unknown --locked -- -D warnings
+          cargo deny --manifest-path frontend-rs/Cargo.toml --locked check advisories bans licenses sources
+          cargo audit --file frontend-rs/Cargo.lock
+          python3 scripts/finalize_wasm_assets.py --self-test
+
+      - name: Rust WASM Frontend Workspace Unit Tests
+        run: cargo test --manifest-path frontend-rs/Cargo.toml --workspace --locked
 
   npm-security:
     name: Monorepo NPM Production Dependency Audit

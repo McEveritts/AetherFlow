@@ -40,8 +40,12 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_modern_stack_env.py' -v
 
   node-installers:
-    name: Node Application Installer Regression Tests
+    name: Node Application Installer Regression Tests (Shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -60,10 +64,15 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends python3-yaml python3-tomlkit apache2-bin jq sqlite3 bc
 
       - name: Test Dependency Preparation and Marketplace Lifecycle
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          TEST_SHARD: ${{ matrix.shard }}
         run: |
-          bash -n packages/common.sh packages/lib/*.sh
-          PATH="$PATH:/usr/sbin" /usr/bin/python3 tests/run_parallel_tests.py
-          python3 tests/check_shell_hygiene.py
+          if [[ "${TEST_SHARD}" == "1" ]]; then
+            bash -n packages/common.sh packages/lib/*.sh
+            python3 tests/check_shell_hygiene.py
+          fi
+          PATH="$PATH:/usr/sbin" /usr/bin/python3 tests/run_parallel_tests.py --shard "${TEST_SHARD}/4"
 
   palate-installer:
     name: Palate Installer Regression Tests
@@ -146,8 +155,8 @@ jobs:
           npm --prefix apps/website run lint
           npm --prefix apps/website run build
 
-  frontend-rs:
-    name: Frontend (Rust WASM & Tests)
+  frontend-rs-checks:
+    name: Frontend (Rust WASM Lint, Tests & Advisories)
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -173,17 +182,7 @@ jobs:
         with:
           tool: cargo-audit@0.22.2, cargo-deny@0.20.2
 
-      - name: Install Pinned WASM Build Tools (SHA-256 Verified)
-        working-directory: .
-        run: |
-          set -euo pipefail
-          tool_dir="${RUNNER_TEMP}/wasm-tools"
-          WASM_TOOL_DIR="${tool_dir}" bash scripts/install_wasm_build_tools.sh
-          echo "${tool_dir}/bin" >> "${GITHUB_PATH}"
-          echo "WASM_TOOL_DIR=${tool_dir}" >> "${GITHUB_ENV}"
-
       - name: Verify Rust WASM Frontend
-        working-directory: .
         run: |
           cargo fmt --manifest-path frontend-rs/Cargo.toml --all -- --check
           cargo clippy --manifest-path frontend-rs/Cargo.toml --workspace --all-targets --locked -- -D warnings
@@ -192,6 +191,38 @@ jobs:
           cargo deny --manifest-path frontend-rs/Cargo.toml --locked check advisories bans licenses sources
           cargo audit --file frontend-rs/Cargo.lock
           python3 scripts/finalize_wasm_assets.py --self-test
+
+  frontend-rs:
+    name: Frontend (Rust WASM Build)
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust WASM Toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
+        with:
+          toolchain: "1.99.1"
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust Frontend Dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "frontend-rs -> target"
+          cache-targets: "false"
+
+      - name: Install Pinned WASM Build Tools (SHA-256 Verified)
+        working-directory: .
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/wasm-tools"
+          WASM_TOOL_DIR="${tool_dir}" bash scripts/install_wasm_build_tools.sh
+          echo "${tool_dir}/bin" >> "${GITHUB_PATH}"
+          echo "WASM_TOOL_DIR=${tool_dir}" >> "${GITHUB_ENV}"
 
       - name: Build Rust WASM Frontend
         run: bash scripts/build_wasm_frontend.sh --stage
@@ -203,8 +234,8 @@ jobs:
           path: web/dist
           if-no-files-found: error
 
-  backend-rs:
-    name: Backend, CLI & LibreSpeed (Rust)
+  backend-rs-checks:
+    name: Backend, CLI & Plugin SDK (Rust Lint & Tests)
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -215,10 +246,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust Build and Zero-Go Test Dependencies
+      - name: Install Rust Build Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mold clang pkg-config libssl-dev python3-yaml
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends mold clang pkg-config libssl-dev
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
@@ -237,22 +268,11 @@ jobs:
         run: |
           test -z "$(git ls-files '*.go' '*go.mod' '*go.sum')"
 
-      - name: Verify Workspace Lockfile & Run Unit Tests (Rust Workspace)
-        env:
-          JWT_SECRET: ci-test-secret-exactly-32bytes!!
-          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
-          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
-          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
-          TMPDIR: /tmp
-        run: |
-          test -f Cargo.lock
-          cargo test --workspace --locked -- --test-threads=1
+      - name: Enforce Rust Formatting Gate
+        run: cargo fmt --all -- --check
 
       - name: Enforce Workspace Clippy Lints
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Enforce Rust Formatting Gate
-        run: cargo fmt --all -- --check
 
       - name: Verify Pure-Rust Plugin SDK & Generated Scaffold
         working-directory: .
@@ -267,8 +287,55 @@ jobs:
           cargo clippy --manifest-path "$TMP_SDK/ci-verify-plugin/backend/Cargo.toml" --all-targets --locked -- -D warnings
           cargo test --manifest-path "$TMP_SDK/ci-verify-plugin/backend/Cargo.toml" --locked
 
+      - name: Verify Workspace Lockfile & Run Unit Tests (Rust Workspace)
+        env:
+          JWT_SECRET: ci-test-secret-exactly-32bytes!!
+          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
+          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
+          TMPDIR: /tmp
+        run: |
+          test -f Cargo.lock
+          cargo test --workspace --locked -- --test-threads=1
+
+  backend-rs:
+    name: Backend, CLI & LibreSpeed (Rust Build)
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_INCREMENTAL: "0"
+    defaults:
+      run:
+        working-directory: backend-rs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust Build and Zero-Go Test Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends mold clang pkg-config libssl-dev python3-yaml
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # compiler version pinned below
+        with:
+          toolchain: "1.99.1"
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "backend-rs -> target"
+          cache-targets: "false"
+
+      - name: Verify Zero-Go Repository Hygiene
+        working-directory: .
+        run: |
+          test -z "$(git ls-files '*.go' '*go.mod' '*go.sum')"
+
       - name: Build Rust API, CLI & LibreSpeed
         run: |
+          test -f Cargo.lock
           cargo build --release --locked --bin aetherflow-api --bin af --bin speedtest-backend
 
       - name: Verify Zero-Go Cutover & Real af CLI Confinement Gates
@@ -289,9 +356,13 @@ jobs:
           if-no-files-found: error
 
   embedded-e2e:
-    name: Rust API & External Frontend Full-Stack E2E
+    name: Rust API & External Frontend Full-Stack E2E (${{ matrix.browser }})
     runs-on: ubuntu-22.04
     needs: [backend-rs, frontend-rs]
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -322,10 +393,12 @@ jobs:
           chmod +x backend-rs/target/release/{aetherflow-api,af,speedtest-backend}
 
       - name: Install Playwright Browser Engines
+        env:
+          PLAYWRIGHT_BROWSER: ${{ matrix.browser }}
         run: |
           npm ci
           cd e2e
-          npx playwright install --with-deps chromium firefox webkit
+          npx playwright install --with-deps "${PLAYWRIGHT_BROWSER}"
 
       - name: Typecheck Playwright E2E Suite
         run: |
@@ -335,12 +408,14 @@ jobs:
       - name: Execute External Frontend Full-Stack & Playwright E2E
         env:
           CI: "true"
+          E2E_PLAYWRIGHT_SPECS: --project=${{ matrix.browser }} [.]live[.]spec[.]ts$
         run: |
           bash scripts/run_embedded_e2e.sh --binary "${PWD}/backend-rs/target/release/aetherflow-api" --static-dir "${PWD}/backend-rs/target/release/web/dist" --port 18080 --playwright
 
       - name: Execute All Playwright Contract Specs Against Isolated API
         env:
           CI: "true"
+          PLAYWRIGHT_BROWSER: ${{ matrix.browser }}
           AETHERFLOW_SKIP_ENV_FILES: "1"
           AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
           AETHERFLOW_E2E_ISOLATED: "1"
@@ -390,4 +465,4 @@ jobs:
           curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 --retry-max-time 60 "${PLAYWRIGHT_BASE_URL}/health/ready"
           cd e2e
           # Discover every contract suite automatically.
-          npx playwright test 'tests/e2e/(?!.*[.]live[.]spec[.]ts$|visual[.]spec[.]ts$).*[.]spec[.]ts$' --workers=1
+          npx playwright test 'tests/e2e/(?!.*[.]live[.]spec[.]ts$|visual[.]spec[.]ts$).*[.]spec[.]ts$' --project="${PLAYWRIGHT_BROWSER}" --workers=1
