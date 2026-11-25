@@ -767,9 +767,6 @@ mod tests {
                 .any(|cls| cls.starts_with("glass-") || cls == "af-card"),
             "modal overlay must never combine with card or legacy glass classes: {dialog_class}"
         );
-        assert_eq!(
-            modal_close_button_class(),
-            "af-btn px-3 min-w-10 min-h-10"
-        );
+        assert_eq!(modal_close_button_class(), "af-btn px-3 min-w-10 min-h-10");
     }
 }

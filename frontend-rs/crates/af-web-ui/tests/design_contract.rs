@@ -185,10 +185,7 @@ fn extract_block_bodies(css: &str, target_selector: &str) -> Vec<String> {
             '{' => {
                 depth += 1;
                 if depth == 1 {
-                    let normalized = header
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                    let normalized = header.split_whitespace().collect::<Vec<_>>().join(" ");
                     let matches = split_top_level_commas(&normalized)
                         .into_iter()
                         .any(|sel| sel.trim() == target_selector);
@@ -512,10 +509,7 @@ fn css_forbids_glass_and_legacy_atmosphere_rules() {
         match ch {
             '{' => {
                 depth += 1;
-                let normalized = header
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                let normalized = header.split_whitespace().collect::<Vec<_>>().join(" ");
                 if normalized == "@layer components" && layer_components_depth.is_none() {
                     layer_components_depth = Some(depth);
                 } else if !normalized.starts_with('@') {
@@ -633,8 +627,14 @@ fn semantic_tokens_have_complete_dark_light_parity() {
 #[test]
 fn rust_templates_forbid_blur_and_dead_classes() {
     let dead_classes: &[(&str, &str)] = &[
-        ("glass-panel", "Use Tier 3 .af-popover / .af-modal or Tier 2 .af-card"),
-        ("glass-hero", "Use Tier 2 .af-card or Tier 1 .af-canvas-section"),
+        (
+            "glass-panel",
+            "Use Tier 3 .af-popover / .af-modal or Tier 2 .af-card",
+        ),
+        (
+            "glass-hero",
+            "Use Tier 2 .af-card or Tier 1 .af-canvas-section",
+        ),
         ("obs-sidebar-surface", "Use opaque .af-sidebar chrome"),
         ("obs-metric-strip", "Use .af-hairline-grid"),
         ("obs-vitals-grid", "Use .af-hairline-grid"),
