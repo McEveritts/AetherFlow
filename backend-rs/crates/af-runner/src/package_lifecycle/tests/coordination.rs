@@ -768,3 +768,108 @@ async fn test_blueprint_config_rollback_on_target_certification_failure() {
     drop(op);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn fresh_coordinated_install_provisions_enabled_external_vhost_and_heals_default_ssl() {
+    let _env_guard = crate::ENV_TEST_MUTEX.lock().await;
+    let (root, _path, conn, _) = fixture();
+    conn.execute("DELETE FROM app_ingress_configs", []).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (id, base_domain) VALUES (1, 'example.org')",
+        [],
+    )
+    .unwrap();
+
+    let sites_avail = root.join("etc/apache2/sites-available");
+    let sites_en = root.join("etc/apache2/sites-enabled");
+    let env_dir = root.join("etc/aetherflow");
+    std::fs::create_dir_all(&sites_avail).unwrap();
+    std::fs::create_dir_all(&sites_en).unwrap();
+    std::fs::create_dir_all(&env_dir).unwrap();
+    std::fs::write(
+        env_dir.join("aetherflow.env"),
+        "AETHERFLOW_BASE_DOMAIN=example.org\n",
+    )
+    .unwrap();
+    let default_ssl = sites_en.join("default-ssl.conf");
+    std::fs::write(
+        &default_ssl,
+        "<VirtualHost *:80>\n        ServerName _\n</VirtualHost>\n<VirtualHost *:443>\n        ServerName _\n</VirtualHost>\n",
+    )
+    .unwrap();
+
+    let mut jellyfin_pkg = af_models::Package {
+        name: "jellyfin".into(),
+        service_name: "jellyfin".into(),
+        default_port: 8096,
+        lock_file: "/install/.jellyfin.lock".into(),
+        ..Default::default()
+    };
+    jellyfin_pkg.status = "not_installed".into();
+
+    let req = PackageRunnerRequest {
+        package_id: "jellyfin".into(),
+        action: "install".into(),
+        script_name: "installpackage-jellyfin".into(),
+        app_port: 8096,
+        ..Default::default()
+    };
+
+    let backend = FakeBackend {
+        root: Some(root.clone()),
+        ..Default::default()
+    };
+    let (sender, _receiver) = mpsc::channel(32);
+    let mut op =
+        CoordinatedOperation::admit(conn, req, jellyfin_pkg, vec!["jellyfin".into()]).unwrap();
+    let terminal = op.execute(&backend, &sender).await.unwrap();
+    assert_eq!(terminal.status, "completed");
+
+    let (domain, external_enabled, tls_enabled): (String, i32, i32) = op
+        .conn
+        .query_row(
+            "SELECT public_domain, external_access_enabled, tls_enabled FROM app_ingress_configs WHERE app_name = 'jellyfin'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(domain, "jellyfin.example.org");
+    assert_eq!(external_enabled, 1);
+    assert_eq!(tls_enabled, 1);
+
+    let ext_avail = sites_avail.join("aetherflow-ext-jellyfin.conf");
+    let ext_en = sites_en.join("aetherflow-ext-jellyfin.conf");
+    let app_en = sites_en.join("aetherflow-app-jellyfin.conf");
+    assert!(ext_avail.is_file(), "external vhost must be created");
+    assert!(
+        std::fs::symlink_metadata(&ext_en)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "external vhost symlink must be enabled in sites-enabled"
+    );
+    assert!(
+        std::fs::symlink_metadata(&app_en)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "internal vhost symlink must be enabled in sites-enabled"
+    );
+    let ext_body = std::fs::read_to_string(&ext_avail).unwrap();
+    assert!(
+        ext_body.contains("ServerName jellyfin.example.org"),
+        "{ext_body}"
+    );
+
+    let healed_default_ssl = std::fs::read_to_string(&default_ssl).unwrap();
+    assert!(!healed_default_ssl.contains("ServerName _"));
+    assert_eq!(
+        healed_default_ssl
+            .matches("        ServerName example.org")
+            .count(),
+        2
+    );
+
+    drop(op);
+    let _ = std::fs::remove_dir_all(root);
+}

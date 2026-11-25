@@ -354,6 +354,26 @@ pub(crate) async fn apply_runner_blueprint_in_background(
     .map_err(|error| PackageExecutorError::VerificationFailed(error.to_string()))?
 }
 
+pub(crate) async fn apply_runner_blueprint_in_background_with_ingress(
+    fs_root: Option<PathBuf>,
+    package: String,
+    port: i32,
+    planned_ingress: Option<af_models::AppIngressConfig>,
+) -> Result<(), PackageExecutorError> {
+    let lease = crate::PACKAGE_MAINTENANCE_LEASE.try_with(Arc::clone).ok();
+    tokio::task::spawn_blocking(move || {
+        let _lease = lease;
+        try_apply_runner_blueprint_app_config_with_ingress(
+            fs_root.as_deref(),
+            &package,
+            port,
+            |_| Ok(planned_ingress.clone()),
+        )
+    })
+    .await
+    .map_err(|error| PackageExecutorError::VerificationFailed(error.to_string()))?
+}
+
 pub(in crate::package_executor) fn load_runner_blueprint_ingress(
     conn: &rusqlite::Connection,
     canonical: &str,

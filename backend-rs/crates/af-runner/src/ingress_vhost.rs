@@ -382,6 +382,99 @@ fn rollback_vhost_backups(backups: &[VhostBackup]) -> anyhow::Result<()> {
     }
 }
 
+fn normalize_public_base_domain(raw: &str) -> Option<String> {
+    let dom = af_db::normalize_base_domain(raw);
+    if dom.is_empty()
+        || !dom.contains('.')
+        || dom.eq_ignore_ascii_case("localhost")
+        || dom.ends_with(".local")
+        || !af_models::valid_ingress_hostname(&dom)
+    {
+        return None;
+    }
+    Some(dom)
+}
+
+fn read_base_domain_from_env_file(fs_root: Option<&Path>) -> Option<String> {
+    let path = match fs_root {
+        Some(root) => root.join("etc/aetherflow/aetherflow.env"),
+        None => PathBuf::from("/etc/aetherflow/aetherflow.env"),
+    };
+    let (bytes, _) = read_regular_file_nofollow(&path).ok()??;
+    let raw = std::str::from_utf8(&bytes).ok()?;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+        if let Some(val) = trimmed.strip_prefix("AETHERFLOW_BASE_DOMAIN=") {
+            let unquoted = val.trim().trim_matches('"').trim_matches('\'').trim();
+            if let Some(dom) = normalize_public_base_domain(unquoted) {
+                return Some(dom);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_configured_base_domain(fs_root: Option<&Path>) -> Option<String> {
+    if let Ok(conn) = open_runner_state_database(fs_root) {
+        if let Ok(raw) = conn.query_row(
+            "SELECT COALESCE(base_domain, '') FROM settings WHERE id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            if let Some(dom) = normalize_public_base_domain(&raw) {
+                return Some(dom);
+            }
+        }
+    }
+    read_base_domain_from_env_file(fs_root)
+}
+
+/// Replaces unmodified `ServerName _` placeholders in `default-ssl.conf` with the
+/// configured base domain and wildcard aliases so alphabetically earlier
+/// `aetherflow-ext-*.conf` vhosts cannot hijack the control-plane domain.
+/// Returns `None` if no `ServerName _` placeholder exists (preserving custom configs).
+pub(crate) fn render_default_ssl_with_base_domain(raw: &str, base_domain: &str) -> Option<String> {
+    let dom = normalize_public_base_domain(base_domain)?;
+    let mut changed = false;
+    let mut out = String::with_capacity(raw.len() + 128);
+    for segment in raw.split_inclusive('\n') {
+        let (line, ending) = match segment.strip_suffix("\r\n") {
+            Some(stripped) => (stripped, "\r\n"),
+            None => match segment.strip_suffix('\n') {
+                Some(stripped) => (stripped, "\n"),
+                None => (segment, ""),
+            },
+        };
+        let mut words = line.split_whitespace();
+        let is_placeholder = words
+            .next()
+            .is_some_and(|w| w.eq_ignore_ascii_case("ServerName"))
+            && words.next() == Some("_")
+            && words.next().is_none();
+        if is_placeholder {
+            let indent_len = line.len() - line.trim_start().len();
+            let indent = &line[..indent_len];
+            out.push_str(indent);
+            out.push_str("ServerName ");
+            out.push_str(&dom);
+            out.push_str(ending);
+            out.push_str(indent);
+            out.push_str("ServerAlias www.");
+            out.push_str(&dom);
+            out.push_str(" direct.");
+            out.push_str(&dom);
+            out.push_str(" *.");
+            out.push_str(&dom);
+            out.push_str(ending);
+            changed = true;
+        } else {
+            out.push_str(segment);
+        }
+    }
+    changed.then_some(out)
+}
+
 pub(crate) async fn apply_ingress_vhost_with_hooks<FTest, FutTest, FReload, FutReload>(
     req: &RunnerApacheVhostRequest,
     apache_dir: &Path,
@@ -512,6 +605,48 @@ where
         })
         .transpose()?;
 
+    let default_ssl_path = enabled_dir.join("default-ssl.conf");
+    let default_ssl_update: Option<(Vec<u8>, u32, String)> = if external.is_some() {
+        let configured_base_domain = if apache_dir == Path::new("/etc/apache2") {
+            resolve_configured_base_domain(None)
+        } else {
+            fs_root.and_then(|root| resolve_configured_base_domain(Some(root)))
+        };
+        match (
+            configured_base_domain,
+            read_regular_file_nofollow(&default_ssl_path),
+        ) {
+            (Some(dom), Ok(Some((bytes, mode)))) => std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|raw| render_default_ssl_with_base_domain(raw, &dom))
+                .map(|updated| (bytes, mode, updated)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let restore_all = |backups: &[VhostBackup],
+                       default_ssl_backup: Option<&(Vec<u8>, u32, String)>|
+     -> anyhow::Result<()> {
+        let mut errors = Vec::new();
+        if let Err(err) = rollback_vhost_backups(backups) {
+            errors.push(err.to_string());
+        }
+        if let Some((prev_bytes, prev_mode, _)) = default_ssl_backup {
+            if let Err(err) =
+                write_file_atomically_with_mode(&default_ssl_path, prev_bytes, *prev_mode)
+            {
+                errors.push(format!("{}: {err}", default_ssl_path.display()));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("{}", errors.join("; "))
+        }
+    };
+
     let write_result = (|| -> anyhow::Result<()> {
         for ((name, body), backup) in targets
             .into_iter()
@@ -550,17 +685,20 @@ where
                 }
             }
         }
+        if let Some((_, mode, updated)) = &default_ssl_update {
+            write_file_atomically_with_mode(&default_ssl_path, updated.as_bytes(), *mode)?;
+        }
         Ok(())
     })();
     if let Err(err) = write_result {
-        if let Err(rb_err) = rollback_vhost_backups(&backups) {
+        if let Err(rb_err) = restore_all(&backups, default_ssl_update.as_ref()) {
             anyhow::bail!("{err}; rollback failed: {rb_err}");
         }
         return Err(err);
     }
 
     if let Err(test_err) = configtest_fn().await {
-        if let Err(rb_err) = rollback_vhost_backups(&backups) {
+        if let Err(rb_err) = restore_all(&backups, default_ssl_update.as_ref()) {
             anyhow::bail!("{test_err}; rollback failed: {rb_err}");
         }
         return Err(test_err);
@@ -568,7 +706,7 @@ where
 
     if req.reload_apache {
         if let Err(reload_err) = reload_fn().await {
-            if let Err(rb_err) = rollback_vhost_backups(&backups) {
+            if let Err(rb_err) = restore_all(&backups, default_ssl_update.as_ref()) {
                 anyhow::bail!("{reload_err}; rollback failed: {rb_err}");
             }
             return Err(reload_err);

@@ -879,6 +879,23 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
         if achieved_ver.is_none() {
             achieved_ver = finalization.ok().flatten();
         }
+        let committed_ingress = af_db::get_app_ingress_config(&clean_id).ok().flatten();
+        if should_trigger_post_install_cert_sync(
+            can_run_bash,
+            fs_root_override.as_deref(),
+            committed_ingress.as_ref(),
+        ) {
+            emit_package_progress(
+                &clean_id,
+                action,
+                status_label,
+                95,
+                &format!("Synchronizing TLS certificate for {}...", pkg_label),
+                &started_at,
+                &job_id,
+            );
+            af_services::mutators::trigger_apache_cert_sync().await;
+        }
         if achieved_ver.is_none() {
             if let Ok(conn) = af_db::get_conn() {
                 if let Ok(ver) = conn.query_row(
@@ -989,4 +1006,80 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
             af_runner::af_release::lifecycle::RETENTION_STATE_RETAINED
         }),
     );
+}
+
+fn should_trigger_post_install_cert_sync(
+    can_run_bash: bool,
+    fs_root_override: Option<&str>,
+    ingress: Option<&af_models::AppIngressConfig>,
+) -> bool {
+    can_run_bash
+        && fs_root_override.is_none()
+        && ingress.is_some_and(|cfg| {
+            cfg.external_access_enabled && cfg.tls_enabled && !cfg.public_domain.trim().is_empty()
+        })
+}
+
+#[cfg(test)]
+mod post_install_cert_sync_tests {
+    use super::should_trigger_post_install_cert_sync;
+    use af_models::AppIngressConfig;
+
+    fn sample_ingress(external: bool, tls: bool, domain: &str) -> AppIngressConfig {
+        AppIngressConfig {
+            app_name: "librespeed".to_string(),
+            public_domain: domain.to_string(),
+            external_access_enabled: external,
+            listen_port: 8988,
+            tls_enabled: tls,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn triggers_cert_sync_for_live_external_tls_install() {
+        let cfg = sample_ingress(true, true, "librespeed.example.org");
+        assert!(should_trigger_post_install_cert_sync(
+            true,
+            None,
+            Some(&cfg)
+        ));
+    }
+
+    #[test]
+    fn skips_cert_sync_for_simulated_isolated_or_non_tls_installs() {
+        let cfg = sample_ingress(true, true, "librespeed.example.org");
+        assert!(!should_trigger_post_install_cert_sync(
+            false,
+            None,
+            Some(&cfg)
+        ));
+        assert!(!should_trigger_post_install_cert_sync(
+            true,
+            Some("/tmp/fake-root"),
+            Some(&cfg)
+        ));
+        assert!(!should_trigger_post_install_cert_sync(true, None, None));
+
+        let no_ext = sample_ingress(false, true, "librespeed.example.org");
+        assert!(!should_trigger_post_install_cert_sync(
+            true,
+            None,
+            Some(&no_ext)
+        ));
+
+        let no_tls = sample_ingress(true, false, "librespeed.example.org");
+        assert!(!should_trigger_post_install_cert_sync(
+            true,
+            None,
+            Some(&no_tls)
+        ));
+
+        let blank_domain = sample_ingress(true, true, "   ");
+        assert!(!should_trigger_post_install_cert_sync(
+            true,
+            None,
+            Some(&blank_domain)
+        ));
+    }
 }

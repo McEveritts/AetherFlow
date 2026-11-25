@@ -2392,6 +2392,79 @@ async fn ingress_vhost_validates_rejects_symlinks_and_rolls_back_on_configtest_f
     fs::remove_dir_all(scratch).unwrap();
 }
 
+#[tokio::test]
+async fn external_vhost_sync_self_heals_default_ssl_placeholder_and_rolls_back_on_failure() {
+    let root = env::temp_dir().join(format!("af-default-ssl-heal-{}", uuid::Uuid::new_v4()));
+    let apache_dir = root.join("etc/apache2");
+    let available = apache_dir.join("sites-available");
+    let enabled = apache_dir.join("sites-enabled");
+    let env_dir = root.join("etc/aetherflow");
+    fs::create_dir_all(&available).unwrap();
+    fs::create_dir_all(&enabled).unwrap();
+    fs::create_dir_all(&env_dir).unwrap();
+    fs::write(
+        env_dir.join("aetherflow.env"),
+        "AETHERFLOW_BASE_DOMAIN=redonemedia.org\n",
+    )
+    .unwrap();
+    let placeholder_ssl = "<VirtualHost *:80>\n        ServerName _\n</VirtualHost>\n<VirtualHost *:443>\n        ServerName _\n</VirtualHost>\n";
+    let default_ssl = enabled.join("default-ssl.conf");
+    fs::write(&default_ssl, placeholder_ssl).unwrap();
+
+    let req = RunnerApacheVhostRequest {
+        app_name: "jellyfin".into(),
+        listen_port: 8096,
+        internal_domain: Some("jellyfin.aether.local".into()),
+        public_domain: Some("jellyfin.redonemedia.org".into()),
+        external_access_enabled: true,
+        tls_enabled: false,
+        reload_apache: true,
+        remove_only: false,
+    };
+
+    // Failed configtest must roll back both app vhosts and default-ssl.conf.
+    let err = apply_ingress_vhost_with_hooks(
+        &req,
+        &apache_dir,
+        || async { anyhow::bail!("simulated configtest failure") },
+        || async { Ok(()) },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("simulated configtest failure"));
+    assert_eq!(fs::read_to_string(&default_ssl).unwrap(), placeholder_ssl);
+
+    // Successful sync replaces ServerName _ with explicit ServerName + ServerAlias.
+    apply_ingress_vhost_with_hooks(&req, &apache_dir, || async { Ok(()) }, || async { Ok(()) })
+        .await
+        .unwrap();
+    let healed = fs::read_to_string(&default_ssl).unwrap();
+    assert!(!healed.contains("ServerName _"), "{healed}");
+    assert_eq!(
+        healed.matches("        ServerName redonemedia.org").count(),
+        2
+    );
+    assert_eq!(
+        healed
+            .matches(
+                "        ServerAlias www.redonemedia.org direct.redonemedia.org *.redonemedia.org"
+            )
+            .count(),
+        2
+    );
+
+    // Operator-customized default-ssl.conf (no ServerName _) is never overwritten.
+    let custom_ssl =
+        "<VirtualHost *:443>\n        ServerName custom.redonemedia.org\n</VirtualHost>\n";
+    fs::write(&default_ssl, custom_ssl).unwrap();
+    apply_ingress_vhost_with_hooks(&req, &apache_dir, || async { Ok(()) }, || async { Ok(()) })
+        .await
+        .unwrap();
+    assert_eq!(fs::read_to_string(&default_ssl).unwrap(), custom_ssl);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn confined_provider_preserves_permissions_and_refuses_symlinks_hardlinks_and_fifos() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};

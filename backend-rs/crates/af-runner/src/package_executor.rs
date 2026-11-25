@@ -87,7 +87,8 @@ use apache_ingress::{
     APACHE_HTPASSWD,
 };
 pub(crate) use apache_ingress::{
-    apache_upstream_tls, apply_runner_blueprint_in_background, render_managed_apache_vhost,
+    apache_upstream_tls, apply_runner_blueprint_in_background,
+    apply_runner_blueprint_in_background_with_ingress, render_managed_apache_vhost,
     update_legacy_apache_vhost, RunnerBlueprintConfigChanges,
 };
 

@@ -1115,6 +1115,7 @@ impl CoordinatedOperation {
         }
 
         // Post-install ingress synchronization & blueprint app config only AFTER certification succeeds
+        let mut post_commit_ingress: Option<af_models::AppIngressConfig> = None;
         if execution.is_ok() && !restore_failed && !target_match_failed {
             let post_commit: Result<()> = async {
                 failure = if self.request.action == "remove" {
@@ -1122,18 +1123,6 @@ impl CoordinatedOperation {
                 } else {
                     "configuration"
                 };
-                if self.request.action != "remove"
-                    && (1024..=65535).contains(&self.request.app_port)
-                {
-                    let fs_root = self.effective_fs_root();
-                    crate::package_executor::apply_runner_blueprint_in_background(
-                        fs_root,
-                        self.request.package_id.clone(),
-                        self.request.app_port,
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
                 let base: Option<String> = self
                     .conn
                     .query_row(
@@ -1142,6 +1131,61 @@ impl CoordinatedOperation {
                         |row| row.get(0),
                     )
                     .optional()?;
+                let base_domain = base.as_deref().unwrap_or("");
+                let planned_ingress = if self.request.action != "remove"
+                    && (1024..=65535).contains(&self.request.app_port)
+                {
+                    let existing =
+                        af_db::load_lifecycle_ingress(&self.conn, &self.request.package_id)?;
+                    af_db::plan_lifecycle_ingress(
+                        &self.request.package_id,
+                        self.request.app_port,
+                        base_domain,
+                        existing.as_ref(),
+                    )?
+                } else {
+                    None
+                };
+                if self.request.action != "remove"
+                    && (1024..=65535).contains(&self.request.app_port)
+                {
+                    let fs_root = self.effective_fs_root();
+                    crate::package_executor::apply_runner_blueprint_in_background_with_ingress(
+                        fs_root.clone(),
+                        self.request.package_id.clone(),
+                        self.request.app_port,
+                        planned_ingress.clone(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if let Some(cfg) = planned_ingress.as_ref() {
+                        let apache_dir = match fs_root.as_deref() {
+                            Some(root) => root.join("etc/apache2"),
+                            None => {
+                                crate::resolve_provider_dir("AETHERFLOW_APACHE_DIR", "/etc/apache2")
+                            }
+                        };
+                        let clean_app =
+                            af_models::resolve_package_lock_name(&self.request.package_id);
+                        if (apache_dir.join("sites-available").is_dir()
+                            || apache_dir.join("sites-enabled").is_dir())
+                            && crate::get_runner_package_definition(clean_app).is_some()
+                        {
+                            let vhost_req = af_models::RunnerApacheVhostRequest {
+                                app_name: clean_app.to_string(),
+                                listen_port: cfg.listen_port,
+                                internal_domain: Some(format!("{clean_app}.aether.local")),
+                                public_domain: (!cfg.public_domain.trim().is_empty())
+                                    .then(|| cfg.public_domain.trim().to_string()),
+                                external_access_enabled: cfg.external_access_enabled,
+                                tls_enabled: cfg.tls_enabled,
+                                reload_apache: fs_root.is_none(),
+                                ..Default::default()
+                            };
+                            crate::sync_apache_vhost_local(&vhost_req, &apache_dir).await?;
+                        }
+                    }
+                }
                 let secondary_update = if self.request.package_id == "rclone" {
                     if self.request.action == "remove" {
                         pre_remove_rclone_api_port
@@ -1165,8 +1209,9 @@ impl CoordinatedOperation {
                     self.request.app_port,
                     secondary_update,
                     self.request.delete_data,
-                    base.as_deref().unwrap_or(""),
+                    base_domain,
                 )?;
+                post_commit_ingress = planned_ingress;
                 Ok(())
             }
             .await;
@@ -1193,6 +1238,20 @@ impl CoordinatedOperation {
                 rollback_restart_failures = restart_failures.clone();
                 if !restart_failures.is_empty() {
                     restore_failed = true;
+                }
+            } else if self.effective_fs_root().is_none()
+                && post_commit_ingress.as_ref().is_some_and(|cfg| {
+                    cfg.external_access_enabled
+                        && cfg.tls_enabled
+                        && !cfg.public_domain.trim().is_empty()
+                })
+            {
+                if let Err(err) = crate::sync_certbot_and_managed_ingress().await {
+                    tracing::warn!(
+                        package = %self.request.package_id,
+                        error = %err,
+                        "post-install certbot and managed ingress sync failed"
+                    );
                 }
             }
         }

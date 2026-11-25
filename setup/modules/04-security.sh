@@ -490,6 +490,7 @@ function _apacheconf() {
 		mv "${apache_etc}/sites-enabled/000-default.conf" "${apache_etc}/" >>"${outto}" 2>&1
 	fi
 	\cp -f "${local_setup}templates/default-ssl.conf.template" "${apache_etc}/sites-enabled/default-ssl.conf"
+	_af_configure_default_ssl_vhost_server_names "${apache_etc}/sites-enabled/default-ssl.conf"
 	if [[ ! -s "${basic_htpasswd}" && -n "${username:-}" && -n "${passwd:-}" ]] && type _write_apache_htpasswd_files &>/dev/null; then
 		_write_apache_htpasswd_files "${username}" "${passwd}" "${REALM:-Welcome to AetherFlow}" || true
 	fi
@@ -559,6 +560,46 @@ function _apacheconf() {
 	a2enmod mpm_event >>"${OUTTO}" 2>&1 || true
 
 	#sed -i 's/memory_limit = 128M/memory_limit = 768M/g' /etc/php/${PHP_VER}/apache2/php.ini
+}
+
+function _af_configure_default_ssl_vhost_server_names() {
+	local conf_path="$1"
+	local candidate="${2:-${FQDN:-${domain:-${hostname_value:-}}}}"
+	if [[ -z "${candidate}" ]] && type _load_config &>/dev/null; then
+		candidate="$(_load_config hostname_value 2>/dev/null || true)"
+	fi
+	if [[ -z "${candidate}" ]] && type _load_config &>/dev/null; then
+		candidate="$(_load_config domain 2>/dev/null || true)"
+	fi
+	candidate="${candidate#\*.}"
+	candidate="${candidate%.}"
+	candidate="${candidate,,}"
+	if [[ -z "${candidate}" || "${candidate}" == "localhost" || "${candidate}" == *.local ]]; then
+		return 0
+	fi
+	if [[ ! "${candidate}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]; then
+		return 0
+	fi
+	if [[ -L "${conf_path}" || ! -f "${conf_path}" ]]; then
+		return 0
+	fi
+	if ! grep -Eq '^[[:space:]]*ServerName[[:space:]]+_[[:space:]]*$' "${conf_path}"; then
+		return 0
+	fi
+	local tmp_conf
+	tmp_conf="$(mktemp "${conf_path}.af.XXXXXX")"
+	awk -v dom="${candidate}" '
+		/^[[:space:]]*ServerName[[:space:]]+_[[:space:]]*$/ {
+			match($0, /^[[:space:]]*/)
+			indent = substr($0, 1, RLENGTH)
+			print indent "ServerName " dom
+			print indent "ServerAlias www." dom " direct." dom " *." dom
+			next
+		}
+		{ print }
+	' "${conf_path}" >"${tmp_conf}"
+	chmod 0644 "${tmp_conf}"
+	mv -f "${tmp_conf}" "${conf_path}"
 }
 
 function _af_snakeoil_cert_subject() {

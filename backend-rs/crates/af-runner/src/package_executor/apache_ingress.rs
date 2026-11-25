@@ -15,7 +15,8 @@ pub(super) use blueprint_config::{
     try_apply_runner_blueprint_app_config_with_ingress,
 };
 pub(crate) use blueprint_config::{
-    apply_runner_blueprint_in_background, RunnerBlueprintConfigChanges,
+    apply_runner_blueprint_in_background, apply_runner_blueprint_in_background_with_ingress,
+    RunnerBlueprintConfigChanges,
 };
 
 #[cfg(test)]
