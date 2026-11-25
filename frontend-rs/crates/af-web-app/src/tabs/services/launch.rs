@@ -6,7 +6,9 @@ use serde_json::{json, Value};
 use url::Url;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::spawn_local;
-use web_sys::{HtmlAnchorElement, HtmlFormElement, HtmlInputElement, MouseEvent, Window};
+use web_sys::{
+    Document, HtmlAnchorElement, HtmlFormElement, HtmlInputElement, MouseEvent, Node, Window,
+};
 
 use super::helpers::field;
 
@@ -107,33 +109,45 @@ fn launch_exchange(service: &Value, destination: &str) -> Option<Url> {
     }
 }
 
+fn popup_container(document: &Document) -> Result<Node, JsValue> {
+    document
+        .body()
+        .map(JsCast::unchecked_into)
+        .or_else(|| document.document_element().map(JsCast::unchecked_into))
+        .ok_or(JsValue::NULL)
+}
+
 fn open_direct(popup: &Window, destination: &str) -> Result<(), JsValue> {
     let document = popup.document().ok_or(JsValue::NULL)?;
+    // Nodes created in the popup's Document belong to the popup's JS realm, so
+    // `dyn_into` (`instanceof` against the opener window's constructors) always fails.
     let link = document
         .create_element("a")?
-        .dyn_into::<HtmlAnchorElement>()?;
+        .unchecked_into::<HtmlAnchorElement>();
     link.set_href(destination);
     link.set_rel("noreferrer");
-    document.body().ok_or(JsValue::NULL)?.append_child(&link)?;
+    popup_container(&document)?.append_child(&link)?;
     link.click();
     Ok(())
 }
 
 fn submit_ticket(popup: &Window, exchange: &str, ticket: &str) -> Result<(), JsValue> {
     let document = popup.document().ok_or(JsValue::NULL)?;
+    // Nodes created in the popup's Document belong to the popup's JS realm;
+    // avoid cross-realm `dyn_into` (`instanceof`) checks.
     let form = document
         .create_element("form")?
-        .dyn_into::<HtmlFormElement>()?;
+        .unchecked_into::<HtmlFormElement>();
     form.set_method("post");
     form.set_action(exchange);
     let input = document
         .create_element("input")?
-        .dyn_into::<HtmlInputElement>()?;
+        .unchecked_into::<HtmlInputElement>();
     input.set_type("hidden");
     input.set_name("ticket");
     input.set_value(ticket);
     form.append_child(&input)?;
-    document.body().ok_or(JsValue::NULL)?.append_child(&form)?;
+    popup_container(&document)?.append_child(&form)?;
     form.submit()
 }
 

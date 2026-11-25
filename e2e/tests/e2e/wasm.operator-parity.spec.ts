@@ -705,6 +705,111 @@ test.describe('WASM operator parity workflows', () => {
     await expect(page.locator('article').filter({ hasText: 'Sonarr' }).getByRole('link', { name: 'Open App' })).toHaveAttribute('href', 'https://sonarr.apps.example.com');
   });
 
+  test('launches direct and ticket-protected public apps without cross-realm popup closure', async ({ page }) => {
+    await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
+
+    await page.route(/\/api(\/v1)?(\/(auth|admin))?\/settings/, route =>
+      json(route, {
+        baseDomain: 'apps.example.com',
+        language: 'en',
+        timezone: 'UTC',
+        setupCompleted: true,
+      }),
+    );
+
+    await page.route('**/api/v1/auth/services', route =>
+      json(route, {
+        librespeed: {
+          id: 'librespeed',
+          name: 'LibreSpeed',
+          slug: 'librespeed',
+          status: 'running',
+          default_port: 8980,
+          active_port: 8980,
+          external_access_enabled: true,
+          public_domain: 'librespeed.apps.example.com',
+          tls_enabled: true,
+          managed_by: 'systemd',
+          process: 'librespeed',
+        },
+        netdata: {
+          id: 'netdata',
+          name: 'Netdata',
+          slug: 'netdata',
+          status: 'running',
+          default_port: 19999,
+          active_port: 19999,
+          external_access_enabled: true,
+          public_domain: 'netdata.apps.example.com',
+          tls_enabled: true,
+          managed_by: 'systemd',
+          process: 'netdata',
+        },
+      }),
+    );
+
+    const launchPayloads: Array<{ app?: string; destination?: string }> = [];
+    await page.route('**/api/v1/admin/apps/launch', async route => {
+      const payload = route.request().postDataJSON() as { app?: string; destination?: string };
+      launchPayloads.push(payload);
+      if (payload.app === 'netdata') {
+        return json(route, { ticket: 'launch-ticket-123' });
+      }
+      return json(route, {});
+    });
+
+    let directReferer: string | undefined = 'unset';
+    await page.context().route('https://librespeed.apps.example.com/**', async route => {
+      directReferer = route.request().headers()['referer'];
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: '<!doctype html><html><body><h1>LibreSpeed Ready</h1></body></html>',
+      });
+    });
+
+    let exchangeMethod = '';
+    let exchangeBody = '';
+    await page.context().route('https://netdata.apps.example.com/.well-known/aetherflow/app-launch', async route => {
+      exchangeMethod = route.request().method();
+      exchangeBody = route.request().postData() ?? '';
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: '<!doctype html><html><body><h1>Netdata Exchanged</h1></body></html>',
+      });
+    });
+
+    await page.goto('/?tab=services');
+    await expect(page.getByRole('heading', { name: 'LibreSpeed', exact: true })).toBeVisible({ timeout: 15_000 });
+
+    const directPopupPromise = page.waitForEvent('popup');
+    await page.locator('article').filter({ hasText: 'LibreSpeed' }).getByRole('link', { name: 'Open App' }).click();
+    const directPopup = await directPopupPromise;
+    await expect(directPopup.getByRole('heading', { name: 'LibreSpeed Ready' })).toBeVisible({ timeout: 10_000 });
+    expect(directPopup.isClosed()).toBe(false);
+    expect(directPopup.url()).toBe('https://librespeed.apps.example.com/');
+    expect(directReferer).toBeUndefined();
+    expect(await directPopup.evaluate(() => window.opener === null)).toBe(true);
+    await directPopup.close();
+
+    const ticketPopupPromise = page.waitForEvent('popup');
+    await page.locator('article').filter({ hasText: 'Netdata' }).getByRole('link', { name: 'Open App' }).click();
+    const ticketPopup = await ticketPopupPromise;
+    await expect(ticketPopup.getByRole('heading', { name: 'Netdata Exchanged' })).toBeVisible({ timeout: 10_000 });
+    expect(ticketPopup.isClosed()).toBe(false);
+    expect(exchangeMethod).toBe('POST');
+    expect(exchangeBody).toBe('ticket=launch-ticket-123');
+    expect(await ticketPopup.evaluate(() => window.opener === null)).toBe(true);
+    await ticketPopup.close();
+
+    expect(launchPayloads).toEqual([
+      { app: 'librespeed', destination: 'https://librespeed.apps.example.com' },
+      { app: 'netdata', destination: 'https://netdata.apps.example.com' },
+    ]);
+    await expect(page.getByText('Unable to open application')).toHaveCount(0);
+  });
+
   test('checks for service updates and requests the displayed target version', async ({ page }) => {
     await mockOperatorServices(page);
     const updatePayloads: unknown[] = [];
