@@ -313,42 +313,56 @@ fn AuditAdminContent() -> impl IntoView {
                     }
                 }
             >
-                <section
-                    aria-label=move || tt(context, "Audit summary")
-                    class="grid sm:grid-cols-2 xl:grid-cols-4 gap-4"
-                >
-                    <ObsCard title="Total Events">
-                        <p class="text-2xl font-bold tabular-nums">{move || kpis.get().total}</p>
-                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "Recorded audit entries")}</p>
-                    </ObsCard>
-                    <ObsCard title="Operator Approvals">
-                        <p class="text-2xl font-bold tabular-nums text-emerald-400">{move || kpis.get().operator_approvals}</p>
-                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "Manual operator authorizations")}</p>
-                    </ObsCard>
-                    <ObsCard title="AI Proposed">
-                        <p class="text-2xl font-bold tabular-nums text-indigo-300">{move || kpis.get().ai_proposed}</p>
-                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "FlowAI action proposals")}</p>
-                    </ObsCard>
-                    <ObsCard title="System & Auth">
-                        <p class="text-2xl font-bold tabular-nums text-purple-300">{move || kpis.get().system_and_auth}</p>
-                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "Service, user, and system changes")}</p>
-                    </ObsCard>
-                </section>
-                <ObsCard>
-                    <h2 class="text-lg font-semibold mb-4">
+                <header class="af-canvas-section pb-4 space-y-2">
+                    <h2 class="text-2xl font-semibold">
                         {move || tt(context, "Tabs.auditHeading")}
                     </h2>
-                    <p class="text-sm text-slate-400 mb-5">
+                    <p class="text-sm text-slate-400">
                         {move || tt(
                             context,
                             "Operator actions are read-only. Actor and action filters search the server; category, severity, time, and worker search narrow the current page. Exports contain the filtered page.",
                         )}
                     </p>
+                </header>
+                <section
+                    aria-label=move || tt(context, "Audit summary")
+                    class="af-hairline-grid grid sm:grid-cols-2 xl:grid-cols-4 min-w-0"
+                >
+                    <div class="p-4 min-w-0">
+                        <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                            {move || tt(context, "Total Events")}
+                        </h3>
+                        <p class="text-2xl font-bold tabular-nums mt-1">{move || kpis.get().total}</p>
+                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "Recorded audit entries")}</p>
+                    </div>
+                    <div class="p-4 min-w-0">
+                        <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                            {move || tt(context, "Operator Approvals")}
+                        </h3>
+                        <p class="text-2xl font-bold tabular-nums text-emerald-400 mt-1">{move || kpis.get().operator_approvals}</p>
+                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "Manual operator authorizations")}</p>
+                    </div>
+                    <div class="p-4 min-w-0">
+                        <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                            {move || tt(context, "AI Proposed")}
+                        </h3>
+                        <p class="text-2xl font-bold tabular-nums text-indigo-300 mt-1">{move || kpis.get().ai_proposed}</p>
+                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "FlowAI action proposals")}</p>
+                    </div>
+                    <div class="p-4 min-w-0">
+                        <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                            {move || tt(context, "System & Auth")}
+                        </h3>
+                        <p class="text-2xl font-bold tabular-nums text-purple-300 mt-1">{move || kpis.get().system_and_auth}</p>
+                        <p class="text-xs text-slate-400 mt-1">{move || tt(context, "Service, user, and system changes")}</p>
+                    </div>
+                </section>
+                <ObsCard>
                     <div class="grid sm:grid-cols-2 xl:grid-cols-3 gap-4 mb-5">
                         <label class="text-sm space-y-2">
                             <span>{move || tt(context, "Actor")}</span>
                             <input
-                                class="glass-input w-full px-3 py-2"
+                                class="af-input w-full px-3 py-2"
                                 type="search"
                                 placeholder=move || tt(context, "Filter by actor")
                                 prop:value=move || actor.get()
@@ -358,7 +372,7 @@ fn AuditAdminContent() -> impl IntoView {
                         <label class="text-sm space-y-2">
                             <span>{move || tt(context, "Action")}</span>
                             <input
-                                class="glass-input w-full px-3 py-2"
+                                class="af-input w-full px-3 py-2"
                                 type="search"
                                 placeholder=move || tt(context, "Filter by action")
                                 prop:value=move || action.get()
@@ -368,7 +382,7 @@ fn AuditAdminContent() -> impl IntoView {
                         <label class="text-sm space-y-2">
                             <span>{move || tt(context, "Category")}</span>
                             <select
-                                class="glass-input w-full px-3 py-2"
+                                class="af-input w-full px-3 py-2"
                                 prop:value=move || category.get()
                                 on:change=move |event| category.set(event_target_value(&event))
                             >
@@ -397,7 +411,7 @@ fn AuditAdminContent() -> impl IntoView {
                         <label class="text-sm space-y-2">
                             <span>{move || tt(context, "Severity")}</span>
                             <select
-                                class="glass-input w-full px-3 py-2"
+                                class="af-input w-full px-3 py-2"
                                 prop:value=move || severity.get()
                                 on:change=move |event| severity.set(event_target_value(&event))
                             >
@@ -414,7 +428,7 @@ fn AuditAdminContent() -> impl IntoView {
                             <span>{move || tt(context, "From (local time)")}</span>
                             <input
                                 type="datetime-local"
-                                class="glass-input w-full px-3 py-2"
+                                class="af-input w-full px-3 py-2"
                                 placeholder=move || tt(context, "Start date and time")
                                 prop:value=move || start.get()
                                 on:change=move |event| start.set(event_target_value(&event))
@@ -424,7 +438,7 @@ fn AuditAdminContent() -> impl IntoView {
                             <span>{move || tt(context, "Until (local time)")}</span>
                             <input
                                 type="datetime-local"
-                                class="glass-input w-full px-3 py-2"
+                                class="af-input w-full px-3 py-2"
                                 placeholder=move || tt(context, "End date and time")
                                 prop:value=move || end.get()
                                 on:change=move |event| end.set(event_target_value(&event))
@@ -438,7 +452,7 @@ fn AuditAdminContent() -> impl IntoView {
                     <Show when=move || !can_read_settings.get()>
                         <p
                             role="status"
-                            class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200 mb-4"
+                            class="af-warning-banner text-sm mb-4"
                         >
                             {move || {
                                 context
@@ -450,7 +464,7 @@ fn AuditAdminContent() -> impl IntoView {
                     <div class="flex flex-wrap items-center gap-3 my-5">
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || !can_read_settings.get()
                             title=move || {
                                 context
@@ -468,7 +482,7 @@ fn AuditAdminContent() -> impl IntoView {
                         </button>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || export_busy.get()
                             on:click=move |_| export("csv")
                         >
@@ -476,7 +490,7 @@ fn AuditAdminContent() -> impl IntoView {
                         </button>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || export_busy.get()
                             on:click=move |_| export("json")
                         >
@@ -545,7 +559,7 @@ fn AuditAdminContent() -> impl IntoView {
                         <div class="flex gap-3">
                             <button
                                 type="button"
-                                class="glass-button px-4 py-2"
+                                class="af-btn px-4 py-2"
                                 disabled=move || page.get() == 0 || audit.loading.get()
                                 on:click=move |_| page.update(|p| *p = p.saturating_sub(1))
                             >
@@ -553,7 +567,7 @@ fn AuditAdminContent() -> impl IntoView {
                             </button>
                             <button
                                 type="button"
-                                class="glass-button px-4 py-2"
+                                class="af-btn px-4 py-2"
                                 disabled=move || {
                                     audit.loading.get()
                                         || ((page.get() + 1) * 200)
@@ -574,7 +588,7 @@ fn AuditAdminContent() -> impl IntoView {
                     <Show when=move || selected.with(|v| text(v, "target_type") == "service" && !text(v, "target_id").is_empty())>
                         <button
                             type="button"
-                            class="glass-button-primary px-4 py-2 min-h-11"
+                            class="af-btn-primary px-4 py-2 min-h-11"
                             disabled=move || !context.can_read_area(PeerArea::Services)
                             title=move || {
                                 context
@@ -623,11 +637,11 @@ fn AuditAdminContent() -> impl IntoView {
                         </p>
                     </Show>
                     <Show when=move || detail_action.with(Option::is_some)>
-                        <div class="space-y-2 border-t border-white/10 pt-3">
+                        <div class="space-y-2 border-t border-[var(--af-border-hairline)] pt-3">
                             <h3 class="text-sm font-semibold">
                                 {move || tt(context, "Linked approval action")}
                             </h3>
-                            <pre class="text-xs whitespace-pre-wrap break-all max-h-60 overflow-auto">
+                            <pre class="af-surface-inset p-3 text-xs whitespace-pre-wrap break-all max-h-60 overflow-auto">
                                 {move || serde_json::to_string_pretty(&detail_action.get().unwrap_or(Value::Null)).unwrap_or_default()}
                             </pre>
                         </div>
@@ -635,7 +649,7 @@ fn AuditAdminContent() -> impl IntoView {
                     <p class="text-sm text-slate-400">
                         {move || tt(context, "Original immutable event payload")}
                     </p>
-                    <pre class="text-xs whitespace-pre-wrap break-all max-h-[55vh] overflow-auto">
+                    <pre class="af-surface-inset p-3 text-xs whitespace-pre-wrap break-all max-h-[55vh] overflow-auto">
                         {move || serde_json::to_string_pretty(&selected.get()).unwrap_or_default()}
                     </pre>
                 </div>

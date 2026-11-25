@@ -110,7 +110,7 @@ pub(super) fn MetadataSettings() -> impl IntoView {
                 <DraftInput draft field="path" label="Media directory" required=true />
                 <button
                     type="button"
-                    class="glass-button px-3 py-2"
+                    class="af-btn px-3 py-2"
                     disabled=move || !can_read_files.get()
                     title=move || {
                         context
@@ -130,7 +130,7 @@ pub(super) fn MetadataSettings() -> impl IntoView {
                 </button>
                 <button
                     type="submit"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || {
                         busy.get()
                             || status.data.with(|v| v["scanning"] == true)
@@ -157,10 +157,10 @@ pub(super) fn MetadataSettings() -> impl IntoView {
             <Modal open=picker title="Browse Directories">
                 <Show when=move || picker.get() && can_read_files.get()>
                     <p class="break-all">{move || current_path.get()}</p>
-                    <button type="button" class="glass-button px-3 py-2" disabled=move || current_path.get() == "/"
+                    <button type="button" class="af-btn px-3 py-2" disabled=move || current_path.get() == "/"
                         on:click=move |_| current_path.update(|p| *p = crate::tabs::fileshare::parent_path(p))>{move || tt(context, "Up")}</button>
                     <crate::tabs::fileshare::DirectoryPicker current_path />
-                    <button type="button" class="glass-button-primary px-3 py-2" on:click=move |_| {
+                    <button type="button" class="af-btn-primary px-3 py-2" on:click=move |_| {
                         edit(draft, "path", json!(current_path.get_untracked()));
                         picker.set(false);
                     }>{move || tt(context, "Use this directory")}</button>

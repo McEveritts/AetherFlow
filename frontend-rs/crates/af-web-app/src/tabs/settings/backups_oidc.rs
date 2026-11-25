@@ -472,7 +472,7 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                     "Create a WAL-safe database snapshot with a verified SHA-256 manifest. Uploads stage and validate backups; live restore requires the host recovery workflow.",
                 )}
             </p>
-            <section class="rounded-xl border border-white/10 p-4 mb-5 space-y-3" aria-label=move || tt(context, "Automatic backup schedule")>
+            <section class="af-surface-inset p-4 mb-5 space-y-3" aria-label=move || tt(context, "Automatic backup schedule")>
                 <h3 class="font-semibold">{move || tt(context, "Automatic backup schedule")}</h3>
                 <ResourceFeedback resource=schedule />
                 <Show when=move || schedule.data.with(|data| matches!(data["mode"].as_str(), Some("manual" | "smart")))>
@@ -504,7 +504,7 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                     }}
                     <button
                         type="button"
-                        class="glass-button px-4 py-2"
+                        class="af-btn px-4 py-2"
                         disabled=move || {
                             schedule_busy.get()
                                 || schedule.loading.get()
@@ -527,7 +527,7 @@ pub(super) fn BackupsSettings() -> impl IntoView {
             <div class="flex flex-wrap gap-3 mb-5">
                 <button
                     type="button"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || {
                         busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
                     }
@@ -542,7 +542,7 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 </button>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || !can_read_settings.get()
                     title=move || {
                         context
@@ -559,7 +559,7 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                     {move || tt(context, "Common.refresh")}
                 </button>
                 <label
-                    class="glass-button px-4 py-2 cursor-pointer"
+                    class="af-btn px-4 py-2 cursor-pointer"
                     title=move || {
                         context
                             .area_block_reason(crate::state::PeerArea::Settings, true)
@@ -670,7 +670,7 @@ pub(super) fn BackupsSettings() -> impl IntoView {
                 </Show>
                 <button
                     type="submit"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || {
                         busy.get() || !context.can_write_area(crate::state::PeerArea::Settings)
                     }

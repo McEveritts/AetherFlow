@@ -314,7 +314,7 @@ pub fn SettingsTab() -> impl IntoView {
             <Show when=move || !can_read_settings.get()>
                 <p
                     role="status"
-                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                    class="af-warning-banner text-sm"
                 >
                     {move || {
                         context
@@ -335,7 +335,7 @@ pub fn SettingsTab() -> impl IntoView {
                                 <label class="text-sm space-y-2">
                                     <span>{move || tt(context, "Settings.displayTheme")}</span>
                                     <select
-                                        class="glass-input px-3 py-2 block w-full"
+                                        class="af-input px-3 py-2 block w-full"
                                         prop:value=move || context.theme.get()
                                         on:change=move |event| {
                                             context.set_theme(&event_target_value(&event));
@@ -355,7 +355,7 @@ pub fn SettingsTab() -> impl IntoView {
                                 <label class="text-sm space-y-2">
                                     <span>{move || tt(context, "Settings.language")}</span>
                                     <select
-                                        class="glass-input px-3 py-2 block w-full"
+                                        class="af-input px-3 py-2 block w-full"
                                         prop:value=move || context.locale.get()
                                         on:change=move |event| {
                                             let locale = event_target_value(&event);
@@ -410,18 +410,18 @@ pub fn SettingsTab() -> impl IntoView {
                             </div>
                             <nav
                                 aria-label=move || tt(context, "Related settings")
-                                class="mt-5 border-t border-white/10 pt-4 flex flex-wrap items-center gap-3"
+                                class="mt-5 border-t border-[var(--af-border-hairline)] pt-4 flex flex-wrap items-center gap-3"
                             >
                                 <button
                                     type="button"
-                                    class="obs-tab-pill px-4 py-2"
+                                    class="af-btn px-4 py-2"
                                     on:click=move |_| context.select_tab(TabId::Notifications)
                                 >
                                     {move || tt(context, "Navigation.notifications")}
                                 </button>
                                 <button
                                     type="button"
-                                    class="obs-tab-pill px-4 py-2"
+                                    class="af-btn px-4 py-2"
                                     on:click=move |_| {
                                         if context.is_admin() {
                                             context.navigate_to_subtab(TabId::McBrowser, "policy");
@@ -512,7 +512,7 @@ pub fn SettingsTab() -> impl IntoView {
                                 </div>
                             </div>
 
-                            <div class="space-y-4 pb-4 border-b border-white/10">
+                            <div class="space-y-4 pb-4 border-b border-[var(--af-border-hairline)]">
                                 <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
                                     {move || tt(context, "Settings.displayEngineTitle")}
                                 </h3>
@@ -533,7 +533,7 @@ pub fn SettingsTab() -> impl IntoView {
                                         <select
                                             id="settings-high-refresh-mode"
                                             aria-describedby="settings-high-refresh-desc"
-                                            class="glass-input px-3 py-2 block w-full"
+                                            class="af-input px-3 py-2 block w-full"
                                             prop:value=move || context.high_refresh_mode.get()
                                             on:change=move |event| {
                                                 context.set_high_refresh_mode(&event_target_value(&event));
@@ -578,7 +578,7 @@ pub fn SettingsTab() -> impl IntoView {
                                         <select
                                             id="settings-touch-mode"
                                             aria-describedby="settings-touch-mode-desc"
-                                            class="glass-input px-3 py-2 block w-full"
+                                            class="af-input px-3 py-2 block w-full"
                                             prop:value=move || context.touch_mode.get()
                                             on:change=move |event| {
                                                 context.set_touch_mode(&event_target_value(&event));
@@ -605,7 +605,7 @@ pub fn SettingsTab() -> impl IntoView {
                                 </div>
                             </div>
 
-                            <div class="space-y-3 py-4 border-b border-white/10">
+                            <div class="space-y-3 py-4 border-b border-[var(--af-border-hairline)]">
                                 <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
                                     {move || tt(context, "Settings.atmosphereTitle")}
                                 </h3>
@@ -729,7 +729,7 @@ pub fn SettingsTab() -> impl IntoView {
                                     <p
                                         role="status"
                                         data-testid="settings-reduced-motion-hint"
-                                        class="text-xs text-amber-300 bg-amber-950/30 border border-amber-500/30 rounded-lg px-3 py-2"
+                                        class="af-warning-banner text-xs"
                                     >
                                         {move || tt(context, "Settings.reducedMotionActiveHint")}
                                     </p>
@@ -739,7 +739,7 @@ pub fn SettingsTab() -> impl IntoView {
                                     <button
                                         type="button"
                                         data-testid="settings-atmosphere-reset"
-                                        class="glass-button px-3 py-1.5 text-xs"
+                                        class="af-btn px-3 py-1.5 text-xs"
                                         on:click=move |_| {
                                             context.reset_atmosphere_defaults();
                                             context.haptic(8);

@@ -18,7 +18,6 @@ const OVERLAY_CARD_ALLOWLIST: &[&str] = &[];
 /// this list to empty, and Commit 5 deletes the allowlist completely.
 const LEGACY_CLASS_ALLOWLIST: &[&str] = &[
     "crates/af-web-app/src/tabs/ai_chat.rs",
-    "crates/af-web-app/src/tabs/audit.rs",
     "crates/af-web-app/src/tabs/cluster/grants.rs",
     "crates/af-web-app/src/tabs/cluster/mod.rs",
     "crates/af-web-app/src/tabs/cluster/pairing.rs",
@@ -28,11 +27,6 @@ const LEGACY_CLASS_ALLOWLIST: &[&str] = &[
     "crates/af-web-app/src/tabs/fileshare/local_storage.rs",
     "crates/af-web-app/src/tabs/fileshare/policy_audit.rs",
     "crates/af-web-app/src/tabs/fileshare/shares.rs",
-    "crates/af-web-app/src/tabs/inbox.rs",
-    "crates/af-web-app/src/tabs/l10n.rs",
-    "crates/af-web-app/src/tabs/marketplace/catalog.rs",
-    "crates/af-web-app/src/tabs/marketplace/mod.rs",
-    "crates/af-web-app/src/tabs/marketplace/sandbox.rs",
     "crates/af-web-app/src/tabs/mcbrowser/actions.rs",
     "crates/af-web-app/src/tabs/mcbrowser/editor.rs",
     "crates/af-web-app/src/tabs/mcbrowser/events.rs",
@@ -46,20 +40,6 @@ const LEGACY_CLASS_ALLOWLIST: &[&str] = &[
     "crates/af-web-app/src/tabs/network/tailscale.rs",
     "crates/af-web-app/src/tabs/network/tailscale_ingress.rs",
     "crates/af-web-app/src/tabs/network/wireguard.rs",
-    "crates/af-web-app/src/tabs/notifications.rs",
-    "crates/af-web-app/src/tabs/overview/mod.rs",
-    "crates/af-web-app/src/tabs/overview/widgets.rs",
-    "crates/af-web-app/src/tabs/quotas.rs",
-    "crates/af-web-app/src/tabs/services/logs.rs",
-    "crates/af-web-app/src/tabs/services/mod.rs",
-    "crates/af-web-app/src/tabs/settings/backups_oidc.rs",
-    "crates/af-web-app/src/tabs/settings/forms.rs",
-    "crates/af-web-app/src/tabs/settings/metadata.rs",
-    "crates/af-web-app/src/tabs/settings/mod.rs",
-    "crates/af-web-app/src/tabs/settings/oidc.rs",
-    "crates/af-web-app/src/tabs/settings/providers.rs",
-    "crates/af-web-app/src/tabs/settings/security.rs",
-    "crates/af-web-app/src/tabs/settings/updates.rs",
     "crates/af-web-app/src/tabs/streaming/administration.rs",
     "crates/af-web-app/src/tabs/streaming/analytics.rs",
     "crates/af-web-app/src/tabs/streaming/connections.rs",
@@ -69,7 +49,6 @@ const LEGACY_CLASS_ALLOWLIST: &[&str] = &[
     "crates/af-web-app/src/tabs/streaming/mod.rs",
     "crates/af-web-app/src/tabs/streaming/portability.rs",
     "crates/af-web-app/src/tabs/streaming/reconciliation.rs",
-    "crates/af-web-app/src/tabs/users.rs",
 ];
 
 fn frontend_rs_root() -> PathBuf {

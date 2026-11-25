@@ -194,7 +194,7 @@ pub fn OverviewTab() -> impl IntoView {
     });
     view! {
         <section class="py-5 space-y-6 min-w-0 max-w-full">
-            <div class="af-overview-intro px-1 pb-5 border-b border-white/10 flex flex-wrap justify-between items-start gap-4">
+            <div class="af-canvas-section af-overview-intro px-1 pb-5 flex flex-wrap justify-between items-start gap-4">
                 <div class="min-w-0">
                     <p class="text-xs uppercase tracking-[.2em] text-indigo-300">
                         {move || tt(context, "AetherNexus / System pulse")}
@@ -208,7 +208,7 @@ pub fn OverviewTab() -> impl IntoView {
                 </div>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2 min-h-11 text-sm shrink-0"
+                    class="af-btn px-4 py-2 min-h-11 text-sm shrink-0"
                     data-testid="overview-configure-button"
                     on:click=move |_| context.navigate_to_subtab(TabId::Settings, "general")
                 >
@@ -252,7 +252,7 @@ pub fn OverviewTab() -> impl IntoView {
                     </div>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2 min-h-11 text-xs shrink-0"
+                        class="af-btn px-4 py-2 min-h-11 text-xs shrink-0"
                         data-testid="overview-triage-services-button"
                         on:click=move |_| context.navigate_to_subtab(TabId::Services, "attention")
                     >
@@ -281,8 +281,8 @@ pub fn OverviewTab() -> impl IntoView {
                     </p>
                 </div>
             </Show>
-            <details class="obs-telemetry-surface p-5 border-b border-white/10">
-                <summary class="cursor-pointer font-semibold min-h-11">
+            <details class="af-canvas-section p-5">
+                <summary class="cursor-pointer font-semibold min-h-11 py-2.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]">
                     {move || tt(context, "Overview.hardwareProfile")}
                 </summary>
                 <Show when=move || hardware.loading.get()>
@@ -293,7 +293,11 @@ pub fn OverviewTab() -> impl IntoView {
                 <Show when=move || hardware.error.get().is_some()>
                     <p role="alert" class="text-amber-300">
                         {move || tt(context, "Hardware report unavailable.")}
-                        <button class="underline ml-3" on:click=move |_| hardware.refresh()>
+                        <button
+                            type="button"
+                            class="underline ml-3 min-h-9 py-1.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]"
+                            on:click=move |_| hardware.refresh()
+                        >
                             {move || tt(context, "Retry")}
                         </button>
                     </p>
@@ -443,7 +447,7 @@ pub fn OverviewTab() -> impl IntoView {
                     <div
                         role="group"
                         aria-label=move || tt(context, "Telemetry History Window")
-                        class="flex flex-wrap gap-1"
+                        class="af-surface-inset p-1 flex flex-wrap gap-1"
                     >
                         {TelemetryWindow::ALL
                             .into_iter()
@@ -452,8 +456,8 @@ pub fn OverviewTab() -> impl IntoView {
                                 view! {
                                     <button
                                         type="button"
-                                        class="obs-tab-pill px-3 py-2 min-h-11"
-                                        class:obs-tab-pill-active=move || window.get() == option
+                                        class="af-tab-pill px-3 py-2 min-h-11"
+                                        class:af-tab-pill-active=move || window.get() == option
                                         aria-pressed=move || (window.get() == option).to_string()
                                         data-testid=format!("history-window-{key}")
                                         on:click=move |_| window.set(option)
@@ -468,7 +472,7 @@ pub fn OverviewTab() -> impl IntoView {
                 <div
                     role="group"
                     aria-label=move || tt(context, "Telemetry metric series")
-                    class="flex flex-wrap gap-2 mb-4"
+                    class="af-surface-inset p-1 flex flex-wrap gap-1.5 mb-4"
                 >
                     {[
                         ("cpu", "CPU %"),
@@ -485,8 +489,8 @@ pub fn OverviewTab() -> impl IntoView {
                             view! {
                                 <button
                                     type="button"
-                                    class="obs-tab-pill px-3 py-2 min-h-11"
-                                    class:obs-tab-pill-active=move || series.get() == key
+                                    class="af-tab-pill px-3 py-2 min-h-11"
+                                    class:af-tab-pill-active=move || series.get() == key
                                     aria-pressed=move || (series.get() == key).to_string()
                                     data-testid=format!("telemetry-series-{key}")
                                     on:click=move |_| series.set(key.into())
@@ -606,7 +610,11 @@ pub fn OverviewTab() -> impl IntoView {
                             context,
                             "History unavailable. Showing measured live telemetry.",
                         )}
-                        <button class="ml-3 underline" on:click=move |_| history.refresh()>
+                        <button
+                            type="button"
+                            class="ml-3 underline min-h-9 py-1.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]"
+                            on:click=move |_| history.refresh()
+                        >
                             {move || tt(context, "Retry")}
                         </button>
                     </p>
@@ -666,7 +674,7 @@ pub fn OverviewTab() -> impl IntoView {
                             .collect_view()}
                     </div>
                     <button
-                        class="glass-button px-4 py-2 min-h-11"
+                        class="af-btn px-4 py-2 min-h-11"
                         on:click=move |_| context.select_tab(TabId::Services)
                     >
                         {move || tt(context, "Inspect Units")}

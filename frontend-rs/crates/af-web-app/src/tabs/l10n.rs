@@ -152,7 +152,7 @@ pub fn ConfirmDialog(
             <div class="flex justify-end gap-3">
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || busy.get()
                     on:click=move |_| open.set(false)
                 >
@@ -160,7 +160,7 @@ pub fn ConfirmDialog(
                 </button>
                 <button
                     type="button"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || busy.get()
                     on:click=move |_| {
                         let valid = captured

@@ -327,7 +327,7 @@ pub(super) fn ProfileSecurity() -> impl IntoView {
                             </p>
                             <button
                                 type="button"
-                                class="glass-button px-4 py-2"
+                                class="af-btn px-4 py-2"
                                 on:click=move |_| context.exit_to_local_server()
                             >
                                 {move || tt(context, "PeerSwitch.exitToThisServer")}
@@ -652,15 +652,15 @@ fn LocalProfileSecurity() -> impl IntoView {
                 {move || {
                     let avatar = context.user.with(|user| user.as_ref().map(|user| text(user, "avatar_url")).unwrap_or_default());
                     if let Some(src) = profile_avatar_src(&avatar) {
-                        view! { <img src=src alt=move || tt(context, "Profile avatar") class="h-20 w-20 rounded-xl object-cover border border-white/10" /> }.into_any()
+                        view! { <img src=src alt=move || tt(context, "Profile avatar") class="h-20 w-20 rounded-xl object-cover border border-[var(--af-border-hairline)]" /> }.into_any()
                     } else {
-                        view! { <div role="img" aria-label=move || tt(context, "Profile avatar") class="h-20 w-20 rounded-xl border border-white/10 flex items-center justify-center text-xl">
+                        view! { <div role="img" aria-label=move || tt(context, "Profile avatar") class="h-20 w-20 rounded-xl border border-[var(--af-border-hairline)] flex items-center justify-center text-xl">
                             {move || context.user.with(|user| user.as_ref().and_then(|user| text(user, "username").chars().next()).map(|c| c.to_uppercase().to_string()).unwrap_or_default())}
                         </div> }.into_any()
                     }
                 }}
                 <div class="flex flex-wrap gap-2 items-center">
-                    <label class="glass-button px-4 py-2 cursor-pointer">
+                    <label class="af-btn px-4 py-2 cursor-pointer">
                         {move || tt(context, "Upload avatar")}
                         <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" class="block mt-2 max-w-full" disabled=move || avatar_busy.get()
                             on:change=move |event| {
@@ -669,7 +669,7 @@ fn LocalProfileSecurity() -> impl IntoView {
                                 input.set_value("");
                             } />
                     </label>
-                    <button type="button" class="glass-button px-4 py-2" disabled=move || avatar_busy.get() || context.user.with(|user| user.as_ref().is_none_or(|user| text(user, "avatar_url").is_empty()))
+                    <button type="button" class="af-btn px-4 py-2" disabled=move || avatar_busy.get() || context.user.with(|user| user.as_ref().is_none_or(|user| text(user, "avatar_url").is_empty()))
                         on:click=move |_| update_avatar(None)>{move || tt(context, "Remove avatar")}</button>
                 </div>
             </div>
@@ -694,7 +694,7 @@ fn LocalProfileSecurity() -> impl IntoView {
                 <DraftInput draft field="email" label="Email address" kind="email" required=true />
                 <button
                     type="submit"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || busy.get()
                 >
                     {move || tt(context, "Update profile")}
@@ -728,7 +728,7 @@ fn LocalProfileSecurity() -> impl IntoView {
                     kind="password"
                     required=true
                 />
-                <button type="submit" class="glass-button px-4 py-2" disabled=move || busy.get()>
+                <button type="submit" class="af-btn px-4 py-2" disabled=move || busy.get()>
                     {move || tt(context, "Update password")}
                 </button>
             </form>
@@ -752,7 +752,7 @@ fn LocalProfileSecurity() -> impl IntoView {
             <div class="flex flex-wrap gap-3">
                 <button
                     type="button"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || busy.get()
                     on:click=move |_| mutate("setup")
                 >
@@ -760,7 +760,7 @@ fn LocalProfileSecurity() -> impl IntoView {
                 </button>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     on:click=move |_| disable.set(true)
                 >
                     {move || tt(context, "Disable TOTP")}
@@ -777,7 +777,7 @@ fn LocalProfileSecurity() -> impl IntoView {
             </div>
             <button
                 type="button"
-                class="glass-button px-4 py-2 mt-4"
+                class="af-btn px-4 py-2 mt-4"
                 disabled=move || busy.get()
                 on:click=move |_| mutate("regenerate")
             >
@@ -802,7 +802,7 @@ fn LocalProfileSecurity() -> impl IntoView {
                     let bar_class = if summary.percentage >= 95.0 {
                         "fill-rose-400"
                     } else if summary.percentage >= 80.0 {
-                        "fill-amber-400"
+                        "fill-amber-500"
                     } else {
                         "fill-emerald-400"
                     };
@@ -883,7 +883,7 @@ fn LocalProfileSecurity() -> impl IntoView {
         </section>
         <ObsCard title=Signal::derive(move || tt(context, "Settings.sessionFamilies"))>
             <ResourceFeedback resource=sessions />
-            <button type="button" class="glass-button px-3 py-2" disabled=move || busy.get() || other_sessions.with(Vec::is_empty)
+            <button type="button" class="af-btn px-3 py-2" disabled=move || busy.get() || other_sessions.with(Vec::is_empty)
                 on:click=revoke_others>{move || tt(context, "Revoke all other sessions")}</button>
             {move || {
                 sessions
@@ -900,7 +900,7 @@ fn LocalProfileSecurity() -> impl IntoView {
                         let activity = tt_with(context, "Last active: {last} · Expires: {expires}", &[("last", &(text(&session, "last_active")).to_string()), ("expires", &(text(&session, "expires_at")).to_string())]);
                         let agent = text(&session, "user_agent");
                         view! {
-                            <div class="flex flex-wrap items-center justify-between gap-4 border-t border-white/10 py-4">
+                            <div class="flex flex-wrap items-center justify-between gap-4 border-t border-[var(--af-border-hairline)] py-4">
                                 <div class="min-w-0">
                                     <p class="text-sm break-all">{title}</p>
                                     <p class="text-xs text-slate-400 break-words">{agent}</p>
@@ -908,7 +908,7 @@ fn LocalProfileSecurity() -> impl IntoView {
                                 </div>
                                 <button
                                     type="button"
-                                    class="glass-button px-4 py-2"
+                                    class="af-btn px-4 py-2"
                                     disabled=move || busy.get()
                                     on:click=move |_| revoke(session.clone())
                                 >
@@ -934,7 +934,7 @@ fn LocalProfileSecurity() -> impl IntoView {
             <code class="block break-all my-4">
                 {move || enrollment.with(|v| text(v, "secret"))}
             </code>
-            <button type="button" class="glass-button px-3 py-2" on:click=move |_| {
+            <button type="button" class="af-btn px-3 py-2" on:click=move |_| {
                 let secret = enrollment.with_untracked(|v| text(v, "secret"));
                 if let Some(window) = web_sys::window() {
                     let write = window.navigator().clipboard().write_text(&secret);
@@ -952,7 +952,7 @@ fn LocalProfileSecurity() -> impl IntoView {
             >
                 <DraftInput draft field="code" label="Six-digit verification code" required=true />
                 <button
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     type="submit"
                     disabled=move || busy.get()
                 >
@@ -974,7 +974,7 @@ fn LocalProfileSecurity() -> impl IntoView {
             </pre>
             <button
                 type="button"
-                class="glass-button px-4 py-2 mt-4"
+                class="af-btn px-4 py-2 mt-4"
                 on:click=move |_| {
                     let content = recovery
                         .get_untracked()

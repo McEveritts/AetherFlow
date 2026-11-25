@@ -106,7 +106,7 @@ pub fn ResourceFeedback(resource: ApiResource) -> impl IntoView {
                 {move || resource.error.get().map(|error| tt(context, &error.message))}
                 <button
                     type="button"
-                    class="glass-button px-3 py-2"
+                    class="af-btn px-3 py-2"
                     on:click=move |_| resource.refresh()
                 >
                     {move || tt(context, "Common.retry")}
@@ -130,7 +130,7 @@ pub fn DraftInput(
         <label class="block text-sm space-y-2 min-w-0">
             <span class="text-slate-300">{move || tt(context, &label.get())}</span>
             <input
-                class="glass-input px-3 py-2 w-full min-w-0"
+                class="af-input px-3 py-2 w-full min-w-0"
                 type=kind
                 placeholder=move || tt(context, &placeholder.get())
                 required=required
@@ -155,7 +155,7 @@ pub fn DraftSelect(
         <label class="block text-sm space-y-2 min-w-0">
             <span>{move || tt(context, &label.get())}</span>
             <select
-                class="glass-input px-3 py-2 w-full"
+                class="af-input px-3 py-2 w-full"
                 disabled=move || disabled.get()
                 prop:value=move || text(&draft_value(draft), field)
                 on:change=move |event| edit(draft, field, json!(event_target_value(&event)))
@@ -192,6 +192,7 @@ pub fn DraftCheck(
         <label class="flex items-center gap-3 text-sm py-2">
             <input
                 type="checkbox"
+                class="obs-checkbox"
                 disabled=move || disabled.get()
                 prop:checked=move || draft_value(draft)[field].as_bool().unwrap_or(false)
                 on:change=move |event| edit(draft, field, json!(event_target_checked(&event)))
@@ -224,7 +225,7 @@ pub fn DraftButtons(
             </span>
             <button
                 type="button"
-                class="glass-button px-4 py-2"
+                class="af-btn px-4 py-2"
                 disabled=move || busy.get() || !draft.with(FormDraft::is_dirty)
                 on:click=move |_| draft.update(FormDraft::reset)
             >
@@ -232,7 +233,7 @@ pub fn DraftButtons(
             </button>
             <button
                 type="button"
-                class="glass-button-primary px-4 py-2"
+                class="af-btn-primary px-4 py-2"
                 disabled=move || busy.get() || disabled.get() || !draft.with(FormDraft::is_dirty)
                 title=move || title.get()
                 on:click=move |_| on_save.run(())

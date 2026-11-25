@@ -602,7 +602,7 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
                     <div class="flex flex-wrap gap-3">
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || {
                                 check.loading.get()
                                     || !context.can_read_area(crate::state::PeerArea::Updates)
@@ -629,7 +629,7 @@ pub(super) fn SystemUpdates(draft: JsonDraft, settings_busy: RwSignal<bool>) -> 
                         </button>
                         <button
                             type="button"
-                            class="glass-button-primary px-4 py-2"
+                            class="af-btn-primary px-4 py-2"
                             disabled=move || !can_launch.get()
                             title=move || {
                                 context
