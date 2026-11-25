@@ -7,7 +7,7 @@ Tier 3: Cross-Feature Combinations (Pairwise Interoperability)
 4. Quotas Panel + Privileged Runner Quota + Quota Manager Enforcement
 5. Network VPN Panel + Privileged Runner Network + WireGuard/Tailscale
 6. Peer Runtime + Cluster Tab + Peer Administration
-7. External Rust WASM Pipeline + Embedded SPA + Obsidian CSS Tokens
+7. External Rust WASM Pipeline + Embedded SPA + Flat Design System Tokens
 8. Systemd Privilege Units + Sudoers Purge + Caller Migration + Sandbox
 9. Debian 13 APT Sources + Core OS Detection + Package Modernization + Keyrings
 10. AI Telemetry Predictions + Bandwidth Tuning + OverviewTab Mounting
@@ -109,16 +109,25 @@ class TestComboPeerClusterManagement(TestCase):
 
 class TestComboExternalWasmSpaAtmosphere(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_07", "F32+F11+F13+F14", 3, "External Rust WASM deployment and Obsidian V2 CSS foundation")
+        super().__init__("T3_COMBO_07", "F32+F11+F13+F14", 3, "External Rust WASM deployment and flat design system CSS foundation")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         stack = inspector.read_file("setup/modules/modern_stack.sh")
         embed = inspector.read_file(EMBED_RS)
         css = inspector.read_file("frontend-rs/styles/input.css")
+        clean_css = re.sub(r'/\*.*?\*/', '', css or "", flags=re.DOTALL)
         stages_wasm = bool(stack and "build_wasm_frontend.sh" in stack and "${release_dir}/web/dist" in stack)
         serves_external = bool(embed and 'join("web/dist")' in embed and "RustEmbed" not in embed)
-        has_obsidian = bool(css and "--obs-bg-base:" in css and "var(--obs-bg-base)" in css and "--obs-chromatic-edge-gradient" in css)
-        self.assert_true(stages_wasm and serves_external and has_obsidian, "Combo 07: WASM staging, external serving, and Obsidian CSS must be satisfied")
+        has_flat_css = bool(
+            clean_css
+            and "--af-bg-canvas:" in clean_css
+            and "var(--af-bg-canvas)" in clean_css
+            and 'html[data-theme="light"]' in clean_css
+            and "@layer components" in clean_css
+            and "backdrop-filter" not in clean_css
+            and "--obs-chromatic-edge-gradient" not in clean_css
+        )
+        self.assert_true(stages_wasm and serves_external and has_flat_css, "Combo 07: WASM staging, external serving, and flat CSS design tokens must be satisfied")
 
 
 class TestComboPrivilegeBoundarySandbox(TestCase):
@@ -176,7 +185,7 @@ class TestComboDeploySseGateway(TestCase):
 
 class TestComboResponsiveDockScrollerContainment(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_12", "F15+F16+F18", 3, "Tri-mode mobile dock, scroller containment invariant, and Obsidian UI primitives")
+        super().__init__("T3_COMBO_12", "F15+F16+F18", 3, "Tri-mode mobile dock, scroller containment invariant, and flat UI primitives")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         css = inspector.read_file("frontend-rs/styles/input.css")

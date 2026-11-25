@@ -603,128 +603,6 @@ pub fn SettingsTab() -> impl IntoView {
                                         </select>
                                     </div>
                                 </div>
-                            </div>
-
-                            <div class="space-y-3 py-4 border-b border-[var(--af-border-hairline)]">
-                                <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                                    {move || tt(context, "Settings.atmosphereTitle")}
-                                </h3>
-                                <div class="space-y-1.5">
-                                    <div class="flex items-center justify-between gap-3">
-                                        <label
-                                            for="settings-aurora-opacity"
-                                            class="text-sm font-medium"
-                                        >
-                                            {move || tt(context, "Settings.auroraOpacity")}
-                                        </label>
-                                        <output
-                                            for="settings-aurora-opacity"
-                                            data-testid="settings-aurora-opacity-value"
-                                            class="text-xs font-mono font-semibold text-indigo-300"
-                                        >
-                                            {move || format!("{}%", context.aurora_opacity.get())}
-                                        </output>
-                                    </div>
-                                    <p
-                                        id="settings-aurora-opacity-desc"
-                                        class="text-xs text-slate-400"
-                                    >
-                                        {move || tt(context, "Settings.auroraOpacityDescription")}
-                                    </p>
-                                    <input
-                                        id="settings-aurora-opacity"
-                                        type="range"
-                                        min="0"
-                                        max="100"
-                                        step="5"
-                                        aria-describedby="settings-aurora-opacity-desc"
-                                        aria-valuetext=move || format!("{}%", context.aurora_opacity.get())
-                                        class="obs-touch-target-standard w-full accent-indigo-500 cursor-pointer"
-                                        prop:value=move || context.aurora_opacity.get().to_string()
-                                        on:input=move |event| {
-                                            context.set_aurora_opacity_str(&event_target_value(&event));
-                                        }
-                                        on:change=move |event| {
-                                            context.set_aurora_opacity_str(&event_target_value(&event));
-                                        }
-                                    />
-                                </div>
-
-                                <div class="py-1">
-                                    <label class="flex items-center gap-3 text-sm cursor-pointer">
-                                        <input
-                                            id="settings-aurora-animation"
-                                            type="checkbox"
-                                            class="obs-checkbox"
-                                            aria-describedby="settings-aurora-animation-desc"
-                                            prop:checked=move || context.aurora_animation.get()
-                                            on:change=move |event| {
-                                                context.set_aurora_animation(event_target_checked(&event));
-                                                context.haptic(6);
-                                            }
-                                        />
-                                        <span class="font-medium">
-                                            {move || tt(context, "Settings.auroraAnimation")}
-                                        </span>
-                                    </label>
-                                    <p
-                                        id="settings-aurora-animation-desc"
-                                        class="text-xs text-slate-400 mt-1 pl-7"
-                                    >
-                                        {move || tt(context, "Settings.auroraAnimationDescription")}
-                                    </p>
-                                </div>
-
-                                <div class="py-1">
-                                    <label class="flex items-center gap-3 text-sm cursor-pointer">
-                                        <input
-                                            id="settings-grain-display"
-                                            type="checkbox"
-                                            class="obs-checkbox"
-                                            aria-describedby="settings-grain-display-desc"
-                                            prop:checked=move || context.grain_display.get()
-                                            on:change=move |event| {
-                                                context.set_grain_display(event_target_checked(&event));
-                                                context.haptic(6);
-                                            }
-                                        />
-                                        <span class="font-medium">
-                                            {move || tt(context, "Settings.grainDisplay")}
-                                        </span>
-                                    </label>
-                                    <p
-                                        id="settings-grain-display-desc"
-                                        class="text-xs text-slate-400 mt-1 pl-7"
-                                    >
-                                        {move || tt(context, "Settings.grainDisplayDescription")}
-                                    </p>
-                                </div>
-
-                                <div class="py-1">
-                                    <label class="flex items-center gap-3 text-sm cursor-pointer">
-                                        <input
-                                            id="settings-card-lift"
-                                            type="checkbox"
-                                            class="obs-checkbox"
-                                            aria-describedby="settings-card-lift-desc"
-                                            prop:checked=move || context.card_lift.get() != 0
-                                            on:change=move |event| {
-                                                context.set_card_lift_enabled(event_target_checked(&event));
-                                                context.haptic(6);
-                                            }
-                                        />
-                                        <span class="font-medium">
-                                            {move || tt(context, "Settings.cardLift")}
-                                        </span>
-                                    </label>
-                                    <p
-                                        id="settings-card-lift-desc"
-                                        class="text-xs text-slate-400 mt-1 pl-7"
-                                    >
-                                        {move || tt(context, "Settings.cardLiftDescription")}
-                                    </p>
-                                </div>
-
                                 <Show when=move || context.effective_reduced_motion()>
                                     <p
                                         role="status"
@@ -734,20 +612,6 @@ pub fn SettingsTab() -> impl IntoView {
                                         {move || tt(context, "Settings.reducedMotionActiveHint")}
                                     </p>
                                 </Show>
-
-                                <div class="pt-1">
-                                    <button
-                                        type="button"
-                                        data-testid="settings-atmosphere-reset"
-                                        class="af-btn px-3 py-1.5 text-xs"
-                                        on:click=move |_| {
-                                            context.reset_atmosphere_defaults();
-                                            context.haptic(8);
-                                        }
-                                    >
-                                        {move || tt(context, "Reset atmosphere defaults")}
-                                    </button>
-                                </div>
                             </div>
 
                             <div class="pt-3">
@@ -769,6 +633,7 @@ pub fn SettingsTab() -> impl IntoView {
                                 </label>
                                 <label class="flex items-center gap-3 text-sm py-2">
                                     <input
+                                        id="settings-reduced-motion"
                                         type="checkbox"
                                         class="obs-checkbox"
                                         prop:checked=move || context.reduced_motion.get()

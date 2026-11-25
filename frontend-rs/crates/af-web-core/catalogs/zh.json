@@ -1887,15 +1887,8 @@
   "Settings": {
     "apiKeyPlaceholder": "输入您的 Gemini API 密钥...",
     "apiKeyTitle": "Gemini API 密钥",
-    "atmosphereTitle": "氛围与表面物理",
-    "auroraAnimation": "极光动画",
-    "auroraAnimationDescription": "持续动态演化三球背景极光，而非保持静态缓存图层。",
-    "auroraOpacity": "极光不透明度",
-    "auroraOpacityDescription": "调节画布背景中径向宇宙极光的亮度。",
     "backupsRestore": "备份与恢复",
     "baseDomain": "基础域名",
-    "cardLift": "卡片悬停抬升",
-    "cardLiftDescription": "指针悬停时以弹簧物理效果轻微抬升玻璃卡片。",
     "checkingUpdates": "正在检查更新...",
     "defaultDashboard": "默认仪表板",
     "defaultModel": "默认语言模型",
@@ -1907,14 +1900,12 @@
     "flowAIEngine": "FlowAI 引擎",
     "flowAIProviders": "FlowAI 提供商",
     "generalLocalization": "常规与本地化",
-    "grainDisplay": "触感微粒纹理",
-    "grainDisplayDescription": "渲染细腻的分形微粒噪点与边缘暗角以增强空间层次感。",
     "hapticFeedback": "触觉反馈",
     "highRefresh120": "120Hz 高刷新率",
     "highRefresh60": "60Hz 标准刷新率",
     "highRefreshAuto": "自动（检测到 {hz}Hz）",
     "highRefreshCadence": "高刷新率节奏",
-    "highRefreshDescription": "针对高刷新率屏幕优化交互与卡片过渡时长（110ms / 150ms 对比 160ms / 200ms）。",
+    "highRefreshDescription": "针对高刷新率屏幕优化交互与界面过渡时长（110ms / 150ms 对比 160ms / 200ms）。",
     "inputStatusFine": "输入：精细指针",
     "inputStatusTouch": "输入：触控优化（≥44px）",
     "interfacePreferences": "界面偏好",
@@ -1928,7 +1919,7 @@
     "pinSidebar": "固定桌面侧边栏",
     "profileSecurity": "个人资料与安全",
     "reducedMotion": "减少界面动态效果",
-    "reducedMotionActiveHint": "减少动态效果已启用；极光动画、卡片悬停抬升与高帧率过渡已被抑制。",
+    "reducedMotionActiveHint": "减少动态效果已启用；高刷新率节奏与界面过渡效果已被抑制。",
     "saveConfig": "保存配置",
     "saveSettings": "保存设置",
     "saving": "保存中...",
@@ -2767,6 +2758,5 @@
     "liveLogsClosed": "日志流已关闭",
     "liveLogsRevoked": "实时日志流已关闭（代码 {code}）；对等节点访问权限可能已变更或被撤销。",
     "remoteShareOriginUnavailable": "{server} 的公开分享链接不可用，因为未配置公共基础域名或无法读取设置。请在 {server} 上配置公共基础域名并授予设置读取权限以创建远程分享链接。"
-  },
-  "Reset atmosphere defaults": "重置氛围默认设置"
+  }
 }

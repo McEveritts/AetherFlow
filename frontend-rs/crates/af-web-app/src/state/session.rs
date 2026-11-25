@@ -278,11 +278,6 @@ pub fn install_session(context: AppContext) {
                             | "aetherflow-haptic-feedback"
                             | "aetherflow-high-refresh-mode"
                             | "aetherflow-touch-mode"
-                            | "aetherflow-aurora-opacity"
-                            | "aetherflow-aurora-animation"
-                            | "aetherflow-grain-display"
-                            | "aetherflow-grain"
-                            | "aetherflow-card-lift"
                             | "aetherflow-system-storage"
                             | "aetherflow-connection-storage"
                     )
@@ -309,10 +304,6 @@ pub fn install_session(context: AppContext) {
                 context.haptic_feedback.set(hydrated.haptic_feedback);
                 context.high_refresh_mode.set(hydrated.high_refresh_mode);
                 context.touch_mode.set(hydrated.touch_mode);
-                context.aurora_opacity.set(hydrated.aurora_opacity);
-                context.aurora_animation.set(hydrated.aurora_animation);
-                context.grain_display.set(hydrated.grain_display);
-                context.card_lift.set(hydrated.card_lift);
             }
             if key
                 .as_deref()

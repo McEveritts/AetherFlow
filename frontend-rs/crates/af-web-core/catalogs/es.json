@@ -1887,15 +1887,8 @@
   "Settings": {
     "apiKeyPlaceholder": "Introduce tu clave API de Gemini...",
     "apiKeyTitle": "Clave de API de Gemini",
-    "atmosphereTitle": "Atmósfera y física de superficies",
-    "auroraAnimation": "Animación de aurora",
-    "auroraAnimationDescription": "Anima continuamente la aurora cósmica ambiental de tres orbes en lugar de mantener una capa estática.",
-    "auroraOpacity": "Opacidad de la aurora",
-    "auroraOpacityDescription": "Ajusta la luminancia de la aurora cósmica radial sobre el lienzo de fondo.",
     "backupsRestore": "Copias de seguridad y restauración",
     "baseDomain": "Dominio base",
-    "cardLift": "Elevación de tarjetas al pasar el cursor",
-    "cardLiftDescription": "Eleva suavemente las tarjetas de cristal al pasar el puntero con física elástica.",
     "checkingUpdates": "Comprobando actualizaciones...",
     "defaultDashboard": "Panel predeterminado",
     "defaultModel": "Modelo de Lenguaje Predeterminado",
@@ -1907,14 +1900,12 @@
     "flowAIEngine": "Motor FlowAI",
     "flowAIProviders": "Proveedores de FlowAI",
     "generalLocalization": "General y localización",
-    "grainDisplay": "Grano táctil",
-    "grainDisplayDescription": "Muestra una sutil microtextura fractal y viñeta perimetral para dar profundidad física.",
     "hapticFeedback": "Respuesta háptica",
     "highRefresh120": "120Hz alta frecuencia",
     "highRefresh60": "60Hz estándar",
     "highRefreshAuto": "Automático ({hz}Hz detectados)",
     "highRefreshCadence": "Cadencia de alta frecuencia",
-    "highRefreshDescription": "Ajusta la duración de transiciones interactivas y de tarjetas (110ms / 150ms frente a 160ms / 200ms) para pantallas rápidas.",
+    "highRefreshDescription": "Ajusta la duración de las transiciones interactivas y de la interfaz (110ms / 150ms frente a 160ms / 200ms) para pantallas rápidas.",
     "inputStatusFine": "Entrada: Puntero preciso",
     "inputStatusTouch": "Entrada: Optimizado para toque (≥44px)",
     "interfacePreferences": "Preferencias de Interfaz",
@@ -1928,7 +1919,7 @@
     "pinSidebar": "Fijar la barra lateral de escritorio",
     "profileSecurity": "Perfil y seguridad",
     "reducedMotion": "Reducir el movimiento de la interfaz",
-    "reducedMotionActiveHint": "La reducción de movimiento está activa; se suprimen la animación de aurora, la elevación de tarjetas y las curvas rápidas.",
+    "reducedMotionActiveHint": "La reducción de movimiento está activa; se suprimen la cadencia de alta frecuencia y las transiciones de la interfaz.",
     "saveConfig": "Guardar Configuración",
     "saveSettings": "Guardar ajustes",
     "saving": "Guardando...",
@@ -2767,6 +2758,5 @@
     "liveLogsClosed": "Transmisión cerrada",
     "liveLogsRevoked": "Transmisión de registros en vivo cerrada (código {code}); es posible que el acceso del par haya cambiado o sido revocado.",
     "remoteShareOriginUnavailable": "Los enlaces públicos de compartición no están disponibles para {server} porque su dominio base público no está configurado o no se puede leer. Configura un dominio base público en {server} y concede permiso de lectura de Configuración para crear enlaces compartidos remotos."
-  },
-  "Reset atmosphere defaults": "Restablecer valores predeterminados de atmósfera"
+  }
 }

@@ -33,7 +33,7 @@ Twelve workspace crates in `backend-rs` compile into `aetherflow-api` (serving t
 
 ### 1. `af-api` (`backend-rs/crates/af-api`) — HTTP/WS Control Plane and Dashboard
 
-- **Rust WASM UI**: Trunk builds `frontend-rs/` into static HTML, CSS, JavaScript loaders, and WebAssembly for the app and workers. CI stages these as external `web/dist` release assets. Serving the dashboard requires no Node.js daemon.
+- **Rust WASM UI**: Trunk builds `frontend-rs/` into static HTML, CSS, JavaScript loaders, and WebAssembly for the app and workers using the unified dark/light flat surface and control hierarchy (see [Design System](./design-system.md)). CI stages these as external `web/dist` release assets. Serving the dashboard requires no Node.js daemon.
 - **Static Serving**: `aetherflow-api` serves existing assets from `<exe-dir>/web/dist` by default (or `STATIC_DIR` when explicitly set, failing closed if empty or invalid) and returns `index.html` for supported client routes. Entry points revalidate; content-addressed assets can be cached for one year.
 - **Security, Plugin RBAC & Gateway Middleware**:
   - Enforces HS256 JWT sessions (`aetherflow_session` cookie or `Authorization: Bearer`), uniform SQLite-backed token revocation and unexpired `active_sessions` enforcement (`verify_active_session_on_conn` across all HTTP, proxy, app-launch, `/metrics`, optional marketplace, WebSocket, and OIDC `/authorize` surfaces), optional per-user TOTP 2FA, OIDC/OAuth2 PKCE, outer `host_validation_middleware` (canonical loopback IPs only without `ALLOWED_HOSTS`), and per-IP rate limiting (including `/api/v1/auth/refresh` and `/api/auth/refresh`).

@@ -1,8 +1,7 @@
 use super::{
     clamp_tab_for_role, confirmed_session_identity, detect_browser_locale,
-    format_aurora_opacity_unit, hydrate_preferences_with, is_spa_fallback_path,
-    normalize_aurora_opacity_pct, normalize_card_lift, normalize_high_refresh_mode,
-    normalize_theme, normalize_touch_mode, quantize_refresh_rate, resolve_high_refresh_active,
+    hydrate_preferences_with, is_spa_fallback_path, normalize_high_refresh_mode, normalize_theme,
+    normalize_touch_mode, quantize_refresh_rate, resolve_high_refresh_active,
     resolve_touch_mode_active, run_resource_read, same_authenticated_identity, ApiResource,
     AppContext, ResourceReads, TabId, Toast,
 };
@@ -597,29 +596,6 @@ fn display_preference_normalizers_handle_aliases_and_quantize_steps() {
     assert_eq!(normalize_touch_mode("disabled"), "off");
     assert_eq!(normalize_touch_mode("unknown"), "auto");
 
-    assert_eq!(normalize_aurora_opacity_pct("0"), 0);
-    assert_eq!(normalize_aurora_opacity_pct("0.55"), 55);
-    assert_eq!(normalize_aurora_opacity_pct("0.84"), 85);
-    assert_eq!(normalize_aurora_opacity_pct("1"), 100);
-    assert_eq!(normalize_aurora_opacity_pct("1.0"), 100);
-    assert_eq!(normalize_aurora_opacity_pct("35%"), 35);
-    assert_eq!(normalize_aurora_opacity_pct("75"), 75);
-    assert_eq!(normalize_aurora_opacity_pct("-0.2"), 0);
-    assert_eq!(normalize_aurora_opacity_pct("invalid"), 55);
-    assert_eq!(format_aurora_opacity_unit(0), "0");
-    assert_eq!(format_aurora_opacity_unit(5), "0.05");
-    assert_eq!(format_aurora_opacity_unit(50), "0.5");
-    assert_eq!(format_aurora_opacity_unit(55), "0.55");
-    assert_eq!(format_aurora_opacity_unit(100), "1");
-
-    assert_eq!(normalize_card_lift("0"), 0);
-    assert_eq!(normalize_card_lift("false"), 0);
-    assert_eq!(normalize_card_lift("flat"), 0);
-    assert_eq!(normalize_card_lift("-4"), -4);
-    assert_eq!(normalize_card_lift("-4px"), -4);
-    assert_eq!(normalize_card_lift("true"), -4);
-    assert_eq!(normalize_card_lift("-6"), -6);
-
     assert_eq!(quantize_refresh_rate(59.9), 60);
     assert_eq!(quantize_refresh_rate(119.4), 120);
     assert_eq!(quantize_refresh_rate(143.8), 144);
@@ -649,10 +625,6 @@ fn legacy_zustand_storage_hydrates_and_yields_to_explicit_flat_keys() {
     assert!(defaults.haptic_feedback);
     assert_eq!(defaults.high_refresh_mode, "auto");
     assert_eq!(defaults.touch_mode, "auto");
-    assert_eq!(defaults.aurora_opacity, 55);
-    assert!(!defaults.aurora_animation);
-    assert!(defaults.grain_display);
-    assert_eq!(defaults.card_lift, -4);
 
     let mut legacy = BTreeMap::<String, String>::new();
     legacy.insert(
@@ -667,7 +639,8 @@ fn legacy_zustand_storage_hydrates_and_yields_to_explicit_flat_keys() {
                 "cardLift": -6,
                 "highRefreshMode": "120hz",
                 "touchMode": "enabled",
-                "hapticFeedback": false
+                "hapticFeedback": false,
+                "reducedMotion": true
             },
             "version": 0
         })
@@ -691,24 +664,64 @@ fn legacy_zustand_storage_hydrates_and_yields_to_explicit_flat_keys() {
     assert!(hydrated.immersive_overview);
     assert!(!hydrated.show_gpu);
     assert!(!hydrated.show_transfer_history);
+    assert!(hydrated.reduced_motion);
     assert!(!hydrated.haptic_feedback);
     assert_eq!(hydrated.high_refresh_mode, "120hz");
     assert_eq!(hydrated.touch_mode, "on");
-    assert_eq!(hydrated.aurora_opacity, 85);
-    assert!(hydrated.aurora_animation);
-    assert!(!hydrated.grain_display);
-    assert_eq!(hydrated.card_lift, -6);
 
     // Explicit flat keys take precedence over legacy Zustand JSON.
     legacy.insert("aetherflow-touch-mode".into(), "desktop".into());
     legacy.insert("aetherflow-high-refresh-mode".into(), "60".into());
-    legacy.insert("aetherflow-aurora-opacity".into(), "0.25".into());
-    legacy.insert("aetherflow-card-lift".into(), "0".into());
+    legacy.insert("aetherflow-reduced-motion".into(), "false".into());
     let overridden = hydrate_preferences_with(|k| legacy.get(k).cloned());
     assert_eq!(overridden.touch_mode, "off");
     assert_eq!(overridden.high_refresh_mode, "standard");
-    assert_eq!(overridden.aurora_opacity, 25);
-    assert_eq!(overridden.card_lift, 0);
+    assert!(!overridden.reduced_motion);
+}
+
+#[test]
+fn legacy_retired_atmosphere_and_card_lift_keys_are_ignored_safely() {
+    use std::collections::BTreeMap;
+
+    let mut storage = BTreeMap::<String, String>::new();
+    storage.insert("aetherflow-aurora-opacity".into(), "0.85".into());
+    storage.insert("aetherflow-aurora-animation".into(), "true".into());
+    storage.insert("aetherflow-grain-display".into(), "false".into());
+    storage.insert("aetherflow-grain".into(), "false".into());
+    storage.insert("aetherflow-card-lift".into(), "-6".into());
+    storage.insert(
+        "aetherflow-system-storage".into(),
+        serde_json::json!({
+            "state": {
+                "theme": "light",
+                "language": "fr",
+                "auroraOpacity": "corrupt",
+                "auroraAnimation": "invalid",
+                "grainDisplay": 42,
+                "cardLift": -8,
+                "highRefreshMode": "120hz",
+                "touchMode": "desktop",
+                "hapticFeedback": false,
+                "reducedMotion": true,
+                "dashboardDensity": "immersive",
+                "showGpuWidget": false,
+                "showDataUsageWidget": false
+            },
+            "version": 0
+        })
+        .to_string(),
+    );
+
+    let hydrated = hydrate_preferences_with(|k| storage.get(k).cloned());
+    assert_eq!(hydrated.theme, "light");
+    assert_eq!(hydrated.locale.as_deref(), Some("fr"));
+    assert!(hydrated.immersive_overview);
+    assert!(!hydrated.show_gpu);
+    assert!(!hydrated.show_transfer_history);
+    assert!(hydrated.reduced_motion);
+    assert!(!hydrated.haptic_feedback);
+    assert_eq!(hydrated.high_refresh_mode, "120hz");
+    assert_eq!(hydrated.touch_mode, "off");
 }
 
 #[test]

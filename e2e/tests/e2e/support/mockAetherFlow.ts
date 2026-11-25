@@ -44,7 +44,7 @@ function buildMarketplaceApps(): MockApp[] {
     {
       id: 'sonarr',
       name: 'Sonarr',
-      desc: 'TV automation for the glass control plane.',
+      desc: 'TV automation for the AetherFlow control plane.',
       hits: 12400,
       category: 'Media',
       status: 'installed',

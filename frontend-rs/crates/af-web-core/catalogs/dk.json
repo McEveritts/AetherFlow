@@ -1887,15 +1887,8 @@
   "Settings": {
     "apiKeyPlaceholder": "Indtast din Gemini API-nøgle...",
     "apiKeyTitle": "Gemini API-nøgle",
-    "atmosphereTitle": "Atmosfære & overfladefysik",
-    "auroraAnimation": "Animeret nordlys",
-    "auroraAnimationDescription": "Animer det tredelte baggrundsnordlys løbende i stedet for et statisk lag.",
-    "auroraOpacity": "Nordlys-gennemsigtighed",
-    "auroraOpacityDescription": "Juster lysstyrken af det radiale baggrundsnordlys på lærredet.",
     "backupsRestore": "Sikkerhedskopier og gendannelse",
     "baseDomain": "Basisdomæne",
-    "cardLift": "Kortløft ved markør",
-    "cardLiftDescription": "Løft glaskort let med fjederfysik, når markøren holdes over dem.",
     "checkingUpdates": "Søger efter opdateringer...",
     "defaultDashboard": "Standarddashboard",
     "defaultModel": "Standard sprogmodel",
@@ -1907,14 +1900,12 @@
     "flowAIEngine": "FlowAI-motor",
     "flowAIProviders": "FlowAI-udbydere",
     "generalLocalization": "Generelt og lokalisering",
-    "grainDisplay": "Taktil kornethed",
-    "grainDisplayDescription": "Vis diskret mikro-kornethed og kantvignette for fysisk overfladedybde.",
     "hapticFeedback": "Haptisk feedback",
     "highRefresh120": "120Hz høj opdatering",
     "highRefresh60": "60Hz standardrate",
     "highRefreshAuto": "Automatisk ({hz}Hz registreret)",
     "highRefreshCadence": "Høj opdateringskadence",
-    "highRefreshDescription": "Tilpas overgangstider for knapper og kort (110ms / 150ms mod 160ms / 200ms) til hurtige skærme.",
+    "highRefreshDescription": "Tilpas overgangstider for knapper og grænsefladeelementer (110ms / 150ms mod 160ms / 200ms) til hurtige skærme.",
     "inputStatusFine": "Input: Præcisionsmarkør",
     "inputStatusTouch": "Input: Berøringsoptimeret (≥44px)",
     "interfacePreferences": "Grænsefladepræferencer",
@@ -1928,7 +1919,7 @@
     "pinSidebar": "Fastgør sidepanelet på skrivebordet",
     "profileSecurity": "Profil og sikkerhed",
     "reducedMotion": "Reducer bevægelser i grænsefladen",
-    "reducedMotionActiveHint": "Reduceret bevægelse er aktiv; nordlysanimation, kortløft og hurtige bevægelseskurver er slået fra.",
+    "reducedMotionActiveHint": "Reduceret bevægelse er aktiv; høj opdateringskadence og overgange i grænsefladen er slået fra.",
     "saveConfig": "Gem Konfiguration",
     "saveSettings": "Gem indstillinger",
     "saving": "Gemmer...",
@@ -2767,6 +2758,5 @@
     "liveLogsClosed": "Strøm lukket",
     "liveLogsRevoked": "Direkte logstrøm lukket (kode {code}); peer-adgangen kan være ændret eller tilbagekaldt.",
     "remoteShareOriginUnavailable": "Offentlige delingslinks er ikke tilgængelige for {server}, fordi dens offentlige basisdomæne ikke er konfigureret eller ikke kan læses. Konfigurer et offentligt basisdomæne på {server} og giv læseadgang til indstillinger for at oprette eksterne delingslinks."
-  },
-  "Reset atmosphere defaults": "Nulstil atmosfærestandarder"
+  }
 }

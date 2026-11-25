@@ -282,7 +282,7 @@ All surface and control rules consume only these semantic custom properties. `--
 | `--af-input-bg-focus` | `#0d1220` | `#ffffff` | Focused `.af-input` fill |
 | `--af-control-disabled-bg` | `#101521` | `#f1f5f9` | Disabled button/input fill (without `pointer-events: none`) |
 | `--af-control-disabled-border` | `#2a3347` | `#cbd5e1` | Disabled button/input border |
-| `--af-control-disabled-fg` | `#64748b` | `#64748b` | Disabled button/input text (`3.83:1` dark, `4.34:1` light) |
+| `--af-control-disabled-fg` | `#73849c` | `#526277` | Disabled button/input text (`4.79:1` dark, `5.68:1` light) |
 | `--af-accent-bg` | `#4f46e5` | `#4338ca` | Primary solid button fill (`.af-btn-primary`, `6.29:1` dark, `7.90:1` light) |
 | `--af-accent-bg-hover` | `#4338ca` | `#3730a3` | Primary button hover fill (`7.90:1` dark, `9.93:1` light) |
 | `--af-accent-border` | `#6366f1` | `#4338ca` | Primary button border |

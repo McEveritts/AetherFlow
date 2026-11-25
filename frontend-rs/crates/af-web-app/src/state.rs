@@ -18,9 +18,8 @@ pub(crate) use preferences::hydrate_preferences_with;
 pub(crate) use preferences::HydratedPreferences;
 pub use preferences::{
     apply_display_preferences_dom, apply_locale_dom, apply_theme_dom, detect_browser_locale,
-    format_aurora_opacity_unit, normalize_aurora_opacity_pct, normalize_card_lift,
-    normalize_high_refresh_mode, normalize_touch_mode, quantize_aurora_opacity_pct,
-    quantize_refresh_rate, resolve_high_refresh_active, resolve_touch_mode_active,
+    normalize_high_refresh_mode, normalize_touch_mode, quantize_refresh_rate,
+    resolve_high_refresh_active, resolve_touch_mode_active,
 };
 use preferences::{
     detect_reduced_motion_preference, detect_touch_device, initial_preference,
@@ -131,10 +130,6 @@ pub struct AppContext {
     pub detected_refresh_rate: RwSignal<u32>,
     pub touch_mode: RwSignal<String>,
     pub detected_touch_device: RwSignal<bool>,
-    pub aurora_opacity: RwSignal<u8>,
-    pub aurora_animation: RwSignal<bool>,
-    pub grain_display: RwSignal<bool>,
-    pub card_lift: RwSignal<i8>,
     pub settings: RwSignal<Value>,
     settings_order: RwSignal<RequestOrder>,
     pub metrics: RwSignal<Value>,
@@ -205,10 +200,6 @@ impl AppContext {
             detected_refresh_rate: RwSignal::new(60),
             touch_mode: RwSignal::new(hydrated.touch_mode),
             detected_touch_device: RwSignal::new(detect_touch_device()),
-            aurora_opacity: RwSignal::new(hydrated.aurora_opacity),
-            aurora_animation: RwSignal::new(hydrated.aurora_animation),
-            grain_display: RwSignal::new(hydrated.grain_display),
-            card_lift: RwSignal::new(hydrated.card_lift),
             settings: RwSignal::new(Value::Null),
             settings_order: RwSignal::new(RequestOrder::default()),
             metrics: RwSignal::new(Value::Null),
@@ -888,26 +879,10 @@ impl AppContext {
             .and_then(|raw| legacy_storage_envelope(Some(raw)))
             .and_then(|val| val.as_object().cloned())
             .unwrap_or_default();
-        let opacity_pct =
-            quantize_aurora_opacity_pct(f64::from(self.aurora_opacity.get_untracked()));
-        let opacity_unit = (f64::from(opacity_pct) / 100.0 * 100.0).round() / 100.0;
         state_obj.insert("theme".into(), Value::String(self.theme.get_untracked()));
         state_obj.insert(
             "language".into(),
             Value::String(self.locale.get_untracked()),
-        );
-        state_obj.insert("auroraOpacity".into(), serde_json::json!(opacity_unit));
-        state_obj.insert(
-            "auroraAnimation".into(),
-            Value::Bool(self.aurora_animation.get_untracked()),
-        );
-        state_obj.insert(
-            "grainDisplay".into(),
-            Value::Bool(self.grain_display.get_untracked()),
-        );
-        state_obj.insert(
-            "cardLift".into(),
-            serde_json::json!(self.card_lift.get_untracked()),
         );
         state_obj.insert(
             "highRefreshMode".into(),
@@ -1036,49 +1011,6 @@ impl AppContext {
         storage_set("aetherflow-touch-mode", normalized);
         self.touch_mode.set(normalized.into());
         self.sync_legacy_system_storage();
-    }
-    pub fn set_aurora_opacity(self, pct: u8) {
-        let quantized = quantize_aurora_opacity_pct(f64::from(pct));
-        storage_set(
-            "aetherflow-aurora-opacity",
-            &format_aurora_opacity_unit(quantized),
-        );
-        self.aurora_opacity.set(quantized);
-        self.sync_legacy_system_storage();
-    }
-    pub fn set_aurora_opacity_str(self, raw: &str) {
-        self.set_aurora_opacity(normalize_aurora_opacity_pct(raw));
-    }
-    pub fn set_aurora_animation(self, enabled: bool) {
-        storage_set(
-            "aetherflow-aurora-animation",
-            if enabled { "true" } else { "false" },
-        );
-        self.aurora_animation.set(enabled);
-        self.sync_legacy_system_storage();
-    }
-    pub fn set_grain_display(self, enabled: bool) {
-        let flag = if enabled { "true" } else { "false" };
-        storage_set("aetherflow-grain-display", flag);
-        storage_set("aetherflow-grain", flag);
-        self.grain_display.set(enabled);
-        self.sync_legacy_system_storage();
-    }
-    pub fn set_card_lift(self, lift_px: i8) {
-        let normalized = normalize_card_lift(&lift_px.to_string());
-        storage_set("aetherflow-card-lift", &normalized.to_string());
-        self.card_lift.set(normalized);
-        self.sync_legacy_system_storage();
-    }
-    pub fn set_card_lift_enabled(self, enabled: bool) {
-        self.set_card_lift(if enabled { -4 } else { 0 });
-    }
-    pub fn reset_atmosphere_defaults(self) {
-        self.set_theme("dark");
-        self.set_aurora_opacity(55);
-        self.set_aurora_animation(false);
-        self.set_grain_display(true);
-        self.set_card_lift(-4);
     }
     pub fn haptic(self, ms: u32) {
         if !self.haptic_feedback.get_untracked()
