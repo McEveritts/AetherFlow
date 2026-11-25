@@ -78,7 +78,7 @@ rm -f /etc/apt/sources.list.d/jellyfin.list
 
 report_progress 60 "Installing Jellyfin server..."
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
-DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq jellyfin
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -o Dpkg::Options::="--force-confmiss" -y -qq jellyfin
 verify_deb_installed jellyfin
 
 report_progress 85 "Starting and enabling Jellyfin service..."

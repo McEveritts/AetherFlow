@@ -183,6 +183,14 @@ def open_request(request, timeout=None):
         output.write(json.dumps(record) + "\n")
     if os.environ.get("HTTP_UNREACHABLE") == "1" or record["path"] == os.environ.get("HTTP_FAIL_PATH"):
         raise urllib.error.URLError("synthetic endpoint failure")
+    transient_path = os.environ.get("HTTP_TRANSIENT_FAIL_PATH", "")
+    transient_count = int(os.environ.get("HTTP_TRANSIENT_FAIL_COUNT", "0") or "0")
+    if transient_path and record["path"] == transient_path and transient_count > 0:
+        counter_file = root / "http-transient-count.txt"
+        seen = int(counter_file.read_text()) if counter_file.exists() else 0
+        if seen < transient_count:
+            counter_file.write_text(str(seen + 1))
+            raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
     if path.startswith("api/"):
         return io.BytesIO(json.dumps(config).encode())
     if path == "System/Info/Public":
@@ -517,6 +525,30 @@ write_lock() { mkdir -p "$TEST_ROOT/install"; touch "$TEST_ROOT/install/.$1.lock
                     self.assertEqual(len(requests), 1)
                 else:
                     self.assertIn("/Startup/Complete", [request["path"] for request in requests])
+
+    def test_jellyfin_initial_bootstrap_recovers_from_kestrel_restart_connection_refused(self):
+        self.file("http-config.json", json.dumps({"StartupWizardCompleted": False}))
+        (self.root / "http-requests.jsonl").unlink(missing_ok=True)
+        (self.root / "http-transient-count.txt").unlink(missing_ok=True)
+        marker = self.root / "install/.media.lock"
+        marker.unlink(missing_ok=True)
+        result = self.run_shell(
+            'seed_jellyfin_master_user 8096\nwrite_lock media',
+            helpers=("seed_jellyfin_master_user",),
+            MOCK_HTTP="1",
+            HTTP_TRANSIENT_FAIL_PATH="/Startup/User",
+            HTTP_TRANSIENT_FAIL_COUNT="3",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(marker.exists())
+        requests = [json.loads(line) for line in (self.root / "http-requests.jsonl").read_text().splitlines()]
+        startup_user_gets = [r for r in requests if r["method"] == "GET" and r["path"] == "/Startup/User"]
+        self.assertEqual(len(startup_user_gets), 4)
+        self.assertIn("/Startup/Complete", [r["path"] for r in requests])
+
+    def test_jellyfin_installer_restores_missing_conffiles_on_reinstall(self):
+        installer = (ROOT / "packages/package/install/installpackage-jellyfin").read_text(encoding="utf-8")
+        self.assertIn('Dpkg::Options::="--force-confmiss"', installer)
 
     def test_service_readiness_requires_both_http_and_an_active_service(self):
         for active_status, http_status, expected in (("0", "0", 0), ("1", "0", 1), ("0", "22", 1)):

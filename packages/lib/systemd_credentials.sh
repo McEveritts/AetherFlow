@@ -1583,7 +1583,7 @@ seed_jellyfin_master_user() {
         keep_secrets="1"
     fi
     if AF_SEED_USER="$MASTER_USER" AF_SEED_PASS="${AF_CONFIG_PASS:-${AF_PASS:-$MASTER_PASS}}" AF_SEED_CURRENT_PASS="$MASTER_PASS" AF_KEEP_SECRETS_FLAG="$keep_secrets" AF_FORCE_PASSWORD_ROTATION="${AF_FORCE_PASSWORD_ROTATION:-0}" AF_CONFIG_PASS="${AF_CONFIG_PASS:-${AF_PASS:-}}" AF_SEED_EXISTING="${PRE_INSTALL_PRESENT:-false}" AF_SEED_EXISTING_CONFIG="${EXISTING_CONFIG_PRESENT:-false}" af_logged python3 - "$port" <<'PYEOF'
-import os, sys, time, json, urllib.request
+import http.client, os, sys, time, json, urllib.error, urllib.request
 
 port = sys.argv[1]
 user, pw = os.environ["AF_SEED_USER"], os.environ["AF_SEED_PASS"]
@@ -1611,12 +1611,27 @@ rotate = (not keep_secrets) and (os.environ.get("AF_FORCE_PASSWORD_ROTATION") ==
 if pub.get("StartupWizardCompleted") is True and not rotate:
     sys.exit(0)
 
-def call(path, method="GET", body=None):
+def call(path, method="GET", body=None, retries=20):
     data = json.dumps(body).encode("utf-8") if body is not None else (b"" if method == "POST" else None)
-    req = urllib.request.Request(f"{base}{path}", data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=10) as r:
-        raw = r.read().decode("utf-8")
-        return json.loads(raw) if raw else None
+    last_err = None
+    for attempt in range(retries):
+        req = urllib.request.Request(f"{base}{path}", data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                raw = r.read().decode("utf-8")
+                return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as exc:
+            if exc.code == 503 and attempt + 1 < retries:
+                last_err = exc
+                time.sleep(1)
+                continue
+            raise
+        except (urllib.error.URLError, http.client.HTTPException, ConnectionError, TimeoutError, OSError) as exc:
+            last_err = exc
+            if attempt + 1 >= retries:
+                raise
+            time.sleep(1)
+    raise last_err
 
 if pub.get("StartupWizardCompleted") is True:
     authentication = call("/Users/AuthenticateByName", "POST", {"Username": user, "Pw": os.environ["AF_SEED_CURRENT_PASS"]})
