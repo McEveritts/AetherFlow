@@ -106,7 +106,7 @@ pub fn NotificationsTab() -> impl IntoView {
                 </h2>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2 mb-4"
+                    class="af-btn px-4 py-2 mb-4"
                     on:click=move |_| events.refresh()
                     aria-label=move || tt(context, "Refresh activity")
                 >
@@ -536,7 +536,7 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                     <div class="flex flex-wrap gap-3 mb-5">
                         <button
                             type="button"
-                            class="glass-button-primary px-4 py-2"
+                            class="af-btn-primary px-4 py-2"
                             disabled=move || {
                                 busy.get()
                                     || !context.can_write_area(crate::state::PeerArea::Settings)
@@ -552,7 +552,7 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                         </button>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             on:click=move |_| {
                                 if can_read_settings.get_untracked() {
                                     channels.refresh();
@@ -577,7 +577,7 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                                     let mut target = channel.clone();
                                     target["target_kind"] = json!("channel");
                                     view! {
-                                        <div class="flex flex-wrap items-center justify-between gap-4 py-4 border-t border-white/10">
+                                        <div class="flex flex-wrap items-center justify-between gap-4 py-4 border-t border-[var(--af-border-hairline)]">
                                             <div class="min-w-0">
                                                 <h3 class="font-semibold break-all">
                                                     {text(&channel, "name")}
@@ -603,7 +603,7 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                                             <div class="flex flex-wrap gap-3">
                                                 <button
                                                     type="button"
-                                                    class="glass-button px-4 py-2"
+                                                    class="af-btn px-4 py-2"
                                                     disabled=move || {
                                                         busy.get()
                                                             || !context.can_write_area(
@@ -624,7 +624,8 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                                                 </button>
                                                 <button
                                                     type="button"
-                                                    class="glass-button px-4 py-2 text-rose-300"
+                                                    class="af-btn px-4 py-2"
+                                                    data-tone="danger"
                                                     disabled=move || {
                                                         busy.get()
                                                             || !context.can_write_area(
@@ -676,6 +677,7 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                                     <label class="flex gap-2 items-center">
                                         <input
                                             type="checkbox"
+                                            class="obs-checkbox"
                                             disabled
                                             prop:checked=move || {
                                                 rules
@@ -698,7 +700,7 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                     </div>
                     <button
                         type="button"
-                        class="glass-button-primary px-4 py-2 mb-5"
+                        class="af-btn-primary px-4 py-2 mb-5"
                         disabled=move || {
                             busy.get()
                                 || !context.can_write_area(crate::state::PeerArea::Settings)
@@ -902,7 +904,8 @@ fn NotificationsAdminContent(events: ApiResource) -> impl IntoView {
                 <Show when=move || rule_id.get().is_some()>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2 mt-5 text-rose-300"
+                        class="af-btn px-4 py-2 mt-5"
+                        data-tone="danger"
                         disabled=move || {
                             busy.get()
                                 || !context.can_write_area(crate::state::PeerArea::Settings)

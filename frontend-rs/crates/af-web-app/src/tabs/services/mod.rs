@@ -247,7 +247,7 @@ pub fn ServicesTab() -> impl IntoView {
     };
     view! {
         <section class="py-5 space-y-5 min-w-0 max-w-full">
-            <header class="flex flex-wrap justify-between gap-4 pb-4 border-b border-white/10">
+            <header class="af-canvas-section flex flex-wrap justify-between gap-4 pb-4">
                 <div>
                     <h2 class="text-2xl font-semibold">
                         {move || tt(context, "Tabs.servicesHeading")}
@@ -260,7 +260,7 @@ pub fn ServicesTab() -> impl IntoView {
                     <Show when=move || context.is_admin()>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2 min-h-11"
+                            class="af-btn px-4 py-2 min-h-11"
                             disabled=move || {
                                 checking_updates.get()
                                     || !context.can_write_area(PeerArea::Marketplace)
@@ -283,7 +283,7 @@ pub fn ServicesTab() -> impl IntoView {
                     </Show>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2 min-h-11"
+                        class="af-btn px-4 py-2 min-h-11"
                         disabled=move || {
                             inventory.loading.get() || !context.can_read_area(PeerArea::Services)
                         }
@@ -306,7 +306,7 @@ pub fn ServicesTab() -> impl IntoView {
             <Show when=move || !context.can_read_area(PeerArea::Services)>
                 <p
                     role="status"
-                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                    class="af-warning-banner text-sm"
                 >
                     {move || {
                         context
@@ -334,8 +334,8 @@ pub fn ServicesTab() -> impl IntoView {
                         view! {
                             <button
                                 type="button"
-                                class="obs-tab-pill px-4 py-2 min-h-11"
-                                class:obs-tab-pill-active=move || status.get() == key
+                                class="af-tab-pill px-4 py-2 min-h-11"
+                                class:af-tab-pill-active=move || status.get() == key
                                 aria-pressed=move || (status.get() == key).to_string()
                                 on:click=move |_| status.set(key.into())
                             >
@@ -359,7 +359,11 @@ pub fn ServicesTab() -> impl IntoView {
             <Show when=move || inventory.error.get().is_some()>
                 <p role="alert" class="af-danger-banner">
                     {move || inventory.error.get().map(|e| tt(context, &e.message))}
-                    <button class="ml-3 underline" on:click=move |_| inventory.refresh()>
+                    <button
+                        type="button"
+                        class="ml-3 underline min-h-9 py-1.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]"
+                        on:click=move |_| inventory.refresh()
+                    >
                         {move || tt(context, "Retry")}
                     </button>
                 </p>
@@ -819,7 +823,7 @@ fn ServiceCard(
         }
     });
     view! {
-        <article class="af-service-tile min-w-0 rounded-xl p-4 border border-white/5 space-y-4">
+        <article class="af-service-tile af-surface-inset min-w-0 p-4 space-y-4">
             <div class="flex gap-3 justify-between items-start">
                 <div class="flex items-start gap-3 min-w-0">
                     {move || {
@@ -829,7 +833,7 @@ fn ServiceCard(
                                 <img
                                     src=src
                                     alt=alt
-                                    class="h-8 w-8 rounded-lg object-contain bg-white/[0.04] border border-white/10 p-1 shrink-0"
+                                    class="h-8 w-8 rounded-lg object-contain bg-[var(--af-surface-card)] border border-[var(--af-border-hairline)] p-1 shrink-0"
                                     on:error=move |_| img_failed.set(true)
                                 />
                             }
@@ -1042,7 +1046,7 @@ fn ServiceCard(
             <Show when=move || info.with(|v| v["components"].as_array().is_some_and(|c| c.len() > 1))>
                 <ul
                     aria-label=move || tt(context, "Service components")
-                    class="divide-y divide-white/[0.06] text-xs text-slate-400 border-t border-white/5 pt-2"
+                    class="divide-y divide-[var(--af-border-hairline)] text-xs text-slate-400 border-t border-[var(--af-border-hairline)] pt-2"
                 >
                     {move || {
                         info.with(|v| {
@@ -1074,7 +1078,7 @@ fn ServiceCard(
                                             {context.is_admin().then(|| view! {
                                                 <button
                                                     type="button"
-                                                    class="glass-button px-2.5 py-1 text-xs shrink-0"
+                                                    class="af-btn px-2.5 py-1 text-xs shrink-0"
                                                     disabled=move || !context.can_read_area(PeerArea::Services)
                                                     title=move || {
                                                         context
@@ -1110,7 +1114,7 @@ fn ServiceCard(
                             let destination = url.clone();
                             view! {
                                 <a
-                                    class="inline-flex glass-button px-3 py-2 min-h-11 items-center text-xs max-w-full break-all"
+                                    class="inline-flex af-btn px-3 py-2 min-h-11 items-center text-xs max-w-full break-all"
                                     href=url
                                     on:click=move |event| info.with_untracked(|service| {
                                         launch_app(context, event, service, &destination);
@@ -1128,7 +1132,7 @@ fn ServiceCard(
                 }>
                     <button
                         type="button"
-                        class="inline-flex glass-button px-3 py-2 min-h-11 items-center text-xs"
+                        class="inline-flex af-btn px-3 py-2 min-h-11 items-center text-xs"
                         disabled=move || !context.can_read_area(PeerArea::Network)
                         title=move || {
                             context
@@ -1155,7 +1159,7 @@ fn ServiceCard(
                 <Show when=move || info.with(has_available_update)>
                     <button
                         type="button"
-                        class="glass-button-primary w-full px-3 py-2 text-xs min-h-11"
+                        class="af-btn-primary w-full px-3 py-2 text-xs min-h-11"
                         disabled=move || {
                             !context.can_write_area(PeerArea::Marketplace)
                                 || !busy.get().is_empty()
@@ -1180,14 +1184,14 @@ fn ServiceCard(
                         }}
                     </button>
                 </Show>
-                <div class="flex flex-wrap gap-2 border-t border-white/5 pt-3">
+                <div class="flex flex-wrap gap-2 border-t border-[var(--af-border-hairline)] pt-3">
                     {[("start", "Start"), ("stop", "Stop"), ("restart", "Restart")]
                         .into_iter()
                         .map(|(key, label)| {
                             view! {
                                 <button
                                     type="button"
-                                    class="glass-button px-3 py-2 text-xs min-h-11"
+                                    class="af-btn px-3 py-2 text-xs min-h-11"
                                     disabled=move || {
                                         !context.can_write_area(PeerArea::Services)
                                             || !busy.get().is_empty()
@@ -1229,7 +1233,7 @@ fn ServiceCard(
                         .collect_view()}
                     <button
                         type="button"
-                        class="glass-button px-3 py-2 text-xs min-h-11"
+                        class="af-btn px-3 py-2 text-xs min-h-11"
                         disabled=move || !context.can_read_area(PeerArea::Services)
                         title=move || {
                             context
@@ -1343,7 +1347,7 @@ fn ServiceCredentials(info: Signal<Value>) -> impl IntoView {
     });
     view! {
         <Show when=move || context.is_admin() && !credentials.with(Vec::is_empty)>
-            <div class="border-t border-white/5 pt-3 space-y-2">
+            <div class="border-t border-[var(--af-border-hairline)] pt-3 space-y-2">
                 <button
                     type="button"
                     class="text-xs text-indigo-300 min-h-11"
@@ -1381,7 +1385,7 @@ fn ServiceCredentials(info: Signal<Value>) -> impl IntoView {
                                     </code>
                                     <button
                                         type="button"
-                                        class="glass-button text-xs px-2 py-2 min-h-11"
+                                        class="af-btn text-xs px-2 py-2 min-h-11"
                                         on:click=move |_| {
                                             if !context.is_admin() {
                                                 return;

@@ -179,7 +179,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
     view! {
         <section
             data-testid="installed-plugins-section"
-            class="pt-6 border-t border-white/10 space-y-4"
+            class="pt-6 border-t border-[var(--af-border-hairline)] space-y-4"
         >
             <div class="flex flex-wrap gap-3 justify-between items-center">
                 <h2 class="text-xl font-semibold">
@@ -187,7 +187,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                 </h2>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2 min-h-11"
+                    class="af-btn px-4 py-2 min-h-11"
                     disabled=move || resource.loading.get() || !can_read_services.get()
                     title=move || {
                         context
@@ -253,7 +253,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                             view! {
                                 <article
                                     data-testid=format!("plugin-card-{id}")
-                                    class="glass-card p-5 min-w-0 space-y-4"
+                                    class="af-card p-5 min-w-0 space-y-4"
                                 >
                                     <div class="flex flex-wrap justify-between gap-3">
                                         <div>
@@ -305,7 +305,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                                         <button
                                             type="button"
                                             data-testid=format!("toggle-plugin-{id}")
-                                            class="glass-button px-4 py-2 min-h-11"
+                                            class="af-btn px-4 py-2 min-h-11"
                                             disabled=move || {
                                                 !busy.get().is_empty() || resource.loading.get()
                                                     || !context.is_admin()
@@ -326,7 +326,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                                         <button
                                             type="button"
                                             data-testid=format!("open-plugin-ui-{id}")
-                                            class="glass-button-primary px-4 py-2 min-h-11"
+                                            class="af-btn-primary px-4 py-2 min-h-11"
                                             disabled=move || {
                                                 !enabled
                                                     || context.is_remote()
@@ -368,7 +368,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                 <button
                     type="button"
                     data-testid="close-plugin-sandbox"
-                    class="glass-button px-4 py-2 min-h-11 mb-3"
+                    class="af-btn px-4 py-2 min-h-11 mb-3"
                     on:click=move |_| sandbox.set(false)
                 >
                     {move || tt(context, "Close Sandbox")}
@@ -392,7 +392,7 @@ pub(super) fn PluginCatalog(resource: ApiResource) -> impl IntoView {
                                         "/api/v1/auth/plugins/{}/ui",
                                         js_sys::encode_uri_component(&field(&plugin, &["id"])),
                                     )
-                                    class="w-full h-[65vh] rounded-xl bg-slate-950 border border-white/10"
+                                    class="w-full h-[65vh] rounded-xl bg-slate-950 border border-[var(--af-border-hairline)]"
                                 ></iframe>
                             }
                         })

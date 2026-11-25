@@ -273,20 +273,11 @@ fn UsersAdminContent() -> impl IntoView {
                     }
                 }
             >
-                <ObsCard>
-                    <h2 class="text-lg font-semibold mb-4">
-                        {move || tt(context, "Tabs.usersHeading")}
-                    </h2>
-                    <Show when=move || !can_read_users.get()>
-                        <p role="status" class="text-xs text-amber-300 mb-4">
-                            {move || {
-                                context
-                                    .area_block_reason(PeerArea::Users, false)
-                                    .unwrap_or_default()
-                            }}
-                        </p>
-                    </Show>
-                    <div class="flex flex-wrap justify-between gap-4 mb-5">
+                <header class="af-canvas-section pb-4 flex flex-wrap items-center justify-between gap-4">
+                    <div class="space-y-2">
+                        <h2 class="text-2xl font-semibold">
+                            {move || tt(context, "Tabs.usersHeading")}
+                        </h2>
                         <div class="flex flex-wrap gap-3 items-center">
                             <Badge label="RBAC enforced" tone="indigo" />
                             <span class="text-sm text-slate-400">
@@ -299,27 +290,38 @@ fn UsersAdminContent() -> impl IntoView {
                                 }}
                             </span>
                         </div>
-                        <div class="flex gap-3">
-                            <button
-                                type="button"
-                                class="glass-button px-4 py-2"
-                                disabled=move || !can_read_users.get()
-                                title=move || {
-                                    context
-                                        .area_block_reason(PeerArea::Users, false)
-                                        .unwrap_or_default()
-                                }
-                                on:click=move |_| {
-                                    if can_read_users.get_untracked() {
-                                        users.refresh();
-                                    }
-                                }
-                                aria-label=move || tt(context, "Refresh users")
-                            >
-                                {move || tt(context, "Common.refresh")}
-                            </button>
-                        </div>
                     </div>
+                    <div class="flex gap-3">
+                        <button
+                            type="button"
+                            class="af-btn px-4 py-2"
+                            disabled=move || !can_read_users.get()
+                            title=move || {
+                                context
+                                    .area_block_reason(PeerArea::Users, false)
+                                    .unwrap_or_default()
+                            }
+                            on:click=move |_| {
+                                if can_read_users.get_untracked() {
+                                    users.refresh();
+                                }
+                            }
+                            aria-label=move || tt(context, "Refresh users")
+                        >
+                            {move || tt(context, "Common.refresh")}
+                        </button>
+                    </div>
+                </header>
+                <ObsCard>
+                    <Show when=move || !can_read_users.get()>
+                        <p role="status" class="text-xs text-amber-300 mb-4">
+                            {move || {
+                                context
+                                    .area_block_reason(PeerArea::Users, false)
+                                    .unwrap_or_default()
+                            }}
+                        </p>
+                    </Show>
                     <ResourceFeedback resource=users />
                     <DataGrid
                         label="User directory"
@@ -396,7 +398,8 @@ fn UsersAdminContent() -> impl IntoView {
                     />
                     <button
                         type="button"
-                        class="glass-button px-4 py-2 mt-5 text-rose-300"
+                        class="af-btn px-4 py-2 mt-5"
+                        data-tone="danger"
                         disabled=move || {
                             busy.get()
                                 || last_admin.get()

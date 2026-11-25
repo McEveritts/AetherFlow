@@ -230,7 +230,7 @@ pub fn MarketplaceTab() -> impl IntoView {
     });
     view! {
         <section class="py-5 space-y-6 min-w-0 max-w-full">
-            <header class="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-white/10">
+            <header class="af-canvas-section flex flex-wrap items-start justify-between gap-4 pb-5">
                 <div>
                     <p class="text-xs uppercase tracking-[.2em] text-indigo-300 mb-2">
                         {move || tt(context, "Marketplace.discover")}
@@ -245,7 +245,7 @@ pub fn MarketplaceTab() -> impl IntoView {
                 <div class="flex flex-wrap gap-3">
                     <button
                         type="button"
-                        class="glass-button px-4 py-2 min-h-11"
+                        class="af-btn px-4 py-2 min-h-11"
                         disabled=move || {
                             catalog.loading.get()
                                 || (!can_read_marketplace.get() && !can_read_services.get())
@@ -274,7 +274,7 @@ pub fn MarketplaceTab() -> impl IntoView {
                     <Show when=move || context.is_admin()>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2 min-h-11"
+                            class="af-btn px-4 py-2 min-h-11"
                             disabled=move || {
                                 ops.checking.with(|set| set.contains(""))
                                     || !context.can_write_area(crate::state::PeerArea::Marketplace)
@@ -356,7 +356,11 @@ pub fn MarketplaceTab() -> impl IntoView {
                     <Show when=move || catalog.error.get().is_some()>
                         <div role="alert" class="af-danger-banner">
                             {move || catalog.error.get().map(|e| tt(context, &e.message))}
-                            <button class="ml-3 underline" on:click=move |_| catalog.refresh()>
+                            <button
+                                type="button"
+                                class="ml-3 underline min-h-9 py-1.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]"
+                                on:click=move |_| catalog.refresh()
+                            >
                                 {move || tt(context, "Retry")}
                             </button>
                         </div>
@@ -366,7 +370,7 @@ pub fn MarketplaceTab() -> impl IntoView {
                             {move || tt(context, "Loading application catalog…")}
                         </p>
                     </Show>
-                    <div class="grid sm:grid-cols-2 xl:grid-cols-3 border-y border-white/10 divide-y divide-white/10 gap-px">
+                    <div class="af-hairline-grid grid sm:grid-cols-2 xl:grid-cols-3 border-t border-[var(--af-border-hairline)]">
                         <For
                             each=move || filtered.get()
                             key=|v| field(v, &["id"])
@@ -493,6 +497,7 @@ pub fn MarketplaceTab() -> impl IntoView {
                                         <label class="flex gap-3 items-start text-sm text-rose-200 mb-4">
                                             <input
                                                 type="checkbox"
+                                                class="obs-checkbox"
                                                 prop:checked=move || purge_data.get()
                                                 on:change=move |event| {
                                                     purge_data.set(event_target_checked(&event));
@@ -514,7 +519,7 @@ pub fn MarketplaceTab() -> impl IntoView {
                                             </span>
                                             <input
                                                 type="text"
-                                                class="glass-input w-full px-3 py-2"
+                                                class="af-input w-full px-3 py-2"
                                                 autocomplete="off"
                                                 spellcheck="false"
                                                 aria-label=move || tt(
@@ -531,14 +536,14 @@ pub fn MarketplaceTab() -> impl IntoView {
                                     <div class="flex gap-3 justify-end">
                                         <button
                                             type="button"
-                                            class="glass-button px-4 py-2"
+                                            class="af-btn px-4 py-2"
                                             on:click=move |_| confirm.set(false)
                                         >
                                             {move || tt(context, "Cancel")}
                                         </button>
                                         <button
                                             type="button"
-                                            class="glass-button-primary px-4 py-2"
+                                            class="af-btn-primary px-4 py-2"
                                             disabled=move || {
                                                 let id = package_id.get_value();
                                                 let busy_now = ops.submitting.with(|set| set.contains(&id))

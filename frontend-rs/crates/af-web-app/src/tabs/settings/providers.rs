@@ -172,7 +172,7 @@ pub(super) fn ProviderSettings(
             <div class="grid sm:grid-cols-2 gap-5">
                 <label class="block text-sm space-y-2">
                     <span>{move || tt(context, "Settings.defaultModel")}</span>
-                    <input class="glass-input w-full px-3 py-2" list="settings-model-presets"
+                    <input class="af-input w-full px-3 py-2" list="settings-model-presets"
                         prop:value=move || text(&draft_value(draft), "aiModel")
                         on:input=move |e| edit(draft, "aiModel", json!(event_target_value(&e))) />
                 </label>
@@ -239,7 +239,7 @@ pub(super) fn ProviderSettings(
                                     <input
                                         type=move || if visible.get() { "text" } else { "password" }
                                         autocomplete="new-password"
-                                        class="glass-input w-full px-3 py-2"
+                                        class="af-input w-full px-3 py-2"
                                         placeholder=move || {
                                             if field == "geminiApiKey" {
                                                 tt(context, "Settings.apiKeyPlaceholder")
@@ -266,7 +266,7 @@ pub(super) fn ProviderSettings(
                                     <button
                                         type="button"
                                         aria-pressed=move || visible.get().to_string()
-                                        class="glass-button px-2 py-1"
+                                        class="af-btn px-2 py-1"
                                         on:click=move |_| visible.update(|v| *v = !*v)
                                     >
                                         {move || tt(context, "Show entered key")}
@@ -277,7 +277,7 @@ pub(super) fn ProviderSettings(
                                                 view! {
                                                     <button
                                                         type="button"
-                                                        class="glass-button px-2 py-1 text-amber-200"
+                                                        class="af-btn px-2 py-1 text-amber-200"
                                                         disabled=move || busy.get()
                                                         on:click=move |_| {
                                                             let saved = draft.with_untracked(|d| {
@@ -294,7 +294,8 @@ pub(super) fn ProviderSettings(
                                                 view! {
                                                     <button
                                                         type="button"
-                                                        class="glass-button px-2 py-1 text-rose-300"
+                                                        class="af-btn px-2 py-1"
+                                                        data-tone="danger"
                                                         disabled=move || busy.get()
                                                         on:click=move |_| edit(draft, field, json!(""))
                                                     >
@@ -335,7 +336,7 @@ pub(super) fn ProviderSettings(
                 <span>{move || tt(context, "Settings.defaultPrompt")}</span>
                 <textarea
                     rows="4"
-                    class="glass-input w-full px-3 py-2"
+                    class="af-input w-full px-3 py-2"
                     prop:value=move || text(&draft_value(draft), "systemPrompt")
                     on:input=move |event| edit(
                         draft,
@@ -354,7 +355,7 @@ pub(super) fn ProviderSettings(
                 <label class="text-sm space-y-2">
                     <span>{move || tt(context, "Test provider")}</span>
                     <select
-                        class="glass-input block px-3 py-2"
+                        class="af-input block px-3 py-2"
                         prop:value=move || test_provider.get()
                         on:change=move |e| test_provider.set(event_target_value(&e))
                     >
@@ -370,7 +371,7 @@ pub(super) fn ProviderSettings(
                 </label>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || {
                         testing.get() || !context.can_write_area(crate::state::PeerArea::Settings)
                     }

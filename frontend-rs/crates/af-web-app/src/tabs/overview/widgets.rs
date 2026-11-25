@@ -45,7 +45,7 @@ fn Gauge(
                     class=move || {
                         match value.get().unwrap_or_default() {
                             n if n >= 95.0 => "fill-rose-400",
-                            n if n >= 85.0 => "fill-amber-400",
+                            n if n >= 85.0 => "fill-amber-500",
                             _ => "fill-indigo-400",
                         }
                     }
@@ -148,11 +148,11 @@ pub(super) fn TelemetrySummary(
     };
     view! {
             <div class=move || if context.immersive_overview.get() {
-                "grid xl:grid-cols-2 gap-6"
+                "af-hairline-grid grid xl:grid-cols-2"
             } else {
-                "grid md:grid-cols-2 xl:grid-cols-4 gap-4"
+                "af-hairline-grid grid md:grid-cols-2 xl:grid-cols-4"
             }>
-                <section class="obs-telemetry-surface p-5 min-w-0 border-b border-white/10">
+                <section class="af-canvas-section p-5 min-w-0">
                     <h2 class="font-semibold">{move || tt(context, "Overview.cpuUtilization")}</h2>
                     <p class="text-3xl text-indigo-200 font-semibold tabular-nums mt-3">
                         {move || percent(cpu.get())}
@@ -200,7 +200,7 @@ pub(super) fn TelemetrySummary(
                         })}
                     </div>
                     <details>
-                        <summary class="cursor-pointer text-xs text-slate-300 py-2">
+                        <summary class="cursor-pointer text-xs text-slate-300 min-h-9 py-1.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]">
                             {move || tt(context, "Per-core utilization")}
                         </summary>
                         <div class="grid grid-cols-4 gap-2 mt-3">
@@ -233,7 +233,7 @@ pub(super) fn TelemetrySummary(
                         </div>
                     </details>
                 </section>
-                <section class="obs-telemetry-surface p-5 min-w-0 border-b border-white/10">
+                <section class="af-canvas-section p-5 min-w-0">
                     <h2 class="font-semibold">{move || tt(context, "Overview.memorySwap")}</h2>
                     <p class="text-3xl text-cyan-200 font-semibold tabular-nums mt-3">
                         {move || percent(memory.get())}
@@ -301,7 +301,7 @@ pub(super) fn TelemetrySummary(
                         }}
                     </p>
                 </section>
-                <section class="obs-telemetry-surface p-5 min-w-0 border-b border-white/10">
+                <section class="af-canvas-section p-5 min-w-0">
                     <h2 class="font-semibold">
                         {move || tt(context, "Overview.networkBandwidth")}
                     </h2>
@@ -371,7 +371,7 @@ pub(super) fn TelemetrySummary(
                         }}
                     </p>
                     <details class="mt-3">
-                        <summary class="cursor-pointer text-xs text-slate-300 py-2">
+                        <summary class="cursor-pointer text-xs text-slate-300 min-h-9 py-1.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]">
                             {move || tt(context, "Interface breakdown")}
                         </summary>
                         <Show when=move || context.metrics.with(|v| list(v, &["/network/interfaces", "/network_interfaces", "/interfaces"]).is_empty())>
@@ -408,7 +408,7 @@ pub(super) fn TelemetrySummary(
                         }}
                     </details>
                 </section>
-                <section class="obs-telemetry-surface p-5 min-w-0 border-b border-white/10" data-testid="disk-io-card">
+                <section class="af-canvas-section p-5 min-w-0" data-testid="disk-io-card">
                     <div class="flex flex-wrap items-baseline justify-between gap-2">
                         <h2 class="font-semibold">{move || tt(context, "Disk I/O")}</h2>
                         <span class="text-xs text-slate-400 tabular-nums">
@@ -477,7 +477,7 @@ pub(super) fn TelemetrySummary(
                     <div
                         role="group"
                         aria-label=move || tt(context, "Current disk throughput share")
-                        class="grid grid-cols-2 gap-3 pt-2 border-t border-white/10 text-xs tabular-nums"
+                        class="grid grid-cols-2 gap-3 pt-2 border-t border-[var(--af-border-hairline)] text-xs tabular-nums"
                     >
                         <div>
                             <p class="text-slate-400">{move || tt(context, "Read share")}</p>
@@ -544,7 +544,7 @@ pub(super) fn DataUsageHistory() -> impl IntoView {
                 <div
                     role="group"
                     aria-label=move || tt(context, "History Range Selection")
-                    class="flex gap-1"
+                    class="af-surface-inset p-1 flex gap-1"
                 >
                     {[(7u32, "7d"), (30u32, "30d"), (90u32, "90d")]
                         .into_iter()
@@ -552,8 +552,8 @@ pub(super) fn DataUsageHistory() -> impl IntoView {
                             view! {
                                 <button
                                     type="button"
-                                    class="obs-tab-pill px-3 py-2 min-h-11"
-                                    class:obs-tab-pill-active=move || days.get() == option
+                                    class="af-tab-pill px-3 py-2 min-h-11"
+                                    class:af-tab-pill-active=move || days.get() == option
                                     aria-pressed=move || (days.get() == option).to_string()
                                     data-testid=format!("data-usage-window-{label}")
                                     on:click=move |_| days.set(option)
@@ -626,7 +626,11 @@ pub(super) fn DataUsageHistory() -> impl IntoView {
             <Show when=move || history.error.get().is_some()>
                 <p role="alert" class="text-sm text-amber-300 mb-3">
                     {move || tt(context, "Failed to load transfer history.")}
-                    <button class="underline ml-3" on:click=move |_| history.refresh()>
+                    <button
+                        type="button"
+                        class="underline ml-3 min-h-9 py-1.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]"
+                        on:click=move |_| history.refresh()
+                    >
                         {move || tt(context, "Retry")}
                     </button>
                 </p>
@@ -668,7 +672,7 @@ pub(super) fn DataUsageHistory() -> impl IntoView {
                     />
                 </Show>
             </Show>
-            <div class="grid sm:grid-cols-2 gap-4 mt-4 pt-3 border-t border-white/10">
+            <div class="grid sm:grid-cols-2 gap-4 mt-4 pt-3 border-t border-[var(--af-border-hairline)]">
                 <div>
                     <p class="text-xs text-slate-400">
                         {move || tt_with(
@@ -821,7 +825,7 @@ pub(super) fn StorageGpuTelemetry() -> impl IntoView {
                     "Overview.storagePartitions",
                 ))>
                     <Show when=move || pool.with(|summary| !summary.mounts.is_empty())>
-                        <div class="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3 border-b border-white/10">
+                        <div class="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3 border-b border-[var(--af-border-hairline)]">
                             <p class="text-xs text-slate-400">
                                 {move || {
                                     let count = pool.with(|summary| summary.visible.len());
@@ -833,7 +837,7 @@ pub(super) fn StorageGpuTelemetry() -> impl IntoView {
                                 }}
                             </p>
                             <select
-                                class="glass-input px-3 py-1.5 text-xs min-h-9"
+                                class="af-input px-3 py-1.5 text-xs min-h-9"
                                 data-testid="storage-partition-filter"
                                 aria-label=move || tt(context, "Filter storage partitions")
                                 prop:value=move || {
@@ -865,7 +869,7 @@ pub(super) fn StorageGpuTelemetry() -> impl IntoView {
                     </Show>
                     <Show when=move || pool.with(|summary| summary.total_gb.is_some())>
                         <div
-                            class="rounded-xl border border-white/10 bg-white/[0.02] p-3.5 mb-3"
+                            class="af-surface-inset p-3.5 mb-3"
                             data-testid="storage-pool-summary"
                         >
                             <div class="flex items-baseline justify-between gap-3">
@@ -911,7 +915,7 @@ pub(super) fn StorageGpuTelemetry() -> impl IntoView {
                                     let usage = entry.usage_pct;
                                     view! {
                                         <article
-                                            class="py-4 border-b border-white/5"
+                                            class="py-4 border-b border-[var(--af-border-hairline)]"
                                             data-testid="storage-partition-row"
                                         >
                                             <div class="flex justify-between gap-3">
@@ -987,7 +991,7 @@ pub(super) fn StorageGpuTelemetry() -> impl IntoView {
                                         let gpu_heading = gpu.clone();
                                         let gpu_metadata = gpu.clone();
                                         view! {
-                                            <article class="py-4 border-b border-white/5">
+                                            <article class="py-4 border-b border-[var(--af-border-hairline)]">
                                                 <h3 class="font-medium break-words">
                                                     {move || text(&crate::tabs::l10n::locale(context), &gpu_heading, &["/name", "/product"])}
                                                 </h3>
@@ -1358,7 +1362,7 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
             <div class="flex flex-wrap items-center justify-between gap-3 mb-5">
                 <div class="flex flex-wrap gap-3">
                     <button
-                        class="glass-button px-4 py-2 min-h-11"
+                        class="af-btn px-4 py-2 min-h-11"
                         disabled=move || {
                             busy.get()
                                 || applying.get()
@@ -1426,7 +1430,7 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                         {move || tt(context, "Analyze capacity")}
                     </button>
                     <button
-                        class="glass-button px-4 py-2 min-h-11"
+                        class="af-btn px-4 py-2 min-h-11"
                         disabled=move || {
                             busy.get()
                                 || applying.get()
@@ -1511,7 +1515,11 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
             <Show when=move || history_30d.error.get().is_some()>
                 <p role="status" class="text-xs text-amber-300 mb-3">
                     {move || tt(context, "30-day capacity history unavailable.")}
-                    <button class="underline ml-3" on:click=move |_| history_30d.refresh()>
+                    <button
+                        type="button"
+                        class="underline ml-3 min-h-9 py-1.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]"
+                        on:click=move |_| history_30d.refresh()
+                    >
                         {move || tt(context, "Retry")}
                     </button>
                 </p>
@@ -1547,7 +1555,7 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                             )
                         };
                         view! {
-                            <div class="obs-telemetry-surface p-3.5 border border-white/10 rounded-xl min-w-0">
+                            <div class="af-surface-inset p-3.5 min-w-0">
                                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
                                     <span class="text-xs font-semibold text-slate-200">
                                         {move || tt(context, label)}
@@ -1651,7 +1659,7 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                 </p>
             </Show>
             <Show when=move || !bandwidth.with(Value::is_null)>
-                <div class="mt-5 border-t border-white/10 pt-4">
+                <div class="mt-5 border-t border-[var(--af-border-hairline)] pt-4">
                     <h3 class="font-medium">{move || tt(context, "Bandwidth recommendation")}</h3>
                     <p class="text-sm text-slate-400 mt-2">
                         {move || bandwidth.with(|v| text(&crate::tabs::l10n::locale(context), v, &["/reasoning"]))}
@@ -1670,7 +1678,7 @@ pub(super) fn CapacityPredictions() -> impl IntoView {
                         </p>
                     </Show>
                     <button
-                        class="glass-button px-4 py-2 min-h-11 mt-3"
+                        class="af-btn px-4 py-2 min-h-11 mt-3"
                         disabled=move || {
                             !context.is_admin()
                                 || !context.can_write_area(crate::state::PeerArea::Network)

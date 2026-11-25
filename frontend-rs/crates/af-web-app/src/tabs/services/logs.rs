@@ -372,7 +372,7 @@ pub(crate) fn ServiceLogsModal(
                     <label class="text-xs text-slate-400">
                         {move || tt(context, "Unit ")}
                         <select
-                            class="glass-input px-3 py-2 max-w-full"
+                            class="af-input px-3 py-2 max-w-full"
                             aria-label=move || tt(context, "Journal unit")
                             prop:value=move || unit.get()
                             on:change=move |ev| unit.set(event_target_value(&ev))
@@ -391,7 +391,7 @@ pub(crate) fn ServiceLogsModal(
                     <label class="text-xs text-slate-400">
                         {move || tt(context, "Lines ")}
                         <select
-                            class="glass-input px-3 py-2"
+                            class="af-input px-3 py-2"
                             aria-label=move || tt(context, "Log line count")
                             prop:value=move || lines.get()
                             on:change=move |ev| lines.set(event_target_value(&ev))
@@ -404,7 +404,7 @@ pub(crate) fn ServiceLogsModal(
                     </label>
                     <button
                         type="button"
-                        class="glass-button px-3 py-2 min-h-11"
+                        class="af-btn px-3 py-2 min-h-11"
                         aria-pressed=move || following.get().to_string()
                         on:click=move |_| following.update(|v| *v = !*v)
                     >
@@ -418,7 +418,7 @@ pub(crate) fn ServiceLogsModal(
                     </button>
                     <button
                         type="button"
-                        class="glass-button px-3 py-2 min-h-11"
+                        class="af-btn px-3 py-2 min-h-11"
                         disabled=move || logs.loading.get()
                         on:click=move |_| logs.refresh()
                         aria-label=move || tt(context, "Refresh logs")
@@ -428,7 +428,7 @@ pub(crate) fn ServiceLogsModal(
                     <Show when=move || context.is_admin()>
                         <button
                             type="button"
-                            class="glass-button-primary px-3 py-2 min-h-11"
+                            class="af-btn-primary px-3 py-2 min-h-11"
                             disabled=move || {
                                 analyzing.get()
                                     || visible.with(Vec::is_empty)
@@ -535,7 +535,7 @@ pub(crate) fn ServiceLogsModal(
                             view! {
                                 <section
                                     aria-label=move || tt(context, "FlowAI Diagnostic Result")
-                                    class="rounded-xl border border-indigo-400/20 bg-white/[0.04] p-4 space-y-2 min-w-0"
+                                    class="af-surface-inset p-4 space-y-2 min-w-0"
                                 >
                                     <div class="flex flex-wrap items-center justify-between gap-2">
                                         <h4 class="text-sm font-semibold text-slate-200">
@@ -566,7 +566,7 @@ pub(crate) fn ServiceLogsModal(
                                         <div class="flex justify-end pt-2">
                                             <button
                                                 type="button"
-                                                class="glass-button-primary px-3 py-2 min-h-11 text-xs"
+                                                class="af-btn-primary px-3 py-2 min-h-11 text-xs"
                                                 on:click=move |_| remediation_open.set(true)
                                             >
                                                 {move || tt(context, "Review Proposed Remediation")}
@@ -590,8 +590,8 @@ pub(crate) fn ServiceLogsModal(
                             view! {
                                 <button
                                     type="button"
-                                    class="obs-tab-pill px-3 py-2 min-h-11"
-                                    class:obs-tab-pill-active=move || severity.get() == level
+                                    class="af-tab-pill px-3 py-2 min-h-11"
+                                    class:af-tab-pill-active=move || severity.get() == level
                                     aria-pressed=move || (severity.get() == level).to_string()
                                     on:click=move |_| severity.set(level.into())
                                 >
@@ -612,7 +612,7 @@ pub(crate) fn ServiceLogsModal(
                     </p>
                 </Show>
                 <div
-                    class="max-h-[50vh] min-h-48 overflow-auto obs-scroller bg-slate-950 rounded-xl p-4 font-mono text-xs space-y-2"
+                    class="af-surface-inset max-h-[50vh] min-h-48 overflow-auto obs-scroller p-4 font-mono text-xs space-y-2"
                     role="log"
                     aria-label=move || tt(context, "Systemd journal logs")
                     aria-live="off"
@@ -652,7 +652,7 @@ pub(crate) fn ServiceLogsModal(
                 <div class="flex gap-3 justify-end">
                     <button
                         type="button"
-                        class="glass-button px-4 py-2 min-h-11"
+                        class="af-btn px-4 py-2 min-h-11"
                         disabled=move || visible.with(Vec::is_empty)
                         on:click=move |_| {
                             if !context.is_admin() {
@@ -671,7 +671,7 @@ pub(crate) fn ServiceLogsModal(
                     </button>
                     <button
                         type="button"
-                        class="glass-button px-4 py-2 min-h-11"
+                        class="af-btn px-4 py-2 min-h-11"
                         disabled=move || visible.with(Vec::is_empty)
                         on:click=move |_| {
                             if context.is_admin() {
@@ -705,7 +705,7 @@ pub(crate) fn ServiceLogsModal(
                         {(!title.is_empty()).then(|| view! {
                             <p class="text-sm font-semibold text-amber-300 break-words">{title}</p>
                         })}
-                        <p class="text-xs font-mono text-emerald-300 bg-white/[0.04] border border-white/10 rounded-xl p-3 break-words">
+                        <p class="af-surface-inset text-xs font-mono text-emerald-300 p-3 break-words">
                             {if desc.is_empty() {
                                 tt(context, "Run orchestrated restart sequence.")
                             } else {
@@ -715,7 +715,7 @@ pub(crate) fn ServiceLogsModal(
                         <div class="flex justify-end">
                             <button
                                 type="button"
-                                class="glass-button-primary px-4 py-2 min-h-11"
+                                class="af-btn-primary px-4 py-2 min-h-11"
                                 on:click=move |_| {
                                     remediation_open.set(false);
                                     context.toast(

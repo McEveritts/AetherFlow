@@ -311,7 +311,7 @@ fn QuotasAdminContent() -> impl IntoView {
                     <div class="flex flex-wrap gap-3 mb-5">
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || !can_read_users.get()
                             title=move || {
                                 context
@@ -329,7 +329,7 @@ fn QuotasAdminContent() -> impl IntoView {
                         </button>
                         <button
                             type="button"
-                            class="glass-button-primary px-4 py-2"
+                            class="af-btn-primary px-4 py-2"
                             disabled=move || {
                                 sync_busy.get()
                                     || quotas.loading.get()
@@ -351,7 +351,7 @@ fn QuotasAdminContent() -> impl IntoView {
                     </div>
                     <SearchInput value=query placeholder="Search tenants, IDs or quota status" />
                     <ResourceFeedback resource=quotas />
-                    <div class="divide-y divide-white/10 mt-5">
+                    <div class="divide-y divide-[var(--af-border-hairline)] mt-5">
                         <For
                             each=move || {
                                 let mut ids = matching.get();
@@ -386,7 +386,7 @@ fn QuotasAdminContent() -> impl IntoView {
                         <div class="flex gap-3">
                             <button
                                 type="button"
-                                class="glass-button px-4 py-2"
+                                class="af-btn px-4 py-2"
                                 disabled=move || current_page.get() == 0
                                 on:click=move |_| page.set(current_page.get_untracked().saturating_sub(1))
                             >
@@ -394,7 +394,7 @@ fn QuotasAdminContent() -> impl IntoView {
                             </button>
                             <button
                                 type="button"
-                                class="glass-button px-4 py-2"
+                                class="af-btn px-4 py-2"
                                 disabled=move || { current_page.get() + 1 >= page_count.get() }
                                 on:click=move |_| page.set((current_page.get_untracked() + 1).min(page_count.get_untracked() - 1))
                             >
@@ -610,7 +610,7 @@ fn QuotaRow(
                 </p>
                 <button
                     type="button"
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || {
                         busy.get()
                             || sync_busy.get()

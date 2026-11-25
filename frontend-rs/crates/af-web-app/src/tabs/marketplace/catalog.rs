@@ -473,7 +473,7 @@ pub(super) fn PackageCard(
                     <Show when=move || package.with(|p| action_state(p) == PackageActionState::Installable)>
                         <button
                             type="button"
-                            class="glass-button-primary px-4 py-2 min-h-11 text-xs"
+                            class="af-btn-primary px-4 py-2 min-h-11 text-xs"
                             disabled=move || busy.get() || !can_write_marketplace()
                             title=marketplace_write_reason
                             on:click=move |_| {
@@ -496,7 +496,7 @@ pub(super) fn PackageCard(
                     <Show when=move || package.with(|p| action_state(p) == PackageActionState::RetiredUpstream)>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2 min-h-11 text-xs opacity-60 cursor-not-allowed text-amber-200 border border-amber-500/30"
+                            class="af-btn px-4 py-2 min-h-11 text-xs"
                             disabled=true
                             aria-disabled="true"
                             title=move || tt(
@@ -510,7 +510,8 @@ pub(super) fn PackageCard(
                     <Show when=move || !busy.get() && package.with(can_purge_retained_data)>
                         <button
                             type="button"
-                            class="glass-button px-3 py-2 min-h-11 text-xs text-rose-300"
+                            class="af-btn px-3 py-2 min-h-11 text-xs"
+                            data-tone="danger"
                             disabled=move || busy.get() || !can_write_marketplace()
                             title=marketplace_write_reason
                             on:click=move |_| choose("purge")
@@ -522,7 +523,7 @@ pub(super) fn PackageCard(
                         <Show when=move || package.with(|p| p["update_available"] == true)>
                             <button
                                 type="button"
-                                class="glass-button-primary px-3 py-2 min-h-11 text-xs"
+                                class="af-btn-primary px-3 py-2 min-h-11 text-xs"
                                 disabled=move || {
                                     busy.get()
                                         || !can_write_marketplace()
@@ -537,7 +538,7 @@ pub(super) fn PackageCard(
                         </Show>
                         <button
                             type="button"
-                            class="glass-button px-3 py-2 min-h-11 text-xs"
+                            class="af-btn px-3 py-2 min-h-11 text-xs"
                             aria-label=move || {
                                 tt_with(context, "Check updates for {name}", &[("name", &(package.with(|p| field(p, &["name", "id"]))).to_string())])
                             }
@@ -557,7 +558,7 @@ pub(super) fn PackageCard(
                         </button>
                         <button
                             type="button"
-                            class="glass-button px-3 py-2 min-h-11 text-xs"
+                            class="af-btn px-3 py-2 min-h-11 text-xs"
                             disabled=move || busy.get() || !can_write_marketplace()
                             title=marketplace_write_reason
                             on:click=move |_| choose("reinstall")
@@ -566,7 +567,8 @@ pub(super) fn PackageCard(
                         </button>
                         <button
                             type="button"
-                            class="glass-button px-3 py-2 min-h-11 text-xs text-rose-300"
+                            class="af-btn px-3 py-2 min-h-11 text-xs"
+                            data-tone="danger"
                             disabled=move || busy.get() || !can_write_marketplace()
                             title=marketplace_write_reason
                             on:click=move |_| choose("uninstall")
@@ -584,7 +586,7 @@ pub(super) fn PackageCard(
                                 let destination = url.clone();
                                 view! {
                                     <a
-                                        class="glass-button px-3 py-2 min-h-11 text-xs inline-flex items-center"
+                                        class="af-btn px-3 py-2 min-h-11 text-xs inline-flex items-center"
                                         href=url
                                         on:click=move |event| package.with_untracked(|service| {
                                             crate::tabs::services::launch_app(context, event, service, &destination);
@@ -603,7 +605,7 @@ pub(super) fn PackageCard(
                     }>
                         <button
                             type="button"
-                            class="glass-button px-3 py-2 min-h-11 text-xs inline-flex items-center"
+                            class="af-btn px-3 py-2 min-h-11 text-xs inline-flex items-center"
                             disabled=move || !context.can_read_area(crate::state::PeerArea::Network)
                             title=move || {
                                 context
@@ -672,7 +674,7 @@ pub(super) fn DeploymentStatus(ops: MarketplaceOps) -> impl IntoView {
                 value=move || job.with(|j| j.as_ref().map(|j| j.progress).unwrap_or(0.0))
             ></progress>
             <div
-                class="max-h-[55vh] overflow-auto obs-scroller bg-slate-950 rounded-xl p-4 font-mono text-xs space-y-2"
+                class="af-surface-inset max-h-[55vh] overflow-auto obs-scroller p-4 font-mono text-xs space-y-2"
                 role="log"
                 aria-label=move || tt(context, "Deployment logs")
                 aria-live="polite"

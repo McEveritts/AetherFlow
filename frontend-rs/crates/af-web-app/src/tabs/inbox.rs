@@ -689,7 +689,7 @@ fn ApprovalInbox() -> impl IntoView {
     });
     view! {
         <section class="space-y-5 py-5 min-w-0 max-w-full">
-            <div class="flex flex-wrap justify-between gap-3">
+            <div class="af-canvas-section pb-4 flex flex-wrap justify-between gap-3">
                 <div>
                     <h2 class="text-xl font-semibold">
                         {move || tt(context, "Tabs.inboxHeading")}
@@ -702,7 +702,7 @@ fn ApprovalInbox() -> impl IntoView {
                     </p>
                 </div>
                 <button
-                    class="glass-button px-4 py-2"
+                    class="af-btn px-4 py-2"
                     disabled=move || resource.loading.get() || !can_read_services.get()
                     title=move || {
                         context
@@ -723,7 +723,7 @@ fn ApprovalInbox() -> impl IntoView {
             <Show when=move || !can_read_services.get()>
                 <p
                     role="status"
-                    class="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+                    class="af-warning-banner text-sm"
                 >
                     {move || {
                         context
@@ -738,9 +738,9 @@ fn ApprovalInbox() -> impl IntoView {
             <div
                 role="region"
                 aria-label=move || tt(context, "Inbox.summaryRegion")
-                class="grid grid-cols-2 xl:grid-cols-4 gap-3 min-w-0"
+                class="af-hairline-grid grid grid-cols-2 xl:grid-cols-4 min-w-0"
             >
-                <div class="glass-card p-4 min-w-0">
+                <div class="p-4 min-w-0">
                     <span class="text-xs uppercase tracking-wider text-slate-400 block break-words">
                         {move || tt(context, "Inbox.summaryMatching")}
                     </span>
@@ -748,7 +748,7 @@ fn ApprovalInbox() -> impl IntoView {
                         {move || total.get()}
                     </div>
                 </div>
-                <div class="glass-card p-4 min-w-0">
+                <div class="p-4 min-w-0">
                     <span class="text-xs uppercase tracking-wider text-slate-400 block break-words">
                         {move || tt(context, "Inbox.summaryCriticalHigh")}
                     </span>
@@ -756,7 +756,7 @@ fn ApprovalInbox() -> impl IntoView {
                         {move || risk_counts.get().0}
                     </div>
                 </div>
-                <div class="glass-card p-4 min-w-0">
+                <div class="p-4 min-w-0">
                     <span class="text-xs uppercase tracking-wider text-slate-400 block break-words">
                         {move || tt(context, "Inbox.summaryMedium")}
                     </span>
@@ -764,7 +764,7 @@ fn ApprovalInbox() -> impl IntoView {
                         {move || risk_counts.get().1}
                     </div>
                 </div>
-                <div class="glass-card p-4 min-w-0">
+                <div class="p-4 min-w-0">
                     <span class="text-xs uppercase tracking-wider text-slate-400 block break-words">
                         {move || tt(context, "Inbox.summaryLow")}
                     </span>
@@ -867,7 +867,7 @@ fn ApprovalInbox() -> impl IntoView {
                                                     </p>
                                                 })}
                                                 {(!exec_log.trim().is_empty()).then(|| view! {
-                                                    <div class="bg-slate-950/80 rounded-lg p-2.5 border border-white/10">
+                                                    <div class="af-surface-inset p-2.5">
                                                         <p class="text-xs font-semibold text-slate-400 mb-1">
                                                             {move || tt(context, "Inbox.executionLogHeading")}
                                                         </p>
@@ -878,7 +878,7 @@ fn ApprovalInbox() -> impl IntoView {
                                                 })}
                                             </div>
                                             <button
-                                                class="glass-button-primary px-4 py-2 shrink-0"
+                                                class="af-btn px-4 py-2 shrink-0"
                                                 on:click=move |_| inspect.run(review.clone())
                                             >
                                                 {move || tt(context, "Inspect action")}
@@ -897,7 +897,7 @@ fn ApprovalInbox() -> impl IntoView {
                     <nav class="flex flex-wrap items-center justify-between gap-3" aria-label=move || tt(context, "Approval inbox pagination")>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || page.get() == 0 || resource.loading.get()
                             on:click=move |_| page.update(|page| *page = page.saturating_sub(1))
                         >
@@ -908,7 +908,7 @@ fn ApprovalInbox() -> impl IntoView {
                         </span>
                         <button
                             type="button"
-                            class="glass-button px-4 py-2"
+                            class="af-btn px-4 py-2"
                             disabled=move || { (page.get() + 1) * PAGE_SIZE >= total.get() || resource.loading.get() }
                             on:click=move |_| page.update(|page| *page += 1)
                         >
@@ -1233,7 +1233,7 @@ fn ActionDetailModal(
                                 )}
                             </p>
 
-                            <div class="bg-white/5 rounded-xl p-3.5 border border-white/10 space-y-3">
+                            <div class="af-surface-inset p-3.5 space-y-3">
                                 <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300">
                                     {tt(context, "Inbox.commandBreakdownHeading")}
                                 </h4>
@@ -1258,11 +1258,11 @@ fn ActionDetailModal(
                             </div>
 
                             {(!breakdown.parameters.is_empty()).then(|| view! {
-                                <div class="bg-white/5 rounded-xl p-3.5 border border-white/10 space-y-2.5">
+                                <div class="af-surface-inset p-3.5 space-y-2.5">
                                     <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300">
                                         {tt(context, "Inbox.parametersHeading")}
                                     </h4>
-                                    <dl class="divide-y divide-white/10 text-sm">
+                                    <dl class="divide-y divide-[var(--af-border-hairline)] text-sm">
                                         {breakdown
                                             .parameters
                                             .into_iter()
@@ -1317,7 +1317,7 @@ fn ActionDetailModal(
                             </dl>
 
                             {(!reason_str.trim().is_empty()).then(|| view! {
-                                <div class="bg-white/5 rounded-xl p-3.5 border border-white/10">
+                                <div class="af-surface-inset p-3.5">
                                     <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">
                                         {tt(context, "Reason")}
                                     </h4>
@@ -1326,7 +1326,7 @@ fn ActionDetailModal(
                             })}
 
                             {(!exec_log.trim().is_empty()).then(|| view! {
-                                <div class="bg-slate-950 rounded-xl p-3.5 border border-white/10 space-y-1.5">
+                                <div class="af-surface-inset p-3.5 space-y-1.5">
                                     <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-400">
                                         {tt(context, "Inbox.executionLogHeading")}
                                     </h4>
@@ -1339,10 +1339,10 @@ fn ActionDetailModal(
                     }
                 }}
                 <details>
-                    <summary class="cursor-pointer font-semibold text-sm text-slate-300">
+                    <summary class="cursor-pointer font-semibold text-sm text-slate-300 min-h-9 py-1.5 px-2 rounded focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--af-focus-ring)]">
                         {move || tt(context, "Full payload and command parameters")}
                     </summary>
-                    <pre class="bg-slate-950 rounded-xl p-3 mt-2 text-xs whitespace-pre-wrap break-all max-h-80 overflow-auto">
+                    <pre class="af-surface-inset p-3 mt-2 text-xs whitespace-pre-wrap break-all max-h-80 overflow-auto">
                         {move || serde_json::to_string_pretty(&action.get()).unwrap_or_default()}
                     </pre>
                 </details>
@@ -1352,7 +1352,7 @@ fn ActionDetailModal(
                         <textarea
                             rows="3"
                             maxlength="2000"
-                            class="glass-input p-3 w-full"
+                            class="af-input p-3 w-full"
                             prop:value=move || {
                                 draft
                                     .with(|d| {
@@ -1376,7 +1376,7 @@ fn ActionDetailModal(
                     </p>
                     <div class="flex flex-wrap gap-3">
                         <button
-                            class="glass-button-primary px-4 py-2"
+                            class="af-btn-primary px-4 py-2"
                             disabled=move || {
                                 busy.get()
                                     || loading.get()
@@ -1399,7 +1399,8 @@ fn ActionDetailModal(
                             }}
                         </button>
                         <button
-                            class="glass-button px-4 py-2 text-rose-300"
+                            class="af-btn px-4 py-2"
+                            data-tone="danger"
                             disabled=move || {
                                 busy.get()
                                     || loading.get()

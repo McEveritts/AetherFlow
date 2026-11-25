@@ -102,7 +102,7 @@ pub(super) fn OidcSettings() -> impl IntoView {
                 <p
                     role="status"
                     data-testid="oidc-remote-readonly-note"
-                    class="text-xs text-amber-300 mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2"
+                    class="af-warning-banner text-xs mb-4"
                 >
                     {move || tt(context, "PeerSwitch.oidcRemoteReadOnly")}
                 </p>
@@ -124,7 +124,7 @@ pub(super) fn OidcSettings() -> impl IntoView {
                 <label class="block text-sm space-y-2">
                     <span>{move || tt(context, "Redirect URIs (one per line)")}</span>
                     <textarea
-                        class="glass-input px-3 py-2 w-full"
+                        class="af-input px-3 py-2 w-full"
                         rows="3"
                         required
                         disabled=move || context.is_remote()
@@ -144,7 +144,7 @@ pub(super) fn OidcSettings() -> impl IntoView {
                 />
                 <button
                     type="submit"
-                    class="glass-button-primary px-4 py-2"
+                    class="af-btn-primary px-4 py-2"
                     disabled=move || busy.get() || context.is_remote()
                     title=move || {
                         if context.is_remote() {
@@ -208,7 +208,7 @@ pub(super) fn OidcSettings() -> impl IntoView {
             </dl>
             <button
                 type="button"
-                class="glass-button px-4 py-2 mt-4"
+                class="af-btn px-4 py-2 mt-4"
                 on:click=move |_| {
                     let content = secret.get_untracked().to_string();
                     if let Err(error) = download_text(
