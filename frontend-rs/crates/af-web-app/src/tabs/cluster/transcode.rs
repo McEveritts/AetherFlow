@@ -1477,7 +1477,12 @@ pub fn TranscodeSection(
                             let workers_for_table = cfg.workers.clone();
 
                             Some(view! {
-                                <div class="overflow-x-auto rounded-xl border border-white/10 bg-white/5">
+                                <div
+                                    class="overflow-x-auto rounded-xl border border-white/10 bg-white/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                                    tabindex="0"
+                                    role="region"
+                                    aria-label=move || tt(context, "Cluster.transcodeVersionHeading")
+                                >
                                     <table class="w-full text-left text-xs">
                                         <thead class="border-b border-white/10 text-slate-400">
                                             <tr>
@@ -1877,7 +1882,12 @@ pub fn TranscodeSection(
                             }
                             let jobs = cfg.recent_jobs.clone();
                             Some(view! {
-                                <div class="overflow-x-auto rounded-xl border border-white/10 bg-white/5">
+                                <div
+                                    class="overflow-x-auto rounded-xl border border-white/10 bg-white/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+                                    tabindex="0"
+                                    role="region"
+                                    aria-label=move || tt(context, "Cluster.transcodeJobsHeading")
+                                >
                                     <table class="w-full text-left text-xs">
                                         <thead class="border-b border-white/10 text-slate-400">
                                             <tr>
