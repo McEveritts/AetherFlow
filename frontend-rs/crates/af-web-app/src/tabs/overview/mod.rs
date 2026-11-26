@@ -626,72 +626,112 @@ pub fn OverviewTab() -> impl IntoView {
                 </Show>
             </ObsCard>
             <StorageGpuTelemetry />
-            <ObsCard title=Signal::derive(move || tt(context, "Overview.serviceHealth"))>
-                <div class="flex flex-wrap gap-4 justify-between mb-5">
-                    <div class="flex flex-wrap gap-5 text-sm">
-                        {[
-                            ("Core Platform", "Overview.corePlatformCount"),
-                            ("Running", "Overview.runningCount"),
-                            ("Stopped", "Overview.stoppedCount"),
-                            ("Exceptions", "Overview.exceptionsCount"),
-                        ]
-                            .into_iter()
-                            .map(|(label, key)| {
-                                view! {
-                                    <p class="text-slate-400">
-                                        {move || tt(context, key)}
-                                        <strong class="block text-2xl text-slate-100 mt-1">
-                                            {move || {
-                                                services
-                                                    .with(|rows| {
-                                                        rows.iter()
-                                                            .filter(|(id, v)| match label {
-                                                                "Core Platform" => {
-                                                                    is_core_service(id)
-                                                                        || id.trim_end_matches(".service") == "aetherflow-runner"
-                                                                }
-                                                                "Exceptions" => is_service_exception(v),
-                                                                "Running" => {
-                                                                    matches!(
-                                                                        v["status"].as_str(),
-                                                                        Some("running" | "active")
-                                                                    )
-                                                                }
-                                                                _ => {
-                                                                    matches!(
-                                                                        v["status"].as_str(),
-                                                                        Some("stopped" | "inactive" | "disabled")
-                                                                    )
-                                                                }
-                                                            })
-                                                            .count()
-                                                    })
-                                            }}
-                                        </strong>
-                                    </p>
-                                }
-                            })
-                            .collect_view()}
-                    </div>
-                    <button
-                        class="af-btn px-4 py-2 min-h-11"
-                        on:click=move |_| context.select_tab(TabId::Services)
-                    >
-                        {move || tt(context, "Inspect Units")}
-                    </button>
-                </div>
-                <AppTopologyMap services=Signal::derive(move || services.get()) links=Signal::derive(move || topology.data.with(|v| {
-                    list(v, &["/edges", "/links"]).iter().filter_map(|edge| Some((raw_text(edge, &["/source", "/from"])?, raw_text(edge, &["/target", "/to"])?))).collect::<Vec<_>>()
-                })) />
-                <Show when=move || topology.error.get().is_some()>
-                    <p class="text-xs text-amber-300 mt-3">
-                        {move || tt(
-                            context,
-                            "Topology discovery unavailable; showing live service inventory.",
-                        )}
-                    </p>
-                </Show>
-            </ObsCard>
+            {
+                let topology_mode = RwSignal::new("graph".to_string());
+                view! {
+                    <ObsCard>
+                        <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                            <div class="flex flex-wrap items-center gap-3">
+                                <h2 class="text-lg font-semibold tracking-tight">
+                                    {move || tt(context, "Overview.serviceHealth")}
+                                </h2>
+                                <af_web_ui::TopologyModeSwitcher active=topology_mode />
+                            </div>
+                            <div class="flex flex-wrap items-center gap-2">
+                                <div class="flex flex-wrap items-center gap-1.5">
+                                    {[
+                                        (
+                                            "Core Platform",
+                                            "Overview.corePlatformCount",
+                                            "af-topo-stat-dot af-topo-stat-dot-core",
+                                        ),
+                                        (
+                                            "Running",
+                                            "Overview.runningCount",
+                                            "af-topo-stat-dot af-topo-stat-dot-active",
+                                        ),
+                                        (
+                                            "Stopped",
+                                            "Overview.stoppedCount",
+                                            "af-topo-stat-dot af-topo-stat-dot-stopped",
+                                        ),
+                                        (
+                                            "Exceptions",
+                                            "Overview.exceptionsCount",
+                                            "af-topo-stat-dot af-topo-stat-dot-exception",
+                                        ),
+                                    ]
+                                        .into_iter()
+                                        .map(|(label, key, dot_class)| {
+                                            view! {
+                                                <span class="af-topo-stat">
+                                                    <span aria-hidden="true" class=dot_class></span>
+                                                    <span>{move || tt(context, key)}</span>
+                                                    <strong>
+                                                        {move || {
+                                                            services
+                                                                .with(|rows| {
+                                                                    rows.iter()
+                                                                        .filter(|(id, v)| match label {
+                                                                            "Core Platform" => {
+                                                                                is_core_service(id)
+                                                                                    || id.trim_end_matches(".service")
+                                                                                        == "aetherflow-runner"
+                                                                            }
+                                                                            "Exceptions" => is_service_exception(v),
+                                                                            "Running" => {
+                                                                                matches!(
+                                                                                    v["status"].as_str(),
+                                                                                    Some("running" | "active")
+                                                                                )
+                                                                            }
+                                                                            _ => {
+                                                                                matches!(
+                                                                                    v["status"].as_str(),
+                                                                                    Some(
+                                                                                        "stopped"
+                                                                                            | "inactive"
+                                                                                            | "disabled"
+                                                                                    )
+                                                                                )
+                                                                            }
+                                                                        })
+                                                                        .count()
+                                                                })
+                                                        }}
+                                                    </strong>
+                                                </span>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </div>
+                                <button
+                                    type="button"
+                                    class="af-btn px-3.5 py-1.5 text-sm min-h-9"
+                                    on:click=move |_| context.select_tab(TabId::Services)
+                                >
+                                    {move || tt(context, "Inspect Units")}
+                                </button>
+                            </div>
+                        </div>
+                        <AppTopologyMap
+                            services=Signal::derive(move || services.get())
+                            links=Signal::derive(move || topology.data.with(|v| {
+                                list(v, &["/edges", "/links"]).iter().filter_map(|edge| Some((raw_text(edge, &["/source", "/from"])?, raw_text(edge, &["/target", "/to"])?))).collect::<Vec<_>>()
+                            }))
+                            mode=topology_mode
+                        />
+                        <Show when=move || topology.error.get().is_some()>
+                            <p class="text-xs text-amber-300 mt-3">
+                                {move || tt(
+                                    context,
+                                    "Topology discovery unavailable; showing live service inventory.",
+                                )}
+                            </p>
+                        </Show>
+                    </ObsCard>
+                }
+            }
             <Show when=move || context.show_transfer_history.get()>
                 <DataUsageHistory />
             </Show>

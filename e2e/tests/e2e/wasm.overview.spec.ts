@@ -91,15 +91,62 @@ test('draws each returned service link and preserves an isolated service', async
   await page.goto('/');
   const graph = page.getByRole('group', { name: 'Service topology graph' });
   await expect(graph.getByRole('button', { name: 'Isolated', exact: true })).toBeVisible({ timeout: 15_000 });
-  await expect(graph.locator('line')).toHaveCount(2);
+
+  // Verify curved cubic Bézier connectors and edge pill badges.
+  await expect(graph.locator('path.af-topo-edge')).toHaveCount(2);
+  await expect(graph.locator('.af-topo-edge-pill')).toHaveCount(2);
   for (const { source, target } of links) {
-    const line = graph.locator(`line[data-source="${source}"][data-target="${target}"]`);
-    for (const [name, end] of [[source, 1], [target, 2]] as const) {
-      const x = await line.getAttribute(`x${end}`);
-      const y = await line.getAttribute(`y${end}`);
-      await expect(graph.getByRole('button', { name, exact: true })).toHaveAttribute('transform', `translate(${x},${y})`);
-    }
+    const edge = graph.locator(`path[data-source="${source}"][data-target="${target}"]`);
+    await expect(edge).toHaveCount(1);
+    await expect(edge).toHaveAttribute('d', /^M\s+.*C\s+/);
   }
+
+  // Verify tiered left-to-right column layout and preserved isolated service.
+  const gatewayNode = graph.getByRole('button', { name: 'Gateway', exact: true });
+  const serviceANode = graph.getByRole('button', { name: 'Service A', exact: true });
+  const serviceBNode = graph.getByRole('button', { name: 'Service B', exact: true });
+  const isolatedNode = graph.getByRole('button', { name: 'Isolated', exact: true });
+  await expect(gatewayNode).toHaveAttribute('data-tier', 'gateway');
+  await expect(serviceANode).toHaveAttribute('data-tier', 'service');
+  await expect(isolatedNode).toHaveAttribute('data-tier', 'service');
+  await expect(serviceBNode).toHaveAttribute('data-tier', 'dependency');
+
+  const parseTranslateX = async (locator: ReturnType<typeof graph.getByRole>) => {
+    const transform = (await locator.getAttribute('transform')) || '';
+    const match = transform.match(/^translate\(([-\d.]+),([-\d.]+)\)$/);
+    expect(match, `expected translate(x,y), got ${transform}`).not.toBeNull();
+    return Number(match![1]);
+  };
+  const gatewayX = await parseTranslateX(gatewayNode);
+  const serviceAX = await parseTranslateX(serviceANode);
+  const serviceBX = await parseTranslateX(serviceBNode);
+  expect(gatewayX).toBeLessThan(serviceAX);
+  expect(serviceAX).toBeLessThan(serviceBX);
+
+  // Verify legend items.
+  const legend = page.locator('.af-topo-legend');
+  for (const label of ['Active', 'Standby', 'Exceptions', 'Link', 'Two-way']) {
+    await expect(legend.getByText(label, { exact: true })).toBeVisible();
+  }
+
+  // Verify search filter highlights matching services and dims others.
+  const searchInput = page.getByRole('searchbox', { name: 'Find a service', exact: true });
+  await searchInput.fill('Isolated');
+  await expect(isolatedNode).toHaveClass(/af-topo-node-matched/);
+  await expect(gatewayNode).toHaveClass(/af-topo-node-dimmed/);
+  await page.getByRole('button', { name: 'Clear search', exact: true }).click();
+  await expect(graph.locator('.af-topo-node-dimmed')).toHaveCount(0);
+
+  // Verify zoom controls update and reset the canvas transform.
+  const viewportGroup = graph.locator(':scope > g[transform]').first();
+  await expect(viewportGroup).toHaveAttribute('transform', /scale\(1\)/);
+  await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  await expect(viewportGroup).toHaveAttribute('transform', /scale\(1\.2\)/);
+  await page.getByRole('button', { name: 'Zoom out', exact: true }).click();
+  await expect(viewportGroup).toHaveAttribute('transform', /scale\(1\)/);
+  await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
+  await page.getByRole('button', { name: 'Reset view', exact: true }).click();
+  await expect(viewportGroup).toHaveAttribute('transform', /^translate\(0,0\) .*scale\(1\)/);
 });
 
 test('persists dashboard density and widget visibility across a reload', async ({ page }) => {
