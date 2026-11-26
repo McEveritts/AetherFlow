@@ -42,9 +42,11 @@ jobs:
 
   node-installers:
     name: Node Application Installer Regression Tests (Shard ${{ matrix.shard }}/4)
+    if: ${{ !(github.event_name == 'push' && (github.ref == 'refs/heads/nightly' || github.ref == 'refs/heads/Nightly')) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         shard: [1, 2, 3, 4]
     steps:
@@ -77,6 +79,7 @@ jobs:
 
   palate-installer:
     name: Palate Installer Regression Tests
+    if: ${{ !(github.event_name == 'push' && (github.ref == 'refs/heads/nightly' || github.ref == 'refs/heads/Nightly')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -94,6 +97,7 @@ jobs:
 
   jellyseerr-installer:
     name: Jellyseerr / Seerr Installer Regression Tests
+    if: ${{ !(github.event_name == 'push' && (github.ref == 'refs/heads/nightly' || github.ref == 'refs/heads/Nightly')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -159,6 +163,7 @@ jobs:
 
   frontend-rs-checks:
     name: Frontend (Rust WASM Lint, Tests & Advisories)
+    if: ${{ !(github.event_name == 'push' && (github.ref == 'refs/heads/nightly' || github.ref == 'refs/heads/Nightly')) }}
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -196,6 +201,8 @@ jobs:
 
   frontend-rs:
     name: Frontend (Rust WASM Build)
+    needs: [frontend-rs-checks]
+    if: ${{ always() && !cancelled() && (needs.frontend-rs-checks.result == 'success' || needs.frontend-rs-checks.result == 'skipped') }}
     runs-on: ubuntu-22.04
     env:
       CARGO_INCREMENTAL: "0"
@@ -240,6 +247,7 @@ jobs:
 
   backend-rs-checks:
     name: Backend, CLI & Plugin SDK (Rust Lint & Tests)
+    if: ${{ !(github.event_name == 'push' && (github.ref == 'refs/heads/nightly' || github.ref == 'refs/heads/Nightly')) }}
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -293,6 +301,7 @@ jobs:
           TMP_SDK="$(mktemp -d)"
           trap 'rm -rf "$TMP_SDK"' EXIT
           bash scripts/create-plugin-sdk.sh ci-verify-plugin "CI Verify Plugin" "$TMP_SDK/ci-verify-plugin" rust
+          test -z "$(find "$TMP_SDK/ci-verify-plugin" \( -name 'EGM.md' -o -name '*_DRIFT_REPORT.md' -o -name 'goldfish_review_report.md' \) -print -quit)"
           cargo clippy --manifest-path "$TMP_SDK/ci-verify-plugin/backend/Cargo.toml" --all-targets --locked -- -D warnings
           cargo test --manifest-path "$TMP_SDK/ci-verify-plugin/backend/Cargo.toml" --locked
 
@@ -310,6 +319,8 @@ jobs:
 
   backend-rs:
     name: Backend, CLI & LibreSpeed (Rust Build)
+    needs: [backend-rs-checks]
+    if: ${{ always() && !cancelled() && (needs.backend-rs-checks.result == 'success' || needs.backend-rs-checks.result == 'skipped') }}
     runs-on: ubuntu-22.04
     env:
       CARGO_INCREMENTAL: "0"
@@ -374,6 +385,7 @@ jobs:
     needs: [backend-rs, frontend-rs]
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         browser: [chromium, firefox, webkit]
     steps:
@@ -431,6 +443,7 @@ jobs:
     needs: [backend-rs, frontend-rs]
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         include:
           - browser: chromium

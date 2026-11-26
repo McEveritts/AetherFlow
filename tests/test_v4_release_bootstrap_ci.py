@@ -254,8 +254,8 @@ _depends
             build_job,
             r"needs:\s*\[.*security-gate.*security-frontend.*security-python.*build-wasm.*package-amd64.*package-arm64.*package-armv7-speedtest.*\]",
         )
-        self.assertRegex(amd64_job, r"needs:\s*\[validate-release\]")
-        self.assertRegex(arm64_job, r"needs:\s*\[validate-release\]")
+        self.assertRegex(amd64_job, r"needs:\s*\[validate-release,\s*security-gate\]")
+        self.assertRegex(arm64_job, r"needs:\s*\[validate-release,\s*security-gate\]")
         self.assertRegex(e2e_job, r"needs:\s*\[.*release-build.*\]")
         self.assertRegex(
             pub_job,

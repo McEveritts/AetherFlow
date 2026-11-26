@@ -9,8 +9,6 @@ on:
       - main
       - master
       - development
-      - nightly
-      - Nightly
   pull_request:
     branches:
       - main
@@ -49,6 +47,8 @@ jobs:
 
   rust-security:
     name: Rust Control Plane SAST & Advisory Gate
+    needs: [secret-scan]
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -116,6 +116,7 @@ jobs:
           TMP_SDK="$(mktemp -d)"
           trap 'rm -rf "$TMP_SDK"' EXIT
           bash scripts/create-plugin-sdk.sh sec-verify-plugin "Security Verify Plugin" "$TMP_SDK/sec-verify-plugin" rust
+          test -z "$(find "$TMP_SDK/sec-verify-plugin" \( -name 'EGM.md' -o -name '*_DRIFT_REPORT.md' -o -name 'goldfish_review_report.md' \) -print -quit)"
           cargo clippy --manifest-path "$TMP_SDK/sec-verify-plugin/backend/Cargo.toml" --all-targets --locked -- -D warnings
           cargo test --manifest-path "$TMP_SDK/sec-verify-plugin/backend/Cargo.toml" --locked
 
@@ -132,6 +133,8 @@ jobs:
 
   frontend-rs-security:
     name: Rust WASM Frontend SAST & Advisory Gate
+    needs: [npm-security]
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

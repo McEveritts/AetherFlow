@@ -46,6 +46,7 @@ mkdir -p "${TARGET_DIR}"
 cp -R "${TEMPLATE_DIR}/." "${TARGET_DIR}/"
 chmod -R u+w "${TARGET_DIR}"
 rm -rf "${TARGET_DIR}/backend/target" "${TARGET_DIR}/bin"
+find "${TARGET_DIR}" \( -type f -o -type l \) \( -name 'EGM.md' -o -name '*_DRIFT_REPORT.md' -o -name 'goldfish_review_report.md' \) -delete
 
 python3 - "${TARGET_DIR}" "${PLUGIN_ID}" "${PLUGIN_NAME}" <<'PYEOF'
 import pathlib

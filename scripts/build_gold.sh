@@ -277,7 +277,8 @@ build_target() {
     --exclude='*.pyc' --exclude='*.pyo' --exclude='*.tsbuildinfo' \
     --exclude='.cache' --exclude='.pytest_cache' --exclude='.mypy_cache' \
     --exclude='.ruff_cache' --exclude='.tox' --exclude='.venv' --exclude='.turbo' \
-    --exclude='.next' --exclude='target')
+    --exclude='.next' --exclude='target' \
+    --exclude='EGM.md' --exclude='*_DRIFT_REPORT.md' --exclude='goldfish_review_report.md')
   if frontend_assets_present "${FRONTEND_DIST_DIR}"; then
     mkdir -p "${target_dir}/web/dist"
     tar -C "${FRONTEND_DIST_DIR}" "${runtime_excludes[@]}" --exclude='./.keep' -cf - . \

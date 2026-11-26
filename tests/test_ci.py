@@ -85,7 +85,10 @@ class CiAndSecurityWorkflowGateTests(unittest.TestCase):
         self.assertIn("scripts/build_wasm_frontend.sh --stage", wasm)
         self.assertIn("name: frontend-wasm-dist", wasm)
         self.assertIn("path: web/dist", wasm)
-        self.assertNotIn("needs:", backend)
+        self.assertIn("needs: [frontend-rs-checks]", wasm)
+        self.assertNotIn("backend-rs", wasm)
+        self.assertIn("needs: [backend-rs-checks]", backend)
+        self.assertNotIn("frontend-rs", backend)
         self.assertNotIn("download-artifact", backend)
         self.assertIn("name: aetherflow-rs-binaries", backend)
 
