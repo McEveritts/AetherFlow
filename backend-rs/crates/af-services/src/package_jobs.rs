@@ -93,8 +93,7 @@ pub use af_release::lifecycle::diagnostic_projection::{
     redact_embedded_json_spans, redact_json_value, redact_secrets, redact_sensitive_http_headers,
 };
 
-pub fn sanitize_diagnostic_summary(input: &str, max_len: usize) -> String {
-    let redacted = redact_secrets(input);
+fn truncate_diagnostic_summary(redacted: &str, max_len: usize) -> String {
     let trimmed = redacted.trim();
     if trimmed.chars().count() <= max_len {
         trimmed.to_string()
@@ -103,6 +102,53 @@ pub fn sanitize_diagnostic_summary(input: &str, max_len: usize) -> String {
         truncated.push_str("...");
         truncated
     }
+}
+
+fn sanitize_identity_field(value: &str) -> String {
+    af_release::lifecycle::LifecycleJobDiagnostics::sanitize_persisted_text(value)
+}
+
+fn sanitize_text_field(value: String) -> String {
+    if value.is_empty() {
+        value
+    } else {
+        redact_secrets(&value)
+    }
+}
+
+fn sanitize_optional_field(value: Option<String>) -> Option<String> {
+    value.map(|s| redact_secrets(&s))
+}
+
+fn sanitize_job_info(mut info: PackageJobInfo) -> PackageJobInfo {
+    info.package_id = sanitize_identity_field(&info.package_id);
+    info.job_id = sanitize_identity_field(&info.job_id);
+    info.action = sanitize_identity_field(&info.action);
+    info.status = sanitize_text_field(info.status);
+    info.last_line = redact_secrets(&info.last_line);
+    info.started_at = sanitize_text_field(info.started_at);
+    info.expected_target_version = sanitize_optional_field(info.expected_target_version);
+    info
+}
+
+fn sanitize_job_outcome(mut outcome: PackageJobOutcome) -> PackageJobOutcome {
+    outcome.package_id = sanitize_identity_field(&outcome.package_id);
+    outcome.job_id = sanitize_identity_field(&outcome.job_id);
+    outcome.action = sanitize_identity_field(&outcome.action);
+    outcome.status = sanitize_text_field(outcome.status);
+    outcome.started_at = sanitize_text_field(outcome.started_at);
+    outcome.finished_at = sanitize_text_field(outcome.finished_at);
+    outcome.failed_stage = sanitize_optional_field(outcome.failed_stage);
+    outcome.sanitized_summary = sanitize_optional_field(outcome.sanitized_summary);
+    outcome.expected_target_version = sanitize_optional_field(outcome.expected_target_version);
+    outcome.achieved_version = sanitize_optional_field(outcome.achieved_version);
+    outcome.recovery_state = sanitize_optional_field(outcome.recovery_state);
+    outcome
+}
+
+pub fn sanitize_diagnostic_summary(input: &str, max_len: usize) -> String {
+    let redacted = redact_secrets(input);
+    truncate_diagnostic_summary(&redacted, max_len)
 }
 
 pub fn parse_diagnostic_markers(text: &str) -> (Option<String>, Option<i32>, Option<String>) {
@@ -116,16 +162,17 @@ pub fn parse_diagnostic_markers(text: &str) -> (Option<String>, Option<i32>, Opt
         .unwrap()
     });
 
+    let redacted = redact_secrets(text);
     let failed_stage = STAGE_RE
-        .captures(text)
+        .captures(&redacted)
         .and_then(|c| c.get(1))
         .map(|m| redact_secrets(m.as_str()));
     let exit_code = EXIT_CODE_RE
-        .captures(text)
+        .captures(&redacted)
         .and_then(|c| c.get(1))
         .and_then(|m| m.as_str().parse::<i32>().ok());
     let summary = if !text.trim().is_empty() {
-        Some(sanitize_diagnostic_summary(text, 280))
+        Some(truncate_diagnostic_summary(&redacted, 280))
     } else {
         None
     };
@@ -187,6 +234,11 @@ impl JobRegistry {
             .prepare(query)?
             .query_map([], read_outcome)?
             .collect::<rusqlite::Result<_>>()?;
+        let active_packages: std::collections::HashSet<String> = rows
+            .iter()
+            .filter(|row| !matches!(row.status.as_str(), "completed" | "failed" | "interrupted"))
+            .map(|row| row.package_id.clone())
+            .collect();
         for row in rows {
             if !matches!(row.status.as_str(), "completed" | "failed" | "interrupted") {
                 if self
@@ -210,6 +262,9 @@ impl JobRegistry {
                 }
                 self.outcomes.remove(&row.package_id);
             } else {
+                if active_packages.contains(&row.package_id) {
+                    continue;
+                }
                 self.active.remove(&row.package_id);
                 self.leases.remove(&row.package_id);
                 if self.outcomes.get(&row.package_id).is_none_or(|old| {
@@ -224,7 +279,8 @@ impl JobRegistry {
         Ok(())
     }
 
-    fn start(&mut self, mut info: PackageJobInfo) -> anyhow::Result<bool> {
+    fn start(&mut self, info: PackageJobInfo) -> anyhow::Result<bool> {
+        let mut info = sanitize_job_info(info);
         if let Some(conn) = &self.db {
             af_release::lifecycle::reconcile_jobs(conn, Path::new(conn.path().unwrap_or("")))?;
         }
@@ -330,9 +386,12 @@ impl JobRegistry {
         recovery_state: Option<String>,
         retention_state: Option<String>,
     ) -> anyhow::Result<Option<PackageJobOutcome>> {
+        let pkg = sanitize_identity_field(pkg);
+        let job_id = sanitize_identity_field(job_id);
+        let action = sanitize_identity_field(action);
         let Some(job) = self
             .active
-            .get(pkg)
+            .get(&pkg)
             .filter(|j| j.job_id == job_id && j.action == action)
         else {
             return Ok(None);
@@ -345,7 +404,7 @@ impl JobRegistry {
         };
         let normalized_recovery = af_release::lifecycle::normalize_recovery_state(
             success,
-            action,
+            &action,
             category,
             recovery_state.as_deref(),
         );
@@ -354,17 +413,19 @@ impl JobRegistry {
         } else {
             Some(normalized_recovery.to_string())
         };
-        let sanitized_summary = sanitized_summary.map(|s| redact_secrets(&s));
-        let failed_stage = failed_stage.map(|s| redact_secrets(&s));
-        let expected_target =
-            expected_target_version.or_else(|| job.expected_target_version.clone());
+        let sanitized_summary = sanitize_optional_field(sanitized_summary);
+        let failed_stage = sanitize_optional_field(failed_stage);
+        let expected_target = sanitize_optional_field(
+            expected_target_version.or_else(|| job.expected_target_version.clone()),
+        );
+        let achieved_version = sanitize_optional_field(achieved_version);
         let outcome = PackageJobOutcome {
             job_id: job.job_id.clone(),
-            package_id: pkg.to_string(),
-            action: action.to_string(),
+            package_id: pkg.clone(),
+            action: action.clone(),
             status: status.to_string(),
             message: outcome_summary(status, category).to_string(),
-            started_at: job.started_at.clone(),
+            started_at: sanitize_text_field(job.started_at.clone()),
             finished_at: Utc::now().to_rfc3339(),
             failed_stage: failed_stage.clone(),
             exit_code,
@@ -376,9 +437,9 @@ impl JobRegistry {
         if let Some(conn) = &self.db {
             af_release::lifecycle::finish_job_with_diagnostics(
                 conn,
-                pkg,
+                &pkg,
                 &outcome.job_id,
-                action,
+                &action,
                 success,
                 af_release::lifecycle::LifecycleJobDiagnostics {
                     failure_category: category,
@@ -393,9 +454,9 @@ impl JobRegistry {
                 },
             )?;
         }
-        self.outcomes.insert(pkg.to_string(), outcome.clone());
-        self.active.remove(pkg);
-        self.leases.remove(pkg);
+        self.outcomes.insert(pkg.clone(), outcome.clone());
+        self.active.remove(&pkg);
+        self.leases.remove(&pkg);
         Ok(Some(outcome))
     }
 }
@@ -408,7 +469,7 @@ fn read_outcome(row: &Row<'_>) -> rusqlite::Result<PackageJobOutcome> {
     let expected_target_version: String = row.get::<_, Option<String>>(10)?.unwrap_or_default();
     let achieved_version: String = row.get::<_, Option<String>>(11)?.unwrap_or_default();
     let recovery_state: String = row.get::<_, Option<String>>(12)?.unwrap_or_default();
-    Ok(PackageJobOutcome {
+    Ok(sanitize_job_outcome(PackageJobOutcome {
         package_id: row.get(0)?,
         job_id: row.get(1)?,
         action: row.get(2)?,
@@ -442,7 +503,7 @@ fn read_outcome(row: &Row<'_>) -> rusqlite::Result<PackageJobOutcome> {
         } else {
             Some(recovery_state)
         },
-    })
+    }))
 }
 
 fn outcome_summary(status: &str, category: &str) -> &'static str {
@@ -481,8 +542,22 @@ pub fn package_job_snapshot() -> anyhow::Result<PackageJobSnapshot> {
             .map_err(|_| anyhow::anyhow!("lifecycle registry unavailable"))?;
         (
             PackageJobSnapshot {
-                active: jobs.active.clone(),
-                outcomes: jobs.outcomes.clone(),
+                active: jobs
+                    .active
+                    .values()
+                    .map(|v| {
+                        let info = sanitize_job_info(v.clone());
+                        (info.package_id.clone(), info)
+                    })
+                    .collect(),
+                outcomes: jobs
+                    .outcomes
+                    .values()
+                    .map(|v| {
+                        let outcome = sanitize_job_outcome(v.clone());
+                        (outcome.package_id.clone(), outcome)
+                    })
+                    .collect(),
             },
             jobs.db
                 .as_ref()
@@ -500,17 +575,28 @@ pub fn package_job_snapshot() -> anyhow::Result<PackageJobSnapshot> {
         ..Default::default()
     };
     refreshed.refresh()?;
-    for (package, current) in &mut refreshed.active {
-        if let Some(local) = snapshot
+    let mut active = HashMap::with_capacity(refreshed.active.len());
+    for (_, current) in refreshed.active {
+        let sanitized = if let Some(local) = snapshot
             .active
-            .get(package)
+            .get(&current.package_id)
             .filter(|local| local.job_id == current.job_id && local.status == current.status)
         {
-            *current = local.clone();
-        }
+            sanitize_job_info(local.clone())
+        } else {
+            sanitize_job_info(current)
+        };
+        active.insert(sanitized.package_id.clone(), sanitized);
     }
-    snapshot.active = refreshed.active;
-    snapshot.outcomes = refreshed.outcomes;
+    snapshot.active = active;
+    snapshot.outcomes = refreshed
+        .outcomes
+        .into_values()
+        .map(|v| {
+            let outcome = sanitize_job_outcome(v);
+            (outcome.package_id.clone(), outcome)
+        })
+        .collect();
     Ok(snapshot)
 }
 
@@ -524,6 +610,10 @@ pub fn get_package_job_history_outcome(
     package_id: &str,
     job_id: &str,
 ) -> anyhow::Result<Option<PackageJobOutcome>> {
+    let canonical_pkg = sanitize_identity_field(package_id);
+    let projected_pkg = sanitize_text_field(package_id.to_string());
+    let canonical_job_id = sanitize_identity_field(job_id);
+    let projected_job_id = sanitize_text_field(job_id.to_string());
     let path = JOBS
         .lock()
         .map_err(|_| anyhow::anyhow!("lifecycle registry unavailable"))?
@@ -546,7 +636,8 @@ pub fn get_package_job_history_outcome(
                 failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,
                 recovery_state
          FROM package_lifecycle_history
-         WHERE package_id = ?1 AND job_id = ?2
+         WHERE (package_id = ?1 OR package_id = ?2 OR package_id = ?3)
+           AND (job_id = ?4 OR job_id = ?5 OR job_id = ?6)
            AND status IN ('completed', 'failed', 'interrupted')
          ORDER BY id DESC LIMIT 1"
     } else {
@@ -554,12 +645,24 @@ pub fn get_package_job_history_outcome(
                 failed_stage,exit_code,sanitized_summary,expected_target_version,achieved_version,
                 ''
          FROM package_lifecycle_history
-         WHERE package_id = ?1 AND job_id = ?2
+         WHERE (package_id = ?1 OR package_id = ?2 OR package_id = ?3)
+           AND (job_id = ?4 OR job_id = ?5 OR job_id = ?6)
            AND status IN ('completed', 'failed', 'interrupted')
          ORDER BY id DESC LIMIT 1"
     };
     Ok(conn
-        .query_row(query, params![package_id, job_id], read_outcome)
+        .query_row(
+            query,
+            params![
+                canonical_pkg,
+                package_id,
+                projected_pkg,
+                canonical_job_id,
+                job_id,
+                projected_job_id,
+            ],
+            read_outcome,
+        )
         .optional()?)
 }
 
@@ -567,11 +670,13 @@ pub fn take_package_job_lease(
     pkg: &str,
     job_id: &str,
 ) -> Option<af_release::lifecycle::OwnerLease> {
+    let pkg = sanitize_identity_field(pkg);
+    let job_id = sanitize_identity_field(job_id);
     let mut jobs = JOBS.lock().ok()?;
-    if jobs.active.get(pkg)?.job_id != job_id {
+    if jobs.active.get(&pkg)?.job_id != job_id {
         return None;
     }
-    jobs.leases.remove(pkg)
+    jobs.leases.remove(&pkg)
 }
 
 pub fn has_active_package_jobs() -> bool {
@@ -611,16 +716,24 @@ pub fn reconcile_package_jobs() -> anyhow::Result<()> {
 }
 
 pub fn get_package_job_info(pkg: &str) -> Option<PackageJobInfo> {
+    let pkg = sanitize_identity_field(pkg);
     match package_job_snapshot() {
-        Ok(jobs) => jobs.active.get(pkg).cloned(),
-        Err(_) => JOBS.lock().ok()?.active.get(pkg).cloned(),
+        Ok(jobs) => jobs.active.get(&pkg).cloned(),
+        Err(_) => JOBS
+            .lock()
+            .ok()?
+            .active
+            .get(&pkg)
+            .cloned()
+            .map(sanitize_job_info),
     }
 }
 pub fn get_package_job_outcome(pkg: &str) -> Option<PackageJobOutcome> {
-    package_job_snapshot().ok()?.outcomes.get(pkg).cloned()
+    let pkg = sanitize_identity_field(pkg);
+    package_job_snapshot().ok()?.outcomes.get(&pkg).cloned()
 }
-pub fn set_package_job_info(mut info: PackageJobInfo) -> Option<PackageJobInfo> {
-    info.last_line = redact_secrets(&info.last_line);
+pub fn set_package_job_info(info: PackageJobInfo) -> Option<PackageJobInfo> {
+    let mut info = sanitize_job_info(info);
     let mut jobs = JOBS.lock().ok()?;
     let current = jobs
         .active
@@ -634,19 +747,26 @@ pub fn set_package_job_info(mut info: PackageJobInfo) -> Option<PackageJobInfo> 
     Some(info)
 }
 
-pub fn try_start_package_job(mut info: PackageJobInfo) -> bool {
-    info.last_line = redact_secrets(&info.last_line);
+pub fn try_start_package_job(info: PackageJobInfo) -> bool {
+    let info = sanitize_job_info(info);
     match JOBS.lock().map(|mut j| j.start(info)) {
         Ok(Ok(started)) => started,
-        error => {
-            tracing::error!(?error, "Failed to persist lifecycle admission");
+        Ok(Err(error)) => {
+            let sanitized_error = sanitize_text_field(format!("{error:#}"));
+            tracing::error!(error = %sanitized_error, "Failed to persist lifecycle admission");
+            false
+        }
+        Err(error) => {
+            let sanitized_error = sanitize_text_field(error.to_string());
+            tracing::error!(error = %sanitized_error, "Failed to persist lifecycle admission");
             false
         }
     }
 }
 pub fn clear_package_job_info(pkg: &str) {
+    let pkg = sanitize_identity_field(pkg);
     if let Ok(mut j) = JOBS.lock() {
-        j.active.remove(pkg);
+        j.active.remove(&pkg);
     }
 }
 pub fn finish_package_job(
@@ -661,9 +781,18 @@ pub fn finish_package_job(
         .map(|mut j| j.finish(pkg, action, success, message, job_id))
     {
         Ok(Ok(outcome)) => outcome,
-        error => {
+        Ok(Err(error)) => {
+            let sanitized_error = sanitize_text_field(format!("{error:#}"));
             tracing::error!(
-                ?error,
+                error = %sanitized_error,
+                "Failed to persist lifecycle outcome; leaving operation unresolved"
+            );
+            None
+        }
+        Err(error) => {
+            let sanitized_error = sanitize_text_field(error.to_string());
+            tracing::error!(
+                error = %sanitized_error,
                 "Failed to persist lifecycle outcome; leaving operation unresolved"
             );
             None
@@ -682,9 +811,18 @@ pub fn fail_package_job(
         .map(|mut jobs| jobs.finish_with_failure(pkg, action, false, Some(failure), job_id))
     {
         Ok(Ok(outcome)) => outcome,
-        error => {
+        Ok(Err(error)) => {
+            let sanitized_error = sanitize_text_field(format!("{error:#}"));
             tracing::error!(
-                ?error,
+                error = %sanitized_error,
+                "Failed to persist lifecycle failure; leaving operation unresolved"
+            );
+            None
+        }
+        Err(error) => {
+            let sanitized_error = sanitize_text_field(error.to_string());
+            tracing::error!(
+                error = %sanitized_error,
                 "Failed to persist lifecycle failure; leaving operation unresolved"
             );
             None
@@ -782,9 +920,18 @@ pub fn finish_package_job_with_recovery_and_retention(
         )
     }) {
         Ok(Ok(outcome)) => outcome,
-        error => {
+        Ok(Err(error)) => {
+            let sanitized_error = sanitize_text_field(format!("{error:#}"));
             tracing::error!(
-                ?error,
+                error = %sanitized_error,
+                "Failed to persist lifecycle outcome; leaving operation unresolved"
+            );
+            None
+        }
+        Err(error) => {
+            let sanitized_error = sanitize_text_field(error.to_string());
+            tracing::error!(
+                error = %sanitized_error,
                 "Failed to persist lifecycle outcome; leaving operation unresolved"
             );
             None
