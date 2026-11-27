@@ -542,7 +542,7 @@ exit 0
                 "AF_SKIP_SELF_DELETE": "1",
                 "AF_SKIP_SYSTEMCTL": "1",
                 "UNATTENDED": "false",
-                "username": "betheenvy",
+                "username": "operator",
                 "FIN": "3",
             }
 
@@ -560,16 +560,16 @@ exit 0
             )
             res = subprocess.run(
                 ["bash", "-c", probe],
-                input="redonemedia.org\nn\n",
+                input="example.org\nn\n",
                 env=base_env,
                 capture_output=True,
                 text=True,
                 timeout=15,
             )
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-            self.assertIn("MEM_VARS=redonemedia.org|redonemedia.org|redonemedia.org", res.stdout)
-            self.assertEqual(etc_hostname.read_text(encoding="utf-8").strip(), "redonemedia.org")
-            self.assertIn("127.0.1.1 redonemedia.org redonemedia", etc_hosts.read_text(encoding="utf-8"))
+            self.assertIn("MEM_VARS=example.org|example.org|example.org", res.stdout)
+            self.assertEqual(etc_hostname.read_text(encoding="utf-8").strip(), "example.org")
+            self.assertIn("127.0.1.1 example.org example", etc_hosts.read_text(encoding="utf-8"))
             self.assertEqual(
                 fake_root_dir.stat().st_mode & 0o777,
                 0o700,
@@ -577,7 +577,7 @@ exit 0
             )
             self.assertEqual(info_file.stat().st_mode & 0o777, 0o600)
 
-            self.assertIn("https://redonemedia.org/", res.stdout)
+            self.assertIn("https://example.org/", res.stdout)
             self.assertIn("/var/lib/aetherflow/.setup-bootstrap-token", res.stdout)
             self.assertNotIn("Log in using the administrator credentials you created", res.stdout)
             self.assertIn("af health", res.stdout)
@@ -587,7 +587,7 @@ exit 0
             self.assertNotRegex(res.stdout, r"af service restart\s+-")
 
             info_text = info_file.read_text(encoding="utf-8")
-            self.assertIn("Dashboard Onboarding: https://redonemedia.org/", info_text)
+            self.assertIn("Dashboard Onboarding: https://example.org/", info_text)
             self.assertIn("/var/lib/aetherflow/.setup-bootstrap-token", info_text)
 
             # 2. Resumed-shell _finished without in-memory domain/hostname_value still reads saved config
@@ -612,7 +612,7 @@ exit 0
                 timeout=15,
             )
             self.assertEqual(res_resume.returncode, 0, res_resume.stdout + res_resume.stderr)
-            self.assertIn("https://redonemedia.org/", res_resume.stdout)
+            self.assertIn("https://example.org/", res_resume.stdout)
             self.assertIn("Sign in with the web administrator account seeded during setup.", res_resume.stdout)
 
             # 3. Direct-interface route without domain uses src IP (203.0.113.99, NOT 0),
@@ -781,7 +781,7 @@ exit 0
                 "AF_LEGACY_SRV_LINK": str(root / "srv/aetherflow"),
                 "AF_PHP_ETC_DIR": str(root / "etc/php"),
                 "local_setup": f"{ROOT / 'setup'}/",
-                "username": "betheenvy",
+                "username": "operator",
             }
             env.pop("OUTTO", None)
             res = subprocess.run(

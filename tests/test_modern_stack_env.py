@@ -454,7 +454,11 @@ class PackagedSystemdUnitPortabilityTests(unittest.TestCase):
         self.assertTrue(PACKAGED_API_UNIT.exists(), "Packaged aetherflow-api.service missing")
         content = PACKAGED_API_UNIT.read_text(encoding="utf-8")
 
-        self.assertNotIn("betheenvy", content, "Personal username 'betheenvy' found in packaged unit")
+        self.assertNotRegex(
+            content,
+            r"(?m)^\s*User=(?!aetherflow\s*$)",
+            "Non-service personal User= directive found in packaged API unit",
+        )
         self.assertNotIn("qbittorrent", content.split("#")[0], "Specific non-default group found in unit directives")
         self.assertNotIn("/home/", content.split("#")[0], "Personal /home/ path found in unit directives")
 
@@ -477,8 +481,12 @@ class PackagedSystemdUnitPortabilityTests(unittest.TestCase):
             self.assertTrue(unit_path.exists(), f"Canonical unit missing: {unit_path}")
             content = unit_path.read_text(encoding="utf-8")
             self.assertNotIn("COOKIE_SECURE=false", content, f"{unit_path.name} should not set COOKIE_SECURE=false")
-            self.assertNotIn("betheenvy", content)
-            self.assertNotIn("/home/hdd", content)
+            self.assertNotRegex(
+                content,
+                r"(?m)^\s*User=(?!(?:aetherflow|root)\s*$)",
+                f"{unit_path.name} should only use canonical service accounts",
+            )
+            self.assertNotIn("/home/", content)
 
         modern = MODERN_STACK_SH.read_text(encoding="utf-8")
         finalize = (REPO_ROOT / "setup" / "modules" / "05-finalize.sh").read_text(encoding="utf-8")

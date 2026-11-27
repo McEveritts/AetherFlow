@@ -1,6 +1,6 @@
 # AetherFlow v4.0.0 Post-EGM CI Recovery and Hardening Program
 
-*   **Author**: Donovan Everitt
+*   **Author**: AetherFlow Maintainers
 *   **Status**: Proposed (Post-EGM Review Revision)
 *   **Date**: 2026-11-23
 

@@ -348,7 +348,7 @@ async fn test_streaming_dashboard_contract_filters_and_redaction() {
                 started_at, last_seen_at, ended_at, is_active
             ) VALUES (
                 'jf:sess:2', 'jellyfin', 'Vault Jellyfin', 'u2', 'bob',
-                'Swiftfin', 'iPhone 16', '172.56.10.22',
+                'Swiftfin', 'iPhone 16', '198.51.100.22',
                 'item-2', 'Hello, Ms. Cobel', 'Episode', 'Severance',
                 1, 1, 2022,
                 'Transcode', 'TS', 'H264', '1080p FHD',

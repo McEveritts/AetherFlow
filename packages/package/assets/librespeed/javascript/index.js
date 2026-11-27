@@ -62,7 +62,7 @@ function getBaseServerURL() {
 
 function getDefaultLocalServer() {
   return {
-    name: "AetherFlow Nexus · Falkenstein, DE",
+    name: "AetherFlow Local Node",
     server: getBaseServerURL(),
     dlURL: "backend/garbage.php",
     ulURL: "backend/empty.php",

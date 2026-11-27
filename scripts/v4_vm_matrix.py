@@ -503,7 +503,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--ssh-host",
-        default="hetzner" if os.name == "nt" else "local",
+        default="local",
         help="SSH host alias for remote Linux execution (or 'local' when running directly on the Linux KVM host)",
     )
     p.add_argument(

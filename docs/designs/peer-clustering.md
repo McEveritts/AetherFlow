@@ -1,6 +1,6 @@
 # AetherFlow Peer Clustering
 
-*   **Author:** Donovan Everitt
+*   **Author:** AetherFlow Maintainers
 *   **Status:** Implemented locally across Phases P0–P9 (`f20a3a99`) plus pre-release hardening Bundles A–D on branch `feat/peer-clustering`. Local build, test, lint, supply-chain, and standalone regression gates pass on Server A; two-server live acceptance is pending Server B provisioning.
 *   **Supersedes:** Earlier pre-implementation drafts (`five-phase plan`, `concepts_brief.md`, and `peer_clustering_plan.md`). Original 52 entry IDs are preserved as `[Entry N]` traceability tags across phases.
 *   **Date:** 2026-11-22 (updated 2026-11-25 to align with post-hardening Bundles A–D on `feat/peer-clustering`)

@@ -670,9 +670,14 @@ application_readiness_url() { printf 'http://127.0.0.1:%s/\n' "${2:-7878}"; }
 
         bash_cmd = "bash"
         if os.name == "nt":
-            git_bash = Path(r"C:\Users\armyw\AppData\Local\hermes\git\bin\bash.exe")
-            if git_bash.exists():
-                bash_cmd = str(git_bash)
+            for candidate in (
+                os.environ.get("AF_GIT_BASH", ""),
+                r"C:\Program Files\Git\bin\bash.exe",
+                r"C:\Program Files\Git\usr\bin\bash.exe",
+            ):
+                if candidate and Path(candidate).exists():
+                    bash_cmd = candidate
+                    break
 
         result = subprocess.run(
             [bash_cmd, str(staged_script).replace("\\", "/")],

@@ -1864,16 +1864,16 @@ mod endpoint_detection_tests {
             ("br-9a1b2c3d4e5f".into(), "172.18.0.1".parse().unwrap()),
             ("virbr0".into(), "192.168.122.1".parse().unwrap()),
             ("tailscale0".into(), "100.64.0.1".parse().unwrap()),
-            ("enp0s31f6".into(), "94.130.161.251".parse().unwrap()),
-            ("enp0s31f6".into(), "2a01:4f8:13b:2a69::2".parse().unwrap()),
+            ("enp0s31f6".into(), "198.51.100.10".parse().unwrap()),
+            ("enp0s31f6".into(), "2001:db8:1::2".parse().unwrap()),
         ]);
 
         assert_eq!(detected[0].interface, "enp0s31f6");
-        assert_eq!(detected[0].address, "94.130.161.251");
+        assert_eq!(detected[0].address, "198.51.100.10");
         assert!(!detected[0].recommended);
 
         assert_eq!(detected[1].interface, "enp0s31f6");
-        assert_eq!(detected[1].address, "2a01:4f8:13b:2a69::2");
+        assert_eq!(detected[1].address, "2001:db8:1::2");
         assert!(!detected[1].recommended);
 
         // Virtual/VPN/container interfaces remain selectable at the end, never recommended.
@@ -1889,7 +1889,7 @@ mod endpoint_detection_tests {
     fn real_private_vlan_and_host_bridges_stay_recommended_above_public_and_vpn() {
         let detected = classify_and_sort_endpoints(vec![
             ("wg0".into(), "10.66.66.1".parse().unwrap()),
-            ("eth0".into(), "95.216.148.189".parse().unwrap()),
+            ("eth0".into(), "203.0.113.10".parse().unwrap()),
             ("eth1".into(), "10.0.0.2".parse().unwrap()),
             ("vmbr0".into(), "192.168.1.10".parse().unwrap()),
             ("br0".into(), "10.10.0.5".parse().unwrap()),
@@ -1919,11 +1919,11 @@ mod endpoint_detection_tests {
             ("eth0".into(), "fe80::1".parse().unwrap()),
             ("eth0".into(), "0.0.0.0".parse().unwrap()),
             ("eth0".into(), "224.0.0.1".parse().unwrap()),
-            ("eth0".into(), "192.200.124.123".parse().unwrap()),
+            ("eth0".into(), "192.0.2.10".parse().unwrap()),
         ]);
 
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].interface, "eth0");
-        assert_eq!(detected[0].address, "192.200.124.123");
+        assert_eq!(detected[0].address, "192.0.2.10");
     }
 }

@@ -2404,7 +2404,7 @@ async fn external_vhost_sync_self_heals_default_ssl_placeholder_and_rolls_back_o
     fs::create_dir_all(&env_dir).unwrap();
     fs::write(
         env_dir.join("aetherflow.env"),
-        "AETHERFLOW_BASE_DOMAIN=redonemedia.org\n",
+        "AETHERFLOW_BASE_DOMAIN=example.org\n",
     )
     .unwrap();
     let placeholder_ssl = "<VirtualHost *:80>\n        ServerName _\n</VirtualHost>\n<VirtualHost *:443>\n        ServerName _\n</VirtualHost>\n";
@@ -2415,7 +2415,7 @@ async fn external_vhost_sync_self_heals_default_ssl_placeholder_and_rolls_back_o
         app_name: "jellyfin".into(),
         listen_port: 8096,
         internal_domain: Some("jellyfin.aether.local".into()),
-        public_domain: Some("jellyfin.redonemedia.org".into()),
+        public_domain: Some("jellyfin.example.org".into()),
         external_access_enabled: true,
         tls_enabled: false,
         reload_apache: true,
@@ -2441,13 +2441,13 @@ async fn external_vhost_sync_self_heals_default_ssl_placeholder_and_rolls_back_o
     let healed = fs::read_to_string(&default_ssl).unwrap();
     assert!(!healed.contains("ServerName _"), "{healed}");
     assert_eq!(
-        healed.matches("        ServerName redonemedia.org").count(),
+        healed.matches("        ServerName example.org").count(),
         2
     );
     assert_eq!(
         healed
             .matches(
-                "        ServerAlias www.redonemedia.org direct.redonemedia.org *.redonemedia.org"
+                "        ServerAlias www.example.org direct.example.org *.example.org"
             )
             .count(),
         2
@@ -2455,7 +2455,7 @@ async fn external_vhost_sync_self_heals_default_ssl_placeholder_and_rolls_back_o
 
     // Operator-customized default-ssl.conf (no ServerName _) is never overwritten.
     let custom_ssl =
-        "<VirtualHost *:443>\n        ServerName custom.redonemedia.org\n</VirtualHost>\n";
+        "<VirtualHost *:443>\n        ServerName custom.example.org\n</VirtualHost>\n";
     fs::write(&default_ssl, custom_ssl).unwrap();
     apply_ingress_vhost_with_hooks(&req, &apache_dir, || async { Ok(()) }, || async { Ok(()) })
         .await

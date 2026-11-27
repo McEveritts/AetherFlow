@@ -1,6 +1,6 @@
 # AetherFlow Unified Flat Surface & Control System
 
-*   **Author:** Donovan Everitt
+*   **Author:** AetherFlow Maintainers
 *   **Status:** In Review
 *   **Date:** 2026-11-25
 

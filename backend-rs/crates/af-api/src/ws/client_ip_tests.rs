@@ -59,10 +59,10 @@ fn websocket_origin_enforces_scheme_host_port_and_cookie_origin_presence() {
 
     // Trusted loopback reverse proxy with X-Forwarded-Proto=https vs untrusted public peer spoofing X-Forwarded-Host.
     let mut h_tls = HeaderMap::new();
-    h_tls.insert(header::HOST, HeaderValue::from_static("mcflow.stream"));
+    h_tls.insert(header::HOST, HeaderValue::from_static("panel.example.com"));
     h_tls.insert(
         header::ORIGIN,
-        HeaderValue::from_static("https://mcflow.stream"),
+        HeaderValue::from_static("https://panel.example.com"),
     );
     h_tls.insert("X-Forwarded-Proto", HeaderValue::from_static("https"));
     h_tls.insert("X-Forwarded-Port", HeaderValue::from_static("443"));
@@ -73,7 +73,7 @@ fn websocket_origin_enforces_scheme_host_port_and_cookie_origin_presence() {
     ));
 
     let mut h_spoof = HeaderMap::new();
-    h_spoof.insert(header::HOST, HeaderValue::from_static("mcflow.stream"));
+    h_spoof.insert(header::HOST, HeaderValue::from_static("panel.example.com"));
     h_spoof.insert(
         "X-Forwarded-Host",
         HeaderValue::from_static("evil.attacker.test"),

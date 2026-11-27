@@ -1,6 +1,6 @@
 [
   {
-    "name": "AetherFlow Nexus · Falkenstein, DE",
+    "name": "AetherFlow Local Node",
     "server": "",
     "dlURL": "backend/garbage.php",
     "ulURL": "backend/empty.php",

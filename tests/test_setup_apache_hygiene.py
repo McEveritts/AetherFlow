@@ -197,15 +197,15 @@ class SetupApacheHygieneTests(unittest.TestCase):
     def test_apacheconf_sets_default_ssl_server_name_when_fqdn_configured(self):
         res = self._run_setup_snippet(
             '_write_apache_htpasswd_files "$username" "$passwd" "$REALM"\n_apacheconf',
-            extra_env={"FQDN": "RedOneMedia.org."},
+            extra_env={"FQDN": "Example.org."},
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         default_ssl = (self.apache_etc / "sites-enabled/default-ssl.conf").read_text(encoding="utf-8")
         self.assertNotIn("ServerName _", default_ssl)
-        self.assertEqual(default_ssl.count("ServerName redonemedia.org"), 2)
+        self.assertEqual(default_ssl.count("ServerName example.org"), 2)
         self.assertEqual(
             default_ssl.count(
-                "ServerAlias www.redonemedia.org direct.redonemedia.org *.redonemedia.org"
+                "ServerAlias www.example.org direct.example.org *.example.org"
             ),
             2,
         )
