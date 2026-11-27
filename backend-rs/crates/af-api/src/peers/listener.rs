@@ -441,6 +441,7 @@ async fn tunnel_health(
     };
 
     let transcode_caps = super::transcode::cached_local_capabilities_nonblocking(&runtime);
+    let local_load = super::transcode::cached_local_load_nonblocking(&runtime);
 
     (
         StatusCode::OK,
@@ -451,6 +452,7 @@ async fn tunnel_health(
             "peer_protocol": PEER_PROTOCOL_VERSION,
             "capabilities": capabilities(),
             "transcode": transcode_caps,
+            "load": local_load,
             "inbound_grant_generation": inbound_grant_generation,
         })),
     )

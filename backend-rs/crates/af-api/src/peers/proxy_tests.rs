@@ -2770,6 +2770,9 @@ async fn peer_tunnel_health_reports_inbound_grant_generation_transcode_and_reque
             render_nodes: vec![],
             primary_render_node: Some("/dev/dri/renderD128".to_string()),
             worker_max_jobs: Some(6),
+            hw_decoders: vec![],
+            hw_encoders_verified: false,
+            adapt_backend_mode: None,
         },
     ));
 

@@ -26,6 +26,31 @@ pub const WORKER_WEIGHT_MIN: u32 = 1;
 pub const WORKER_WEIGHT_MAX: u32 = 100;
 pub const WORKER_MAX_JOBS_MIN: u32 = 1;
 pub const WORKER_MAX_JOBS_MAX: u32 = 64;
+pub const LOCAL_MAX_JOBS_MIN: u32 = 1;
+pub const LOCAL_MAX_JOBS_MAX: u32 = 64;
+pub const DEFAULT_LOCAL_MAX_JOBS: u32 = 2;
+pub const DEFAULT_DISPATCH_POLICY: &str = "remote_first";
+pub const VALID_DISPATCH_POLICIES: [&str; 3] = ["remote_first", "local_first", "balanced"];
+
+fn default_local_max_jobs() -> u32 {
+    DEFAULT_LOCAL_MAX_JOBS
+}
+
+pub fn normalize_dispatch_policy(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "local_first" => "local_first",
+        "balanced" => "balanced",
+        _ => DEFAULT_DISPATCH_POLICY,
+    }
+}
+
+pub fn effective_local_max_jobs(raw: u32) -> u32 {
+    if raw == 0 {
+        DEFAULT_LOCAL_MAX_JOBS
+    } else {
+        raw.clamp(LOCAL_MAX_JOBS_MIN, LOCAL_MAX_JOBS_MAX)
+    }
+}
 
 fn deserialize_opt_string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
@@ -49,9 +74,17 @@ pub struct TranscodeRenderNodeView {
     pub path: String,
     pub vendor_id: Option<String>,
     pub vendor: Option<String>,
+    #[serde(default)]
+    pub vaapi_driver: Option<String>,
+    #[serde(default)]
+    pub vaapi_decode_codecs: Vec<String>,
+    #[serde(default)]
+    pub vaapi_encode_codecs: Vec<String>,
+    #[serde(default)]
+    pub supports_vpp: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LocalTranscodeInfoView {
     pub server_name: String,
@@ -63,9 +96,19 @@ pub struct LocalTranscodeInfoView {
     pub primary_render_node: Option<String>,
     pub transcoding_temp_path: Option<String>,
     pub tmp_dir: Option<String>,
+    #[serde(default)]
+    pub hw_decoders: Vec<String>,
+    #[serde(default)]
+    pub hw_encoders_verified: bool,
+    #[serde(default)]
+    pub adapt_backend_mode: Option<String>,
+    #[serde(default)]
+    pub cpu_usage_pct: Option<f64>,
+    #[serde(default)]
+    pub gpu_usage_pct: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranscodeWorkerView {
     pub link_id: String,
@@ -92,6 +135,18 @@ pub struct TranscodeWorkerView {
     pub render_node: Option<String>,
     pub parity_ok: bool,
     pub parity_error: Option<String>,
+    #[serde(default)]
+    pub hw_decoders: Vec<String>,
+    #[serde(default)]
+    pub hw_encoders_verified: bool,
+    #[serde(default)]
+    pub adapt_backend_mode: Option<String>,
+    #[serde(default)]
+    pub cpu_usage_pct: Option<f64>,
+    #[serde(default)]
+    pub gpu_usage_pct: Option<f64>,
+    #[serde(default)]
+    pub rtt_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +171,7 @@ pub struct ParityTestResultView {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranscodeConfigResponse {
     pub enabled: bool,
@@ -130,6 +185,12 @@ pub struct TranscodeConfigResponse {
     pub jellyfin_reported_ffmpeg: Option<String>,
     #[serde(default)]
     pub api_restart_scheduled: bool,
+    #[serde(default)]
+    pub dispatch_policy: String,
+    #[serde(default = "default_local_max_jobs")]
+    pub local_max_jobs: u32,
+    #[serde(default)]
+    pub local_active_jobs: u32,
     pub local: LocalTranscodeInfoView,
     pub workers: Vec<TranscodeWorkerView>,
     pub recent_jobs: Vec<TranscodeJobView>,
@@ -151,6 +212,10 @@ pub struct UpdateTranscodeConfigRequest {
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_service_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_max_jobs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<Vec<UpdateTranscodeWorkerRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,12 +270,44 @@ impl WorkerDraft {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DispatchPolicyDraft {
+    pub dispatch_policy: String,
+    pub local_max_jobs_input: String,
+}
+
+impl Default for DispatchPolicyDraft {
+    fn default() -> Self {
+        Self {
+            dispatch_policy: DEFAULT_DISPATCH_POLICY.to_string(),
+            local_max_jobs_input: DEFAULT_LOCAL_MAX_JOBS.to_string(),
+        }
+    }
+}
+
+impl DispatchPolicyDraft {
+    pub fn from_config(cfg: &TranscodeConfigResponse) -> Self {
+        Self {
+            dispatch_policy: normalize_dispatch_policy(&cfg.dispatch_policy).to_string(),
+            local_max_jobs_input: effective_local_max_jobs(cfg.local_max_jobs).to_string(),
+        }
+    }
+
+    pub fn is_dirty(&self, cfg: &TranscodeConfigResponse) -> bool {
+        self.dispatch_policy.trim() != normalize_dispatch_policy(&cfg.dispatch_policy)
+            || self.local_max_jobs_input.trim()
+                != effective_local_max_jobs(cfg.local_max_jobs).to_string()
+    }
+}
+
 /// Pure view-model state container for [`TranscodeSection`].
-/// Preserves unsaved per-worker edits across 10-second background refreshes while
-/// syncing clean workers and clearing state cleanly on session-epoch changes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Preserves unsaved per-worker and dispatch-policy edits across 10-second background
+/// refreshes while syncing clean drafts and clearing state cleanly on session-epoch changes.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TranscodeSectionState {
     pub config: Option<TranscodeConfigResponse>,
+    pub dispatch_draft: DispatchPolicyDraft,
+    pub dispatch_dirty: bool,
     pub drafts: BTreeMap<String, WorkerDraft>,
     pub dirty_workers: BTreeSet<String>,
     pub parity_results: BTreeMap<String, ParityTestResultView>,
@@ -219,6 +316,8 @@ pub struct TranscodeSectionState {
 impl TranscodeSectionState {
     pub fn reset(&mut self) {
         self.config = None;
+        self.dispatch_draft = DispatchPolicyDraft::default();
+        self.dispatch_dirty = false;
         self.drafts.clear();
         self.dirty_workers.clear();
         self.parity_results.clear();
@@ -247,12 +346,32 @@ impl TranscodeSectionState {
                     .insert(worker.link_id.clone(), WorkerDraft::from_worker(worker));
             }
         }
+        if !self.dispatch_dirty {
+            self.dispatch_draft = DispatchPolicyDraft::from_config(&resp);
+        }
         self.config = Some(resp);
     }
 
     pub fn apply_worker_saved(&mut self, saved_link_id: &str, resp: TranscodeConfigResponse) {
         self.dirty_workers.remove(saved_link_id);
         self.apply_loaded(resp);
+    }
+
+    pub fn apply_policy_saved(&mut self, resp: TranscodeConfigResponse) {
+        self.dispatch_dirty = false;
+        self.apply_loaded(resp);
+    }
+
+    pub fn update_dispatch_draft(&mut self, mutate: impl FnOnce(&mut DispatchPolicyDraft)) {
+        mutate(&mut self.dispatch_draft);
+        self.dispatch_dirty = match self.config.as_ref() {
+            Some(cfg) => self.dispatch_draft.is_dirty(cfg),
+            None => true,
+        };
+    }
+
+    pub fn is_dispatch_dirty(&self) -> bool {
+        self.dispatch_dirty
     }
 
     pub fn update_worker_draft(&mut self, link_id: &str, mutate: impl FnOnce(&mut WorkerDraft)) {
@@ -314,6 +433,71 @@ pub fn parse_worker_max_jobs(raw: &str) -> Result<u32, &'static str> {
         Ok(value)
     } else {
         Err("Cluster.transcodeValidationMaxJobsRange")
+    }
+}
+
+pub fn parse_local_max_jobs(raw: &str) -> Result<u32, &'static str> {
+    let trimmed = raw.trim();
+    let value = trimmed
+        .parse::<u32>()
+        .map_err(|_| "Cluster.transcodeValidationLocalMaxJobsRange")?;
+    if (LOCAL_MAX_JOBS_MIN..=LOCAL_MAX_JOBS_MAX).contains(&value) {
+        Ok(value)
+    } else {
+        Err("Cluster.transcodeValidationLocalMaxJobsRange")
+    }
+}
+
+pub fn build_update_dispatch_policy_request(
+    policy: &str,
+    local_max_jobs_raw: &str,
+) -> Result<UpdateTranscodeConfigRequest, &'static str> {
+    let trimmed_policy = policy.trim();
+    if !VALID_DISPATCH_POLICIES.contains(&trimmed_policy) {
+        return Err("Cluster.transcodeValidationDispatchPolicyInvalid");
+    }
+    let local_max_jobs = parse_local_max_jobs(local_max_jobs_raw)?;
+    Ok(UpdateTranscodeConfigRequest {
+        dispatch_policy: Some(trimmed_policy.to_string()),
+        local_max_jobs: Some(local_max_jobs),
+        ..Default::default()
+    })
+}
+
+pub fn format_load_summary(
+    locale: &str,
+    cpu_usage_pct: Option<f64>,
+    gpu_usage_pct: Option<f64>,
+    rtt_ms: Option<f64>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(cpu) = cpu_usage_pct.filter(|v| v.is_finite() && *v >= 0.0) {
+        let pct = cpu.clamp(0.0, 100.0).round() as u32;
+        let label = translate(locale, "Cluster.transcodeTelemetryCpuLabel");
+        parts.push(format!("{label} {pct}%"));
+    }
+    if let Some(gpu) = gpu_usage_pct.filter(|v| v.is_finite() && *v >= 0.0) {
+        let pct = gpu.clamp(0.0, 100.0).round() as u32;
+        let label = translate(locale, "Cluster.transcodeTelemetryGpuLabel");
+        parts.push(format!("{label} {pct}%"));
+    }
+    if let Some(rtt) = rtt_ms.filter(|v| v.is_finite() && *v >= 0.0) {
+        let ms = if rtt < 10.0 {
+            format!("{rtt:.1}")
+        } else {
+            format!("{:.0}", rtt.round())
+        };
+        parts.push(format!("{ms} ms"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+pub fn adapt_backend_badge_key(mode: Option<&str>) -> Option<&'static str> {
+    match mode.map(|m| m.trim().to_ascii_lowercase()).as_deref() {
+        Some("gpu" | "cross_gpu") => Some("Cluster.transcodeAdaptBadgeGpu"),
+        Some("prefer_qsv") => Some("Cluster.transcodeAdaptBadgePreferQsv"),
+        Some("all" | "gpu_and_cpu") => Some("Cluster.transcodeAdaptBadgeAll"),
+        _ => None,
     }
 }
 
@@ -754,8 +938,16 @@ enum TranscodeAction {
     Idle,
     ToggleGlobal,
     ToggleWorkerService,
+    SaveDispatchPolicy,
     SaveWorker(String),
     RunParity(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PutSaveTarget {
+    None,
+    DispatchPolicy,
+    Worker(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -861,7 +1053,7 @@ pub fn TranscodeSection(
     // mutation generation, cancelling any stale in-flight GET before applying the result.
     let submit_put = move |action: TranscodeAction,
                            req: UpdateTranscodeConfigRequest,
-                           saved_worker_id: Option<String>,
+                           save_target: PutSaveTarget,
                            on_success: Callback<TranscodeConfigResponse>| {
         if busy_action.get_untracked() != TranscodeAction::Idle || !context.is_admin_untracked() {
             return;
@@ -901,10 +1093,14 @@ pub fn TranscodeSection(
                     load_error.set(None);
                     mutation_error.set(None);
                     let response_for_cb = updated.clone();
-                    state.update(|s| {
-                        if let Some(ref link_id) = saved_worker_id {
+                    state.update(|s| match save_target {
+                        PutSaveTarget::Worker(ref link_id) => {
                             s.apply_worker_saved(link_id, updated);
-                        } else {
+                        }
+                        PutSaveTarget::DispatchPolicy => {
+                            s.apply_policy_saved(updated);
+                        }
+                        PutSaveTarget::None => {
                             s.apply_loaded(updated);
                         }
                     });
@@ -995,7 +1191,7 @@ pub fn TranscodeSection(
         submit_put(
             TranscodeAction::ToggleGlobal,
             build_toggle_enabled_request(next),
-            None,
+            PutSaveTarget::None,
             Callback::new(move |updated: TranscodeConfigResponse| {
                 let key = if updated.enabled {
                     "Cluster.transcodeGlobalEnabledToast"
@@ -1014,7 +1210,7 @@ pub fn TranscodeSection(
         submit_put(
             TranscodeAction::ToggleWorkerService,
             build_toggle_worker_service_request(next),
-            None,
+            PutSaveTarget::None,
             Callback::new(move |updated: TranscodeConfigResponse| {
                 let key = if updated.worker_service_enabled {
                     "Cluster.transcodeWorkerServiceEnabledToast"
@@ -1022,6 +1218,31 @@ pub fn TranscodeSection(
                     "Cluster.transcodeWorkerServiceDisabledToast"
                 };
                 context.toast(key, false);
+            }),
+        );
+    };
+
+    let dispatch_draft = Memo::new(move |_| state.with(|s| s.dispatch_draft.clone()));
+    let is_dispatch_dirty = Memo::new(move |_| state.with(|s| s.is_dispatch_dirty()));
+
+    let on_save_dispatch_policy = move |_| {
+        let draft = state.with_untracked(|s| s.dispatch_draft.clone());
+        let req = match build_update_dispatch_policy_request(
+            &draft.dispatch_policy,
+            &draft.local_max_jobs_input,
+        ) {
+            Ok(req) => req,
+            Err(key) => {
+                mutation_error.set(Some(PeerApiError::client(tt(context, key))));
+                return;
+            }
+        };
+        submit_put(
+            TranscodeAction::SaveDispatchPolicy,
+            req,
+            PutSaveTarget::DispatchPolicy,
+            Callback::new(move |_updated: TranscodeConfigResponse| {
+                context.toast("Cluster.transcodeDispatchPolicySavedToast", false);
             }),
         );
     };
@@ -1052,7 +1273,7 @@ pub fn TranscodeSection(
         submit_put(
             TranscodeAction::SaveWorker(link_id.clone()),
             req,
-            Some(link_id),
+            PutSaveTarget::Worker(link_id),
             Callback::new(move |_updated: TranscodeConfigResponse| {
                 context.toast_with(
                     "Cluster.transcodeWorkerSavedToast",
@@ -1076,7 +1297,7 @@ pub fn TranscodeSection(
         submit_put(
             TranscodeAction::RunParity(link_id),
             req,
-            None,
+            PutSaveTarget::None,
             Callback::new(move |updated: TranscodeConfigResponse| {
                 if let Some(parity) = updated.parity_result.as_ref() {
                     let ms = parity.elapsed_ms.to_string();
@@ -1303,8 +1524,136 @@ pub fn TranscodeSection(
                             </div>
                         </div>
 
+                        <form
+                            data-testid="transcode-dispatch-policy-panel"
+                            class="af-surface-inset p-4 space-y-3 min-w-0"
+                            on:submit=move |event| {
+                                event.prevent_default();
+                                on_save_dispatch_policy(());
+                            }
+                        >
+                            <div class="flex flex-wrap items-start justify-between gap-3">
+                                <div class="space-y-1 min-w-0">
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <p class="text-sm font-semibold text-slate-100">
+                                            {move || tt(context, "Cluster.transcodeDispatchPolicyHeading")}
+                                        </p>
+                                        <Show when=move || is_dispatch_dirty.get()>
+                                            <Badge label="Common.unsavedChanges" tone="warning" />
+                                        </Show>
+                                    </div>
+                                    <p class="text-xs text-slate-400 break-words">
+                                        {move || tt(context, "Cluster.transcodeDispatchPolicyHint")}
+                                    </p>
+                                </div>
+                                {move || {
+                                    let cfg = config_memo.get()?;
+                                    let selected = dispatch_draft.get().dispatch_policy;
+                                    matches!(selected.as_str(), "local_first" | "balanced").then(|| {
+                                        let active_str = cfg.local_active_jobs.to_string();
+                                        let max_str = effective_local_max_jobs(cfg.local_max_jobs).to_string();
+                                        let badge_text = tt_with(
+                                            context,
+                                            "Cluster.transcodeLocalActiveJobsBadge",
+                                            &[("active", &active_str), ("max", &max_str)],
+                                        );
+                                        view! {
+                                            <span
+                                                data-testid="transcode-local-active-jobs-badge"
+                                                class="af-badge af-badge-indigo font-mono shrink-0"
+                                            >
+                                                {badge_text}
+                                            </span>
+                                        }
+                                    })
+                                }}
+                            </div>
+
+                            <div class="flex flex-wrap items-end justify-between gap-4">
+                                <div class="flex flex-wrap items-end gap-4 min-w-0">
+                                    <div class="space-y-1 min-w-0">
+                                        <label
+                                            for="cluster-transcode-dispatch-policy"
+                                            class="block text-xs text-slate-300"
+                                        >
+                                            {move || tt(context, "Cluster.transcodeDispatchPolicyLabel")}
+                                        </label>
+                                        <select
+                                            id="cluster-transcode-dispatch-policy"
+                                            data-testid="transcode-dispatch-policy-select"
+                                            class="af-input px-2.5 py-1.5 text-xs"
+                                            disabled=move || is_mutating.get()
+                                            prop:value=move || dispatch_draft.get().dispatch_policy
+                                            on:change=move |event| {
+                                                let value = event_target_value(&event);
+                                                state.update(|s| {
+                                                    s.update_dispatch_draft(|d| {
+                                                        d.dispatch_policy = value;
+                                                    });
+                                                });
+                                            }
+                                        >
+                                            <option value="remote_first">
+                                                {move || tt(context, "Cluster.transcodeDispatchPolicyRemoteFirst")}
+                                            </option>
+                                            <option value="local_first">
+                                                {move || tt(context, "Cluster.transcodeDispatchPolicyLocalFirst")}
+                                            </option>
+                                            <option value="balanced">
+                                                {move || tt(context, "Cluster.transcodeDispatchPolicyBalanced")}
+                                            </option>
+                                        </select>
+                                    </div>
+
+                                    <div class="space-y-1">
+                                        <label
+                                            for="cluster-transcode-local-max-jobs"
+                                            class="block text-xs text-slate-300"
+                                        >
+                                            {move || tt(context, "Cluster.transcodeLocalMaxJobsLabel")}
+                                        </label>
+                                        <input
+                                            id="cluster-transcode-local-max-jobs"
+                                            data-testid="transcode-local-max-jobs-input"
+                                            type="number"
+                                            min=LOCAL_MAX_JOBS_MIN.to_string()
+                                            max=LOCAL_MAX_JOBS_MAX.to_string()
+                                            inputmode="numeric"
+                                            class="af-input px-2.5 py-1.5 w-24 text-sm font-mono"
+                                            disabled=move || is_mutating.get()
+                                            prop:value=move || dispatch_draft.get().local_max_jobs_input
+                                            on:input=move |event| {
+                                                let value = event_target_value(&event);
+                                                state.update(|s| {
+                                                    s.update_dispatch_draft(|d| {
+                                                        d.local_max_jobs_input = value;
+                                                    });
+                                                });
+                                            }
+                                        />
+                                    </div>
+                                </div>
+
+                                <button
+                                    type="submit"
+                                    data-testid="transcode-dispatch-policy-save"
+                                    class="af-btn-primary px-3 py-1.5 text-xs shrink-0"
+                                    disabled=move || is_mutating.get()
+                                >
+                                    {move || {
+                                        if busy_action.get() == TranscodeAction::SaveDispatchPolicy {
+                                            tt(context, "Cluster.transcodeDispatchPolicySaving")
+                                        } else {
+                                            tt(context, "Cluster.transcodeDispatchPolicySaveAction")
+                                        }
+                                    }}
+                                </button>
+                            </div>
+                        </form>
+
                         {move || {
                             let cfg = config_memo.get()?;
+                            let locale = crate::tabs::l10n::locale(context);
                             let dispatcher_badge = if cfg.dispatcher_active {
                                 ("Cluster.transcodeStatusDispatcherActive", "success")
                             } else {
@@ -1327,6 +1676,16 @@ pub fn TranscodeSection(
                             } else {
                                 ("Cluster.transcodeStatusWorkerDisabled", "muted")
                             };
+                            let local_hw_verified = cfg.local.hw_encoders_verified;
+                            let local_adapt_badge =
+                                adapt_backend_badge_key(cfg.local.adapt_backend_mode.as_deref());
+                            let local_load = format_load_summary(
+                                &locale,
+                                cfg.local.cpu_usage_pct,
+                                cfg.local.gpu_usage_pct,
+                                None,
+                            );
+                            let local_hw_decoders = cfg.local.hw_decoders.clone();
                             let dispatcher_socket = cfg.dispatcher_socket.clone();
                             let shim_path = cfg.shim_path.clone();
                             let reported_ffmpeg = cfg
@@ -1345,11 +1704,33 @@ pub fn TranscodeSection(
 
                             Some(view! {
                                 <div class="af-surface-inset p-3.5 space-y-3">
-                                    <div class="flex flex-wrap items-center gap-2">
-                                        <Badge label=dispatcher_badge.0 tone=dispatcher_badge.1 />
-                                        <Badge label=shim_badge.0 tone=shim_badge.1 />
-                                        <Badge label=dropin_badge.0 tone=dropin_badge.1 />
-                                        <Badge label=worker_badge.0 tone=worker_badge.1 />
+                                    <div class="flex flex-wrap items-center justify-between gap-2">
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <Badge label=dispatcher_badge.0 tone=dispatcher_badge.1 />
+                                            <Badge label=shim_badge.0 tone=shim_badge.1 />
+                                            <Badge label=dropin_badge.0 tone=dropin_badge.1 />
+                                            <Badge label=worker_badge.0 tone=worker_badge.1 />
+                                            {local_hw_verified.then(|| {
+                                                view! {
+                                                    <Badge label="Cluster.transcodeHwVerifiedBadge" tone="success" />
+                                                }
+                                            })}
+                                            {local_adapt_badge.map(|badge_key| {
+                                                view! {
+                                                    <Badge label=badge_key tone="indigo" />
+                                                }
+                                            })}
+                                        </div>
+                                        {local_load.map(|load_text| {
+                                            view! {
+                                                <span
+                                                    data-testid="transcode-local-load"
+                                                    class="text-xs font-mono text-slate-300 shrink-0"
+                                                >
+                                                    {load_text}
+                                                </span>
+                                            }
+                                        })}
                                     </div>
                                     <dl class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
                                         <div class="space-y-0.5 min-w-0">
@@ -1393,6 +1774,30 @@ pub fn TranscodeSection(
                                             }
                                         })}
                                     </dl>
+                                    {(!local_hw_decoders.is_empty()).then(|| {
+                                        view! {
+                                            <div
+                                                data-testid="transcode-local-hw-decoders"
+                                                class="border-t border-[var(--af-border-hairline)] pt-2.5 space-y-1 text-xs"
+                                            >
+                                                <p class="text-slate-400">
+                                                    {move || tt(context, "Cluster.transcodeHwDecodersLabel")}
+                                                </p>
+                                                <div class="flex flex-wrap gap-1">
+                                                    {local_hw_decoders
+                                                        .into_iter()
+                                                        .map(|dec| {
+                                                            view! {
+                                                                <span class="px-1.5 py-0.5 rounded border border-[var(--af-border-hairline)] bg-[var(--af-surface-card)] font-mono text-slate-200">
+                                                                    {dec}
+                                                                </span>
+                                                            }
+                                                        })
+                                                        .collect_view()}
+                                                </div>
+                                            </div>
+                                        }
+                                    })}
                                 </div>
                             })
                         }}
@@ -2072,6 +2477,18 @@ fn TranscodeWorkerCard(
                 .map(str::to_string)
                 .unwrap_or_else(|| translate(&locale, "Not reported"));
             let encoders_list = current.encoders.clone();
+            let hw_decoders_list = current.hw_decoders.clone();
+            let has_hw_decoders = !hw_decoders_list.is_empty();
+            let hw_encoders_verified = current.hw_encoders_verified;
+            let adapt_badge = adapt_backend_badge_key(current.adapt_backend_mode.as_deref());
+            let worker_load = format_load_summary(
+                &locale,
+                current.cpu_usage_pct,
+                current.gpu_usage_pct,
+                current.rtt_ms,
+            );
+            let worker_load_testid = format!("transcode-worker-load-{link_id_val}");
+            let worker_hw_decoders_testid = format!("transcode-worker-hw-decoders-{link_id_val}");
             let cap_reason = worker_capability_reason(&locale, &current, current_live_peer.as_ref());
             let disabled_reason =
                 worker_control_disabled_reason(&locale, &current, current_live_peer.as_ref());
@@ -2134,14 +2551,36 @@ fn TranscodeWorkerCard(
                                 <Badge label=grant_badge.0 tone=grant_badge.1 />
                                 <Badge label=elig_key tone=elig_tone />
                                 <Badge label=parity_key tone=parity_tone />
+                                {hw_encoders_verified.then(|| {
+                                    view! {
+                                        <Badge label="Cluster.transcodeHwVerifiedBadge" tone="success" />
+                                    }
+                                })}
+                                {adapt_badge.map(|badge_key| {
+                                    view! {
+                                        <Badge label=badge_key tone="indigo" />
+                                    }
+                                })}
                                 <Show when=move || is_dirty.get()>
                                     <Badge label="Common.unsavedChanges" tone="warning" />
                                 </Show>
                             </div>
                         </div>
-                        <span class="text-xs font-mono text-slate-400 shrink-0">
-                            {active_jobs_text}
-                        </span>
+                        <div class="flex flex-col items-end gap-0.5 shrink-0">
+                            <span class="text-xs font-mono text-slate-400">
+                                {active_jobs_text}
+                            </span>
+                            {worker_load.map(|load_text| {
+                                view! {
+                                    <span
+                                        data-testid=worker_load_testid
+                                        class="text-xs font-mono text-slate-300"
+                                    >
+                                        {load_text}
+                                    </span>
+                                }
+                            })}
+                        </div>
                     </div>
 
                     {cap_reason.as_ref().cloned().map(|reason| {
@@ -2247,7 +2686,11 @@ fn TranscodeWorkerCard(
                         })
                     }}
 
-                    <dl class="grid sm:grid-cols-3 gap-3 text-xs">
+                    <dl class=if has_hw_decoders {
+                        "grid sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs"
+                    } else {
+                        "grid sm:grid-cols-3 gap-3 text-xs"
+                    }>
                         <div class="space-y-0.5 min-w-0">
                             <dt class="text-slate-400">
                                 {move || tt(context, "Cluster.transcodeColFfmpegVersion")}
@@ -2289,6 +2732,32 @@ fn TranscodeWorkerCard(
                                 }}
                             </dd>
                         </div>
+                        {has_hw_decoders.then(|| {
+                            view! {
+                                <div
+                                    data-testid=worker_hw_decoders_testid
+                                    class="space-y-0.5 min-w-0"
+                                >
+                                    <dt class="text-slate-400">
+                                        {move || tt(context, "Cluster.transcodeHwDecodersLabel")}
+                                    </dt>
+                                    <dd class="text-slate-200">
+                                        <div class="flex flex-wrap gap-1">
+                                            {hw_decoders_list
+                                                .into_iter()
+                                                .map(|dec| {
+                                                    view! {
+                                                        <span class="px-1.5 py-0.5 rounded border border-[var(--af-border-hairline)] bg-[var(--af-surface-card)] font-mono text-slate-200">
+                                                            {dec}
+                                                        </span>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </div>
+                                    </dd>
+                                </div>
+                            }
+                        })}
                     </dl>
 
                     <form
@@ -3134,6 +3603,26 @@ mod tests {
             "Cluster.transcodeParityResultFailed",
             "Cluster.transcodeValidationWeightRange",
             "Cluster.transcodeValidationMaxJobsRange",
+            "Cluster.transcodeValidationLocalMaxJobsRange",
+            "Cluster.transcodeValidationDispatchPolicyInvalid",
+            "Cluster.transcodeDispatchPolicyHeading",
+            "Cluster.transcodeDispatchPolicyHint",
+            "Cluster.transcodeDispatchPolicyLabel",
+            "Cluster.transcodeDispatchPolicyRemoteFirst",
+            "Cluster.transcodeDispatchPolicyLocalFirst",
+            "Cluster.transcodeDispatchPolicyBalanced",
+            "Cluster.transcodeLocalMaxJobsLabel",
+            "Cluster.transcodeLocalActiveJobsBadge",
+            "Cluster.transcodeDispatchPolicySaveAction",
+            "Cluster.transcodeDispatchPolicySaving",
+            "Cluster.transcodeDispatchPolicySavedToast",
+            "Cluster.transcodeHwDecodersLabel",
+            "Cluster.transcodeHwVerifiedBadge",
+            "Cluster.transcodeAdaptBadgeGpu",
+            "Cluster.transcodeAdaptBadgePreferQsv",
+            "Cluster.transcodeAdaptBadgeAll",
+            "Cluster.transcodeTelemetryCpuLabel",
+            "Cluster.transcodeTelemetryGpuLabel",
         ];
         for locale in ["en", "de", "dk", "es", "fr", "zh"] {
             for key in keys {
@@ -3159,5 +3648,274 @@ mod tests {
                 "{locale}: {parity_ok}"
             );
         }
+    }
+
+    #[test]
+    fn transcode_config_response_deserializes_legacy_and_extended_optimization_fields() {
+        // Legacy JSON omits dispatch_policy, local_max_jobs, local_active_jobs, telemetry, and vainfo fields.
+        let legacy: TranscodeConfigResponse =
+            serde_json::from_value(sample_section3_payload()).unwrap();
+        assert_eq!(legacy.dispatch_policy, "");
+        assert_eq!(
+            normalize_dispatch_policy(&legacy.dispatch_policy),
+            "remote_first"
+        );
+        assert_eq!(legacy.local_max_jobs, DEFAULT_LOCAL_MAX_JOBS);
+        assert_eq!(legacy.local_active_jobs, 0);
+        assert!(legacy.local.hw_decoders.is_empty());
+        assert!(!legacy.local.hw_encoders_verified);
+        assert_eq!(legacy.local.adapt_backend_mode, None);
+        assert_eq!(legacy.local.cpu_usage_pct, None);
+        assert_eq!(legacy.local.gpu_usage_pct, None);
+        assert_eq!(legacy.local.render_nodes[0].vaapi_driver, None);
+        assert!(legacy.local.render_nodes[0].vaapi_decode_codecs.is_empty());
+        assert!(legacy.local.render_nodes[0].vaapi_encode_codecs.is_empty());
+        assert!(!legacy.local.render_nodes[0].supports_vpp);
+        let legacy_worker = &legacy.workers[0];
+        assert!(legacy_worker.hw_decoders.is_empty());
+        assert!(!legacy_worker.hw_encoders_verified);
+        assert_eq!(legacy_worker.adapt_backend_mode, None);
+        assert_eq!(legacy_worker.cpu_usage_pct, None);
+        assert_eq!(legacy_worker.gpu_usage_pct, None);
+        assert_eq!(legacy_worker.rtt_ms, None);
+
+        // Full new JSON payload with dispatch policy, vainfo silicon capabilities, adaptation, and telemetry.
+        let extended_payload = json!({
+            "enabled": true,
+            "worker_service_enabled": true,
+            "worker_service_active": true,
+            "dispatcher_active": true,
+            "dispatcher_socket": "/run/aetherflow-transcode/transcode.sock",
+            "shim_installed": true,
+            "shim_path": "/usr/lib/aetherflow/transcode/ffmpeg",
+            "jellyfin_dropin_enabled": true,
+            "jellyfin_reported_ffmpeg": "/usr/lib/aetherflow/transcode/ffmpeg",
+            "dispatch_policy": "balanced",
+            "local_max_jobs": 4,
+            "local_active_jobs": 1,
+            "local": {
+                "server_name": "controller-1",
+                "ffmpeg_version": "8.1.3-Jellyfin",
+                "package_name": "jellyfin-ffmpeg8",
+                "package_version": "8.1.3-1-trixie",
+                "encoders": ["h264_vaapi", "hevc_vaapi", "libx264"],
+                "render_nodes": [
+                    {
+                        "path": "/dev/dri/renderD128",
+                        "vendor_id": "0x8086",
+                        "vendor": "intel",
+                        "vaapi_driver": "Intel iHD driver",
+                        "vaapi_decode_codecs": ["h264", "hevc", "hevc_10bit", "vp9"],
+                        "vaapi_encode_codecs": ["h264", "hevc"],
+                        "supports_vpp": true
+                    }
+                ],
+                "primary_render_node": "/dev/dri/renderD128",
+                "transcoding_temp_path": "/var/cache/jellyfin/transcodes",
+                "tmp_dir": "/var/cache/jellyfin/af-tmp",
+                "hw_decoders": ["h264", "hevc", "hevc_10bit", "vp9"],
+                "hw_encoders_verified": true,
+                "adapt_backend_mode": "prefer_qsv",
+                "cpu_usage_pct": 18.4,
+                "gpu_usage_pct": 31.2
+            },
+            "workers": [
+                {
+                    "link_id": "link-1",
+                    "peer_name": "worker-1",
+                    "link_state": "active",
+                    "compatibility": "compatible",
+                    "supports_transcode": true,
+                    "has_transcode_write_grant": true,
+                    "has_updates_write_grant": true,
+                    "enabled": true,
+                    "eligible": true,
+                    "weight": 10,
+                    "max_jobs": 6,
+                    "active_jobs": 2,
+                    "encoders": ["av1_vaapi", "h264_vaapi", "hevc_vaapi"],
+                    "render_node": "/dev/dri/renderD128",
+                    "parity_ok": true,
+                    "hw_decoders": ["av1", "h264", "hevc", "vp9"],
+                    "hw_encoders_verified": true,
+                    "adapt_backend_mode": "gpu",
+                    "cpu_usage_pct": 14.0,
+                    "gpu_usage_pct": 28.0,
+                    "rtt_ms": 0.4
+                }
+            ],
+            "recent_jobs": []
+        });
+        let extended: TranscodeConfigResponse = serde_json::from_value(extended_payload).unwrap();
+        assert_eq!(extended.dispatch_policy, "balanced");
+        assert_eq!(extended.local_max_jobs, 4);
+        assert_eq!(extended.local_active_jobs, 1);
+        assert_eq!(
+            extended.local.hw_decoders,
+            vec!["h264", "hevc", "hevc_10bit", "vp9"]
+        );
+        assert!(extended.local.hw_encoders_verified);
+        assert_eq!(
+            extended.local.adapt_backend_mode.as_deref(),
+            Some("prefer_qsv")
+        );
+        assert_eq!(extended.local.cpu_usage_pct, Some(18.4));
+        assert_eq!(extended.local.gpu_usage_pct, Some(31.2));
+        assert_eq!(
+            extended.local.render_nodes[0].vaapi_driver.as_deref(),
+            Some("Intel iHD driver")
+        );
+        assert!(extended.local.render_nodes[0].supports_vpp);
+
+        let worker = &extended.workers[0];
+        assert_eq!(worker.hw_decoders, vec!["av1", "h264", "hevc", "vp9"]);
+        assert!(worker.hw_encoders_verified);
+        assert_eq!(worker.adapt_backend_mode.as_deref(), Some("gpu"));
+        assert_eq!(worker.cpu_usage_pct, Some(14.0));
+        assert_eq!(worker.gpu_usage_pct, Some(28.0));
+        assert_eq!(worker.rtt_ms, Some(0.4));
+
+        let round_tripped: TranscodeConfigResponse =
+            serde_json::from_str(&serde_json::to_string(&extended).unwrap()).unwrap();
+        assert_eq!(round_tripped, extended);
+    }
+
+    #[test]
+    fn dispatch_policy_request_validation_enforces_policies_and_bounds() {
+        for policy in VALID_DISPATCH_POLICIES {
+            let req = build_update_dispatch_policy_request(policy, "4").unwrap();
+            assert_eq!(
+                serde_json::to_value(req).unwrap(),
+                json!({
+                    "dispatch_policy": policy,
+                    "local_max_jobs": 4
+                })
+            );
+        }
+        assert_eq!(parse_local_max_jobs(" 1 ").unwrap(), 1);
+        assert_eq!(parse_local_max_jobs("64").unwrap(), 64);
+
+        for invalid_policy in ["", "round_robin", "LOCAL_FIRST", "remote"] {
+            assert_eq!(
+                build_update_dispatch_policy_request(invalid_policy, "2").unwrap_err(),
+                "Cluster.transcodeValidationDispatchPolicyInvalid",
+                "policy={invalid_policy:?}"
+            );
+        }
+        for invalid_jobs in ["", "0", "65", "-1", "2.5", "abc"] {
+            assert_eq!(
+                parse_local_max_jobs(invalid_jobs).unwrap_err(),
+                "Cluster.transcodeValidationLocalMaxJobsRange",
+                "local_max_jobs={invalid_jobs:?}"
+            );
+            assert_eq!(
+                build_update_dispatch_policy_request("balanced", invalid_jobs).unwrap_err(),
+                "Cluster.transcodeValidationLocalMaxJobsRange",
+                "local_max_jobs={invalid_jobs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn transcode_section_state_preserves_dirty_dispatch_policy_across_polls_and_clears_on_save() {
+        let mut state = TranscodeSectionState::default();
+        state.apply_loaded(TranscodeConfigResponse {
+            dispatch_policy: "remote_first".into(),
+            local_max_jobs: 2,
+            local_active_jobs: 0,
+            ..Default::default()
+        });
+        assert!(!state.is_dispatch_dirty());
+        assert_eq!(state.dispatch_draft.dispatch_policy, "remote_first");
+        assert_eq!(state.dispatch_draft.local_max_jobs_input, "2");
+
+        // Operator edits dispatch policy and local cap locally without saving yet.
+        state.update_dispatch_draft(|d| {
+            d.dispatch_policy = "local_first".into();
+            d.local_max_jobs_input = "6".into();
+        });
+        assert!(state.is_dispatch_dirty());
+
+        // Background 10-second refresh arrives with old server values; unsaved draft survives.
+        state.apply_loaded(TranscodeConfigResponse {
+            dispatch_policy: "remote_first".into(),
+            local_max_jobs: 2,
+            local_active_jobs: 1,
+            ..Default::default()
+        });
+        assert!(state.is_dispatch_dirty());
+        assert_eq!(state.dispatch_draft.dispatch_policy, "local_first");
+        assert_eq!(state.dispatch_draft.local_max_jobs_input, "6");
+
+        // Saving clears dirty marker and syncs authoritative server response.
+        state.apply_policy_saved(TranscodeConfigResponse {
+            dispatch_policy: "local_first".into(),
+            local_max_jobs: 6,
+            local_active_jobs: 1,
+            ..Default::default()
+        });
+        assert!(!state.is_dispatch_dirty());
+        assert_eq!(state.dispatch_draft.dispatch_policy, "local_first");
+        assert_eq!(state.dispatch_draft.local_max_jobs_input, "6");
+
+        // Subsequent clean poll picks up remote changes automatically.
+        state.apply_loaded(TranscodeConfigResponse {
+            dispatch_policy: "balanced".into(),
+            local_max_jobs: 8,
+            ..Default::default()
+        });
+        assert!(!state.is_dispatch_dirty());
+        assert_eq!(state.dispatch_draft.dispatch_policy, "balanced");
+        assert_eq!(state.dispatch_draft.local_max_jobs_input, "8");
+
+        // Reverting manual edits back to matching server values clears dirty flag.
+        state.update_dispatch_draft(|d| d.local_max_jobs_input = "10".into());
+        assert!(state.is_dispatch_dirty());
+        state.update_dispatch_draft(|d| d.local_max_jobs_input = "8".into());
+        assert!(!state.is_dispatch_dirty());
+
+        // Reset clears draft and dirty flag cleanly.
+        state.update_dispatch_draft(|d| d.dispatch_policy = "local_first".into());
+        assert!(state.is_dispatch_dirty());
+        state.reset();
+        assert!(!state.is_dispatch_dirty());
+        assert_eq!(state.dispatch_draft, DispatchPolicyDraft::default());
+    }
+
+    #[test]
+    fn telemetry_load_summary_and_adapt_backend_badge_helpers_format_cleanly() {
+        assert_eq!(
+            format_load_summary("en", Some(14.2), Some(27.8), Some(0.4)).as_deref(),
+            Some("CPU 14% · GPU 28% · 0.4 ms")
+        );
+        assert_eq!(
+            format_load_summary("en", Some(52.0), None, Some(12.6)).as_deref(),
+            Some("CPU 52% · 13 ms")
+        );
+        assert_eq!(
+            format_load_summary("en", None, Some(105.0), None).as_deref(),
+            Some("GPU 100%")
+        );
+        assert_eq!(format_load_summary("en", None, None, None), None);
+        assert_eq!(
+            format_load_summary("en", Some(f64::NAN), Some(-5.0), Some(f64::INFINITY)),
+            None
+        );
+
+        assert_eq!(
+            adapt_backend_badge_key(Some("gpu")),
+            Some("Cluster.transcodeAdaptBadgeGpu")
+        );
+        assert_eq!(
+            adapt_backend_badge_key(Some("prefer_qsv")),
+            Some("Cluster.transcodeAdaptBadgePreferQsv")
+        );
+        assert_eq!(
+            adapt_backend_badge_key(Some("all")),
+            Some("Cluster.transcodeAdaptBadgeAll")
+        );
+        assert_eq!(adapt_backend_badge_key(Some("off")), None);
+        assert_eq!(adapt_backend_badge_key(Some("")), None);
+        assert_eq!(adapt_backend_badge_key(None), None);
     }
 }

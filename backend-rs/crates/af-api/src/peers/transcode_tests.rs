@@ -8,13 +8,15 @@ use super::tests::{
     RouterPublicTransport, UnreachablePublicTransport,
 };
 use super::transcode::{
-    bind_dispatcher_socket, cleanup_revoked_link_transcode_best_effort,
-    cleanup_revoked_link_transcode_locked, cleanup_worker_transcode_mounts_for_link,
-    compare_debian_versions, effective_worker_max_jobs, ensure_dispatcher_started,
-    evaluate_version_alignment, handle_remote_health_transcode_caps, prune_old_transcode_jobs,
-    reconcile_dispatcher_if_configured, select_weighted_index, stop_dispatcher,
-    JellyfinFfmpegProbe, JellyfinFfmpegProbeOutcome, PeerTranscodeRunner, TranscodeRuntimeState,
-    WsClientMessage, WsClientReader, TRANSCODE_MOUNT_SYNC_TIMEOUT,
+    balanced_local_baseline_weight, bind_dispatcher_socket,
+    cleanup_revoked_link_transcode_best_effort, cleanup_revoked_link_transcode_locked,
+    cleanup_worker_transcode_mounts_for_link, compare_debian_versions, effective_worker_max_jobs,
+    ensure_dispatcher_started, evaluate_version_alignment, handle_remote_health_transcode_caps,
+    parse_proc_stat_state_and_starttime, prune_old_transcode_jobs,
+    reconcile_dispatcher_if_configured, score_worker_candidate, select_weighted_index,
+    stop_dispatcher, JellyfinFfmpegProbe, JellyfinFfmpegProbeOutcome, PeerTranscodeRunner,
+    TranscodeRuntimeState, WorkerLoadSnapshot, WsClientMessage, WsClientReader,
+    TRANSCODE_MOUNT_SYNC_TIMEOUT,
 };
 use super::{
     start_with_runtime, KeyedAsyncLockPool, PeerDb, PeerRunner, PeerRuntime, RevocationEvent,
@@ -426,6 +428,10 @@ fn sample_caps(
             path: (*path).to_string(),
             vendor_id: Some((*vendor_id).to_string()),
             vendor: Some((*vendor).to_string()),
+            vaapi_driver: None,
+            vaapi_decode_codecs: Vec::new(),
+            vaapi_encode_codecs: Vec::new(),
+            supports_vpp: false,
         })
         .collect();
     let primary_render_node = render_nodes.first().map(|n| n.path.clone());
@@ -439,6 +445,9 @@ fn sample_caps(
         render_nodes,
         primary_render_node,
         worker_max_jobs: None,
+        hw_decoders: Vec::new(),
+        hw_encoders_verified: false,
+        adapt_backend_mode: None,
     }
 }
 
@@ -4541,6 +4550,1219 @@ async fn health_caps_skips_noop_db_writes_and_reconcile_dispatcher_recovers_afte
     );
 
     stop_dispatcher(&rt_a).await;
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 19. Load/Latency Scoring, Local PID Tracking, LocalFirst/Balanced Overflow,
+//     Silicon Decoder & Cross-Backend Eligibility, Admin Settings & /health Load
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn make_socket_subdir(base: &Path, name: &str) -> PathBuf {
+    let dir = base.join(name);
+    fs::create_dir_all(&dir).expect("create socket subdir");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod 0700 socket subdir");
+    dir
+}
+
+fn spawn_real_worker_with_config(
+    worker_sock: PathBuf,
+    fake_ffmpeg: PathBuf,
+    max_jobs: usize,
+    adapt_mode: af_transcode::BackendAdaptMode,
+    render_nodes_override: Option<Vec<af_hardware::RenderNode>>,
+) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+    let mut cfg = WorkerConfig::for_paths(worker_sock, fake_ffmpeg.clone());
+    cfg.max_concurrent_jobs = max_jobs;
+    cfg.socket_mode = DEFAULT_WORKER_SOCKET_MODE;
+    cfg.adapt_backend_mode = adapt_mode;
+    cfg.render_nodes_override = render_nodes_override;
+    let bound = bind_worker_socket(&cfg).expect("bind real worker socket");
+    let canonical_ffmpeg = fs::canonicalize(&fake_ffmpeg).expect("canonicalize fake ffmpeg");
+    let (tx, mut rx) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let _ = serve_worker_listener(bound, cfg, canonical_ffmpeg, async move {
+            let _ = rx.changed().await;
+        })
+        .await;
+    });
+    (tx, task)
+}
+
+#[test]
+fn score_worker_candidate_balances_weights_slots_load_and_rtt() {
+    // 1. Saturated worker returns 0.
+    assert_eq!(score_worker_candidate(50, 4, 4, None, None, true), 0);
+    assert_eq!(score_worker_candidate(50, 6, 4, None, None, false), 0);
+
+    // 2. Idle workers with no load telemetry and absent/LAN RTT preserve exact weight ratios.
+    let s1 = score_worker_candidate(1, 0, 4, None, None, false);
+    let s4 = score_worker_candidate(4, 0, 4, None, Some(0.4), false);
+    assert_eq!(s1, 100);
+    assert_eq!(s4, 400);
+    assert_eq!(s4, s1 * 4);
+
+    // 3. Busy worker (3/4) is penalized 4x compared to idle worker (0/4).
+    let idle = score_worker_candidate(50, 0, 4, None, Some(1.0), true);
+    let busy = score_worker_candidate(50, 3, 4, None, Some(1.0), true);
+    assert_eq!(idle, 5000);
+    assert_eq!(busy, 1250);
+
+    // 4. High GPU load heavily penalizes HW jobs, while ignoring GPU load on SW jobs.
+    let high_gpu_low_cpu = WorkerLoadSnapshot {
+        cpu_usage_pct: Some(10.0),
+        gpu_usage_pct: Some(95.0),
+    };
+    let low_gpu_low_cpu = WorkerLoadSnapshot {
+        cpu_usage_pct: Some(10.0),
+        gpu_usage_pct: Some(5.0),
+    };
+    let hw_hot = score_worker_candidate(50, 0, 4, Some(&high_gpu_low_cpu), Some(1.0), true);
+    let hw_cool = score_worker_candidate(50, 0, 4, Some(&low_gpu_low_cpu), Some(1.0), true);
+    assert!(
+        hw_hot < hw_cool / 2,
+        "high GPU load must strongly penalize HW job: hot={hw_hot}, cool={hw_cool}"
+    );
+    let sw_gpu_hot = score_worker_candidate(50, 0, 4, Some(&high_gpu_low_cpu), Some(1.0), false);
+    let sw_gpu_cool = score_worker_candidate(50, 0, 4, Some(&low_gpu_low_cpu), Some(1.0), false);
+    assert_eq!(
+        sw_gpu_hot, sw_gpu_cool,
+        "SW job scoring must depend on CPU, not GPU"
+    );
+
+    // 5. High CPU load penalizes SW jobs.
+    let high_cpu = WorkerLoadSnapshot {
+        cpu_usage_pct: Some(95.0),
+        gpu_usage_pct: Some(0.0),
+    };
+    let sw_cpu_hot = score_worker_candidate(50, 0, 4, Some(&high_cpu), Some(1.0), false);
+    assert!(
+        sw_cpu_hot < sw_gpu_cool / 4,
+        "high CPU load must heavily penalize SW job: hot={sw_cpu_hot}, cool={sw_gpu_cool}"
+    );
+
+    // 6. High WAN RTT (144 ms) is heavily penalized relative to LAN (0.4 ms).
+    let lan = score_worker_candidate(50, 0, 4, None, Some(0.4), true);
+    let mid = score_worker_candidate(50, 0, 4, None, Some(25.0), true);
+    let wan = score_worker_candidate(50, 0, 4, None, Some(144.0), true);
+    assert_eq!(lan, 5000);
+    assert_eq!(mid, 4250);
+    assert!(
+        wan < lan / 5,
+        "144ms WAN RTT must be heavily penalized vs 0.4ms LAN: wan={wan}, lan={lan}"
+    );
+
+    // 7. NaN/Inf load or RTT values never panic or produce 0 for a worker with free slots.
+    let weird = WorkerLoadSnapshot {
+        cpu_usage_pct: Some(f64::NAN),
+        gpu_usage_pct: Some(f64::INFINITY),
+    };
+    assert_eq!(
+        score_worker_candidate(10, 0, 2, Some(&weird), Some(f64::NAN), true),
+        1000
+    );
+}
+
+#[test]
+fn balanced_local_baseline_weight_tracks_remote_configured_weights() {
+    assert_eq!(balanced_local_baseline_weight(&[]), 1);
+    assert_eq!(balanced_local_baseline_weight(&[1]), 1);
+    assert_eq!(balanced_local_baseline_weight(&[1, 1]), 1);
+    assert_eq!(balanced_local_baseline_weight(&[50]), 50);
+    assert_eq!(balanced_local_baseline_weight(&[20, 80]), 50);
+    assert_eq!(balanced_local_baseline_weight(&[1, 2]), 2);
+    assert_eq!(balanced_local_baseline_weight(&[0, 500]), 51);
+}
+
+#[test]
+fn try_claim_local_job_slot_enforces_cap_atomically_and_reclaims_exited_pids() {
+    let state = TranscodeRuntimeState::new();
+    let mut child1 = std::process::Command::new("/bin/sleep")
+        .arg("10")
+        .spawn()
+        .expect("spawn child1");
+    let mut child2 = std::process::Command::new("/bin/sleep")
+        .arg("10")
+        .spawn()
+        .expect("spawn child2");
+    let pid1 = child1.id() as i32;
+    let pid2 = child2.id() as i32;
+
+    assert!(!state.try_claim_local_job_slot(Some(pid1), 0));
+    assert!(state.try_claim_local_job_slot(Some(pid1), 1));
+    assert_eq!(state.prune_and_count_local_jobs(), 1);
+    // Second concurrent PID must be denied atomically at local_max_jobs = 1.
+    assert!(!state.try_claim_local_job_slot(Some(pid2), 1));
+    assert_eq!(state.prune_and_count_local_jobs(), 1);
+
+    let _ = child1.kill();
+    let _ = child1.wait();
+    // Once child1 exits, child2 can claim the freed slot atomically.
+    assert!(state.try_claim_local_job_slot(Some(pid2), 1));
+    assert_eq!(state.prune_and_count_local_jobs(), 1);
+
+    let _ = child2.kill();
+    let _ = child2.wait();
+    assert_eq!(state.prune_and_count_local_jobs(), 0);
+}
+
+#[test]
+fn proc_stat_parser_and_local_pid_tracking_prune_dead_children_and_ignore_self() {
+    // Process name containing spaces and nested parentheses
+    let sample = "4242 (ffmpeg (hdr)) S 1 4242 4242 0 -1 4194304 100 0 0 0 10 5 0 0 20 0 4 0 987654321 123456 500";
+    assert_eq!(
+        parse_proc_stat_state_and_starttime(sample),
+        Some(('S', 987654321))
+    );
+
+    let self_stat = fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
+    let (self_state, self_start) =
+        parse_proc_stat_state_and_starttime(&self_stat).expect("parse /proc/self/stat");
+    assert!(matches!(self_state, 'R' | 'S'));
+    assert!(self_start > 0);
+
+    let state = TranscodeRuntimeState::new();
+    // Must ignore self PID so in-process tests never pin the test runner.
+    state.record_local_job_pid(Some(std::process::id() as i32));
+    assert_eq!(state.prune_and_count_local_jobs(), 0);
+
+    // Spawn a real child process, track its PID, confirm count == 1 while alive, then 0 after exit.
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("5")
+        .spawn()
+        .expect("spawn sleep child");
+    let child_pid = child.id() as i32;
+    state.record_local_job_pid(Some(child_pid));
+    assert_eq!(state.prune_and_count_local_jobs(), 1);
+
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(state.prune_and_count_local_jobs(), 0);
+}
+
+#[tokio::test]
+async fn local_first_and_balanced_dispatch_policies_overflow_and_load_balance() {
+    let ips = next_transcode_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = TestClock::new(1_801_050_000);
+    let tmp = ShortTempDir::new("pol");
+    let fake_ffmpeg = write_fake_ffmpeg_script(&tmp.path, "ffmpeg", standard_fake_ffmpeg_body());
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(214), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(215), ip_b, 51821);
+    let (rt_b, db_b) = build_transcode_runtime(
+        "gpu-worker",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_a, db_a) = build_transcode_runtime(
+        "jellyfin-main",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 25], 45025)),
+        }),
+        &clock,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+    let mut access = AccessMap::none();
+    access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_a,
+        &runner_a,
+        &a_link_id,
+        &db_b,
+        &b_link_id,
+        "jellyfin-main",
+        access,
+        &clock.now().to_rfc3339(),
+    );
+
+    let worker_sock = make_socket_subdir(&tmp.path, "w").join("w.sock");
+    let (w_stop, w_task) = spawn_real_worker(worker_sock.clone(), fake_ffmpeg.clone(), 8);
+    rt_b.transcode_state.set_worker_socket_override(worker_sock);
+
+    let mut local_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    local_caps.hw_decoders = vec!["h264".into(), "hevc".into()];
+    let mut remote_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x1002", "amd")],
+    );
+    remote_caps.hw_decoders = vec!["h264".into(), "hevc".into(), "av1".into()];
+
+    rt_a.transcode_state
+        .set_local_capabilities_override(Some(local_caps));
+    rt_a.transcode_state
+        .set_local_load_override(Some(WorkerLoadSnapshot {
+            cpu_usage_pct: Some(10.0),
+            gpu_usage_pct: Some(10.0),
+        }));
+    rt_a.transcode_state
+        .record_remote_capabilities(&a_link_id, remote_caps);
+    rt_a.transcode_state.record_remote_load(
+        &a_link_id,
+        WorkerLoadSnapshot {
+            cpu_usage_pct: Some(10.0),
+            gpu_usage_pct: Some(10.0),
+        },
+    );
+    db_peers::upsert_transcode_worker(
+        &db_a.lock().unwrap(),
+        &af_db::peers::TranscodeWorker {
+            link_id: a_link_id.clone(),
+            enabled: true,
+            weight: 50,
+            max_jobs: 4,
+            ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+            encoders: Some(r#"["libx264","h264_vaapi"]"#.to_string()),
+            render_node: Some("/dev/dri/renderD128".to_string()),
+            parity_ok: true,
+            parity_error: None,
+        },
+    )
+    .unwrap();
+
+    let disp_sock = tmp.path.join("d.sock");
+    rt_a.transcode_state
+        .set_dispatcher_socket_override(disp_sock.clone());
+    ensure_dispatcher_started(&rt_a).await.unwrap();
+
+    let shim_cfg = ShimConfig {
+        real_ffmpeg: fake_ffmpeg,
+        dispatcher_socket: disp_sock,
+        handshake_timeout: Duration::from_secs(2),
+        frame_write_timeout: Duration::from_secs(5),
+    };
+
+    // 1. Configure `local_first` with `local_max_jobs = 2` via Admin PUT.
+    let (st, body) = call_admin(
+        &rt_a,
+        Method::PUT,
+        "/transcode",
+        Some(json!({ "dispatch_policy": "local_first", "local_max_jobs": 2 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "PUT local_first failed: {body}");
+    assert_eq!(body["dispatch_policy"], "local_first");
+    assert_eq!(body["local_max_jobs"], 2);
+
+    // Below local_max_jobs (0 and 1): dispatches locally without touching worker!
+    for active in [0usize, 1usize] {
+        rt_a.transcode_state
+            .set_local_active_jobs_override(Some(active));
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &[
+                "-i".into(),
+                "movie.mkv".into(),
+                "-c:v".into(),
+                "libx264".into(),
+                "out.mkv".into(),
+            ],
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(
+            dec,
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal
+            },
+            "local_first with local_active={active} < 2 must run locally"
+        );
+    }
+    assert!(
+        !audit_actions_list(&db_b).contains(&"peer_transcode_job_started".to_string()),
+        "local_first below capacity must not contact remote worker"
+    );
+
+    // At local_max_jobs (2 >= 2): overflows cleanly to remote worker!
+    rt_a.transcode_state.set_local_active_jobs_override(Some(2));
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &[
+                "-i".into(),
+                "movie.mkv".into(),
+                "-c:v".into(),
+                "libx264".into(),
+                "out.mkv".into(),
+            ],
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(
+            dec,
+            ShimDecision::RemoteExited(0),
+            "local_first at local_active=2 >= local_max_jobs must overflow to remote worker"
+        );
+    }
+
+    // Even at local_active=0, if local lacks AV1 HW decode while remote has AV1, overflow to remote!
+    rt_a.transcode_state.set_local_active_jobs_override(Some(0));
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &[
+                "-hwaccel".into(),
+                "vaapi".into(),
+                "-c:v".into(),
+                "av1".into(),
+                "-i".into(),
+                "av1_movie.mkv".into(),
+                "-c:v".into(),
+                "h264_vaapi".into(),
+                "out.mkv".into(),
+            ],
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(
+            dec,
+            ShimDecision::RemoteExited(0),
+            "local_first must overflow to remote worker when local lacks required hw_decoder"
+        );
+    }
+
+    // 2. Switch to `balanced` policy: both local and remote are considered when local has free slots.
+    let (st, body) = call_admin(
+        &rt_a,
+        Method::PUT,
+        "/transcode",
+        Some(json!({ "dispatch_policy": "balanced", "local_max_jobs": 2 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "PUT balanced failed: {body}");
+    assert_eq!(body["dispatch_policy"], "balanced");
+
+    rt_a.transcode_state.set_local_active_jobs_override(Some(0));
+    let mut local_hits = 0usize;
+    let mut remote_hits = 0usize;
+    for _ in 0..40 {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &[
+                "-i".into(),
+                "movie.mkv".into(),
+                "-c:v".into(),
+                "libx264".into(),
+                "out.mkv".into(),
+            ],
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        match dec {
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal,
+            } => local_hits += 1,
+            ShimDecision::RemoteExited(0) => remote_hits += 1,
+            other => panic!("unexpected balanced decision: {other:?}"),
+        }
+    }
+    assert!(
+        local_hits > 0 && remote_hits > 0,
+        "balanced mode with equal weights must dispatch to both local ({local_hits}) and remote ({remote_hits})"
+    );
+
+    // Balanced with default worker weight = 1 must also distribute evenly (no 98% local bias).
+    db_peers::upsert_transcode_worker(
+        &db_a.lock().unwrap(),
+        &af_db::peers::TranscodeWorker {
+            link_id: a_link_id.clone(),
+            enabled: true,
+            weight: 1,
+            max_jobs: 4,
+            ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+            encoders: Some(r#"["libx264","h264_vaapi"]"#.to_string()),
+            render_node: Some("/dev/dri/renderD128".to_string()),
+            parity_ok: true,
+            parity_error: None,
+        },
+    )
+    .unwrap();
+    let mut default_w_local_hits = 0usize;
+    let mut default_w_remote_hits = 0usize;
+    for _ in 0..40 {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &[
+                "-i".into(),
+                "movie.mkv".into(),
+                "-c:v".into(),
+                "libx264".into(),
+                "out.mkv".into(),
+            ],
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        match dec {
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal,
+            } => default_w_local_hits += 1,
+            ShimDecision::RemoteExited(0) => default_w_remote_hits += 1,
+            other => panic!("unexpected default-weight balanced decision: {other:?}"),
+        }
+    }
+    assert!(
+        default_w_local_hits > 0 && default_w_remote_hits >= 5,
+        "balanced mode with default weight=1 must share work with remote worker (local={default_w_local_hits}, remote={default_w_remote_hits})"
+    );
+
+    // Balanced with saturated local_active >= local_max_jobs must route exclusively remote.
+    rt_a.transcode_state.set_local_active_jobs_override(Some(2));
+    for _ in 0..5 {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &[
+                "-i".into(),
+                "movie.mkv".into(),
+                "-c:v".into(),
+                "libx264".into(),
+                "out.mkv".into(),
+            ],
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(dec, ShimDecision::RemoteExited(0));
+    }
+
+    stop_dispatcher(&rt_a).await;
+    let _ = w_stop.send(true);
+    let _ = w_task.await;
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn silicon_hw_decoders_and_cross_backend_adaptation_eligibility() {
+    let ips = next_transcode_loopback_ips(4);
+    let (ip_ctrl, ip_hd630, ip_rdna2, ip_cpu) = (ips[0], ips[1], ips[2], ips[3]);
+    let clock = TestClock::new(1_801_060_000);
+    let tmp = ShortTempDir::new("adpt");
+    let fake_ffmpeg = write_fake_ffmpeg_script(&tmp.path, "ffmpeg", standard_fake_ffmpeg_body());
+
+    let runner_ctrl = FakePeerRunner::new(fixture_wg_pubkey(216), ip_ctrl, 51821);
+    let runner_hd630 = FakePeerRunner::new(fixture_wg_pubkey(217), ip_hd630, 51821);
+    let runner_rdna2 = FakePeerRunner::new(fixture_wg_pubkey(218), ip_rdna2, 51821);
+    let runner_cpu = FakePeerRunner::new(fixture_wg_pubkey(219), ip_cpu, 51821);
+
+    let (rt_hd630, db_hd630) = build_transcode_runtime(
+        "worker-hd630",
+        Arc::clone(&runner_hd630) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_rdna2, db_rdna2) = build_transcode_runtime(
+        "worker-rdna2",
+        Arc::clone(&runner_rdna2) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_cpu, db_cpu) = build_transcode_runtime(
+        "worker-cpu",
+        Arc::clone(&runner_cpu) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_ctrl, db_ctrl) = build_transcode_runtime(
+        "jellyfin-main",
+        Arc::clone(&runner_ctrl) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_hd630),
+            client_ip: SocketAddr::from(([198, 51, 100, 26], 45026)),
+        }),
+        &clock,
+    );
+
+    let (ctrl_hd630_id, hd630_ctrl_id, _) =
+        pair_two_test_runtimes(&rt_ctrl, &rt_hd630, ip_ctrl, ip_hd630, "worker-hd630").await;
+
+    // Helper to directly wire additional paired worker nodes to rt_ctrl.
+    let now_str = clock.now().to_rfc3339();
+    let wire_extra_worker = |rt_w: &Arc<PeerRuntime>,
+                             db_w: &Arc<StdMutex<Connection>>,
+                             ip_w: IpAddr,
+                             pubkey_seed: u8,
+                             name: &str| {
+        let rt_ctrl_c = Arc::clone(&rt_ctrl);
+        let db_ctrl_c = Arc::clone(&db_ctrl);
+        let runner_ctrl_c = Arc::clone(&runner_ctrl);
+        let rt_w_c = Arc::clone(rt_w);
+        let db_w_c = Arc::clone(db_w);
+        let now_s = now_str.clone();
+        let name_s = name.to_string();
+        async move {
+            let ctrl_lid = format!("link-{}", Uuid::new_v4().simple());
+            let w_lid = format!("link-{}", Uuid::new_v4().simple());
+            let ltok = format!("ltok-{}", Uuid::new_v4().simple());
+            let handle = spawn_tunnel_listener(Arc::clone(&rt_w_c), ip_w, 0, None)
+                .await
+                .expect("spawn extra worker listener");
+            let port = handle.bound_addr.port();
+            *rt_w_c.listener_state.lock().await = Some(handle);
+            rt_ctrl_c
+                .tunnel_port_overrides
+                .write()
+                .unwrap()
+                .insert(ip_w, port);
+            {
+                let conn = db_w_c.lock().unwrap();
+                db_peers::upsert_peer_identity(
+                    &conn,
+                    &af_db::peers::PeerIdentity {
+                        wg_pubkey: fixture_wg_pubkey(pubkey_seed),
+                        tunnel_ip: ip_w.to_string(),
+                        wg_port: 51821,
+                        created_at: now_s.clone(),
+                    },
+                )
+                .unwrap();
+                db_peers::insert_peer_link(
+                    &conn,
+                    &af_db::peers::PeerLink {
+                        id: w_lid.clone(),
+                        name: "jellyfin-main".to_string(),
+                        wg_pubkey: fixture_wg_pubkey(216),
+                        tunnel_ip: ip_ctrl.to_string(),
+                        endpoint: "10.90.0.1".to_string(),
+                        wg_port: 51821,
+                        state: "active".to_string(),
+                        peer_version: Some("4.0.0-p9-test".to_string()),
+                        peer_protocol: Some(1),
+                        capabilities: Some(
+                            r#"["links","grants","storage","transcode"]"#.to_string(),
+                        ),
+                        rtt_ms: Some(1.0),
+                        last_ok_at: Some(now_s.clone()),
+                        last_error: None,
+                        consecutive_failures: 0,
+                        inbound_token_hash: Some(sha256_prefixed(&ltok)),
+                        pending_attempt_id: None,
+                        pending_expires_at: None,
+                        created_at: now_s.clone(),
+                        updated_at: now_s.clone(),
+                    },
+                )
+                .unwrap();
+            }
+            {
+                let conn = db_ctrl_c.lock().unwrap();
+                db_peers::insert_peer_link(
+                    &conn,
+                    &af_db::peers::PeerLink {
+                        id: ctrl_lid.clone(),
+                        name: name_s,
+                        wg_pubkey: fixture_wg_pubkey(pubkey_seed),
+                        tunnel_ip: ip_w.to_string(),
+                        endpoint: "10.90.0.9".to_string(),
+                        wg_port: 51821,
+                        state: "active".to_string(),
+                        peer_version: Some("4.0.0-p9-test".to_string()),
+                        peer_protocol: Some(1),
+                        capabilities: Some(
+                            r#"["links","grants","storage","transcode"]"#.to_string(),
+                        ),
+                        rtt_ms: Some(1.0),
+                        last_ok_at: Some(now_s.clone()),
+                        last_error: None,
+                        consecutive_failures: 0,
+                        inbound_token_hash: None,
+                        pending_attempt_id: None,
+                        pending_expires_at: None,
+                        created_at: now_s.clone(),
+                        updated_at: now_s.clone(),
+                    },
+                )
+                .unwrap();
+            }
+            runner_ctrl_c
+                .state
+                .lock()
+                .unwrap()
+                .credentials
+                .insert((PeerCredentialSlot::LinkToken, ctrl_lid.clone()), ltok);
+            let mut write_access = AccessMap::none();
+            write_access.transcoding = af_db::peers::AccessLevel::Write;
+            install_transcode_grant_pair(
+                &db_ctrl_c,
+                &runner_ctrl_c,
+                &ctrl_lid,
+                &db_w_c,
+                &w_lid,
+                "jellyfin-main",
+                write_access,
+                &now_s,
+            );
+            (ctrl_lid, w_lid)
+        }
+    };
+
+    let mut write_access = AccessMap::none();
+    write_access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_ctrl,
+        &runner_ctrl,
+        &ctrl_hd630_id,
+        &db_hd630,
+        &hd630_ctrl_id,
+        "jellyfin-main",
+        write_access,
+        &now_str,
+    );
+    let (ctrl_rdna2_id, _) =
+        wire_extra_worker(&rt_rdna2, &db_rdna2, ip_rdna2, 218, "worker-rdna2").await;
+    let (ctrl_cpu_id, _) = wire_extra_worker(&rt_cpu, &db_cpu, ip_cpu, 219, "worker-cpu").await;
+
+    let hd630_sock = make_socket_subdir(&tmp.path, "hd").join("w.sock");
+    let rdna2_sock = make_socket_subdir(&tmp.path, "rd").join("w.sock");
+    let cpu_sock = make_socket_subdir(&tmp.path, "cp").join("w.sock");
+    let (hd_stop, hd_task) = spawn_real_worker_with_config(
+        hd630_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::Off,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x8086".to_string()),
+        }]),
+    );
+    let (rd_stop, rd_task) = spawn_real_worker_with_config(
+        rdna2_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::Gpu,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x1002".to_string()),
+        }]),
+    );
+    let (cp_stop, cp_task) = spawn_real_worker_with_config(
+        cpu_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::All,
+        Some(vec![]),
+    );
+    rt_hd630
+        .transcode_state
+        .set_worker_socket_override(hd630_sock);
+    rt_rdna2
+        .transcode_state
+        .set_worker_socket_override(rdna2_sock);
+    rt_cpu.transcode_state.set_worker_socket_override(cpu_sock);
+
+    let local_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi", "h264_qsv"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    let mut hd630_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi", "h264_qsv"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    hd630_caps.hw_decoders = vec!["h264".into(), "hevc".into(), "vp9".into()];
+    hd630_caps.hw_encoders_verified = true;
+
+    let mut rdna2_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x1002", "amd")],
+    );
+    rdna2_caps.hw_decoders = vec!["h264".into(), "hevc".into(), "vp9".into(), "av1".into()];
+    rdna2_caps.hw_encoders_verified = true;
+    rdna2_caps.adapt_backend_mode = None; // Start Off
+
+    let mut cpu_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264"],
+        &[],
+    );
+    cpu_caps.adapt_backend_mode = Some(af_transcode::BackendAdaptMode::Gpu); // Not All yet
+
+    rt_ctrl
+        .transcode_state
+        .set_local_capabilities_override(Some(local_caps));
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_hd630_id, hd630_caps.clone());
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_rdna2_id, rdna2_caps.clone());
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_cpu_id, cpu_caps.clone());
+
+    {
+        let conn = db_ctrl.lock().unwrap();
+        for (lid, encs, node, weight) in [
+            (
+                &ctrl_hd630_id,
+                r#"["libx264","h264_vaapi","h264_qsv"]"#,
+                Some("/dev/dri/renderD128"),
+                100i64,
+            ),
+            (
+                &ctrl_rdna2_id,
+                r#"["libx264","h264_vaapi"]"#,
+                Some("/dev/dri/renderD128"),
+                10i64,
+            ),
+            (&ctrl_cpu_id, r#"["libx264"]"#, None, 10i64),
+        ] {
+            db_peers::upsert_transcode_worker(
+                &conn,
+                &af_db::peers::TranscodeWorker {
+                    link_id: lid.clone(),
+                    enabled: true,
+                    weight,
+                    max_jobs: 4,
+                    ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+                    encoders: Some(encs.to_string()),
+                    render_node: node.map(ToString::to_string),
+                    parity_ok: true,
+                    parity_error: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    let disp_sock = make_socket_subdir(&tmp.path, "dp").join("d.sock");
+    rt_ctrl
+        .transcode_state
+        .set_dispatcher_socket_override(disp_sock.clone());
+    ensure_dispatcher_started(&rt_ctrl).await.unwrap();
+
+    let shim_cfg = ShimConfig {
+        real_ffmpeg: fake_ffmpeg,
+        dispatcher_socket: disp_sock,
+        handshake_timeout: Duration::from_secs(2),
+        frame_write_timeout: Duration::from_secs(5),
+    };
+
+    // Case 1: AV1 HW decode job skips HD 630 (weight=100, lacks "av1") and picks RDNA 2 (has "av1").
+    let av1_args: Vec<String> = vec![
+        "-hwaccel".into(),
+        "vaapi".into(),
+        "-c:v".into(),
+        "av1".into(),
+        "-i".into(),
+        "av1.mkv".into(),
+        "-c:v".into(),
+        "h264_vaapi".into(),
+        "out.mkv".into(),
+    ];
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &av1_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(dec, ShimDecision::RemoteExited(0));
+        let jobs = wait_for_job_count(&db_ctrl, 1).await;
+        assert_eq!(
+            jobs[0].link_id.as_deref(),
+            Some(ctrl_rdna2_id.as_str()),
+            "AV1 HW decode must skip HD 630 and route to RDNA 2"
+        );
+    }
+
+    // Case 2: Backward compatibility — older worker reporting empty `hw_decoders: []` remains eligible!
+    db_ctrl
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE transcode_workers SET enabled = 0 WHERE link_id = ?1",
+            rusqlite::params![ctrl_rdna2_id],
+        )
+        .unwrap();
+    let mut legacy_hd630 = hd630_caps.clone();
+    legacy_hd630.hw_decoders = Vec::new();
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_hd630_id, legacy_hd630);
+    clock.advance(1);
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &av1_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(dec, ShimDecision::RemoteExited(0));
+        let jobs = wait_for_job_count(&db_ctrl, 2).await;
+        assert_eq!(
+            jobs[0].link_id.as_deref(),
+            Some(ctrl_hd630_id.as_str()),
+            "older worker with empty hw_decoders must stay backward-compatible"
+        );
+    }
+
+    // Case 3: Cross-backend adaptation for QSV job!
+    // Disable HD 630 (Intel QSV) and re-enable RDNA 2 (AMD VA-API) + CPU-only worker.
+    {
+        let conn = db_ctrl.lock().unwrap();
+        conn.execute(
+            "UPDATE transcode_workers SET enabled = 0 WHERE link_id = ?1",
+            rusqlite::params![ctrl_hd630_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE transcode_workers SET enabled = 1 WHERE link_id = ?1",
+            rusqlite::params![ctrl_rdna2_id],
+        )
+        .unwrap();
+    }
+    let qsv_args: Vec<String> = vec![
+        "-init_hw_device".into(),
+        "qsv=qs:/dev/dri/renderD128".into(),
+        "-hwaccel".into(),
+        "qsv".into(),
+        "-i".into(),
+        "movie.mkv".into(),
+        "-c:v".into(),
+        "h264_qsv".into(),
+        "out.mkv".into(),
+    ];
+
+    // 3a. RDNA 2 has adapt_backend_mode = None (Off) and CPU has Gpu -> NEITHER eligible -> RunLocal!
+    clock.advance(1);
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &qsv_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(
+            dec,
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal
+            },
+            "QSV job must skip AMD worker when adapt_backend_mode is Off"
+        );
+    }
+
+    // 3b. Enable adapt_backend_mode = Some(Gpu) on RDNA 2 -> selected and adapted to h264_vaapi!
+    rdna2_caps.adapt_backend_mode = Some(af_transcode::BackendAdaptMode::Gpu);
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_rdna2_id, rdna2_caps);
+    clock.advance(1);
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &qsv_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(dec, ShimDecision::RemoteExited(0));
+        let stderr_str = String::from_utf8_lossy(&err);
+        assert!(
+            stderr_str.contains("h264_vaapi"),
+            "AMD worker should adapt QSV job to h264_vaapi, got stderr: {stderr_str}"
+        );
+        let jobs = wait_for_job_count(&db_ctrl, 4).await;
+        assert_eq!(jobs[0].link_id.as_deref(), Some(ctrl_rdna2_id.as_str()));
+    }
+
+    // 3c. Disable RDNA 2, enable adapt_backend_mode = Some(All) on CPU-only worker -> overflows to CPU!
+    db_ctrl
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE transcode_workers SET enabled = 0 WHERE link_id = ?1",
+            rusqlite::params![ctrl_rdna2_id],
+        )
+        .unwrap();
+    cpu_caps.adapt_backend_mode = Some(af_transcode::BackendAdaptMode::All);
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_cpu_id, cpu_caps);
+    clock.advance(1);
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &qsv_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(dec, ShimDecision::RemoteExited(0));
+        let stderr_str = String::from_utf8_lossy(&err);
+        assert!(
+            stderr_str.contains("libx264"),
+            "CPU worker with adapt_backend_mode=All should adapt QSV job to libx264, got stderr: {stderr_str}"
+        );
+        let jobs = wait_for_job_count(&db_ctrl, 5).await;
+        assert_eq!(jobs[0].link_id.as_deref(), Some(ctrl_cpu_id.as_str()));
+    }
+
+    stop_dispatcher(&rt_ctrl).await;
+    let _ = hd_stop.send(true);
+    let _ = rd_stop.send(true);
+    let _ = cp_stop.send(true);
+    let _ = hd_task.await;
+    let _ = rd_task.await;
+    let _ = cp_task.await;
+    rt_ctrl.shutdown_all().await;
+    rt_hd630.shutdown_all().await;
+    rt_rdna2.shutdown_all().await;
+    rt_cpu.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn admin_transcode_policy_roundtrip_validation_and_health_load_telemetry() {
+    let ips = next_transcode_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = TestClock::new(1_801_070_000);
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(224), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(225), ip_b, 51821);
+    let (rt_b, db_b) = build_transcode_runtime(
+        "gpu-worker",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_a, db_a) = build_transcode_runtime(
+        "seedbox-1",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 27], 45027)),
+        }),
+        &clock,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+    let mut access = AccessMap::none();
+    access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_a,
+        &runner_a,
+        &a_link_id,
+        &db_b,
+        &b_link_id,
+        "seedbox-1",
+        access,
+        &clock.now().to_rfc3339(),
+    );
+
+    let mut local_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    local_caps.hw_decoders = vec!["h264".into(), "hevc".into()];
+    local_caps.hw_encoders_verified = true;
+    local_caps.adapt_backend_mode = Some(af_transcode::BackendAdaptMode::PreferQsv);
+
+    let mut worker_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x1002", "amd")],
+    );
+    worker_caps.hw_decoders = vec!["h264".into(), "hevc".into(), "av1".into()];
+    worker_caps.hw_encoders_verified = true;
+    worker_caps.adapt_backend_mode = Some(af_transcode::BackendAdaptMode::Gpu);
+
+    rt_a.transcode_state
+        .set_local_capabilities_override(Some(local_caps));
+    rt_a.transcode_state
+        .set_local_load_override(Some(WorkerLoadSnapshot {
+            cpu_usage_pct: Some(18.5),
+            gpu_usage_pct: Some(22.0),
+        }));
+    rt_a.transcode_state.set_local_active_jobs_override(Some(1));
+
+    rt_b.transcode_state
+        .set_local_capabilities_override(Some(worker_caps));
+    rt_b.transcode_state
+        .set_local_load_override(Some(WorkerLoadSnapshot {
+            cpu_usage_pct: Some(42.5),
+            gpu_usage_pct: Some(71.0),
+        }));
+
+    // 1. Health tick polls worker's tunnel GET /health and populates remote load + capabilities!
+    run_health_tick(&rt_a).await;
+    assert_eq!(
+        rt_a.transcode_state.remote_load_for(&a_link_id),
+        Some(WorkerLoadSnapshot {
+            cpu_usage_pct: Some(42.5),
+            gpu_usage_pct: Some(71.0),
+        })
+    );
+
+    // 2. GET /api/v1/admin/peers/transcode returns defaults + full local/worker telemetry fields.
+    let (st, body) = call_admin(&rt_a, Method::GET, "/transcode", None).await;
+    assert_eq!(st, StatusCode::OK, "GET /transcode failed: {body}");
+    assert_eq!(body["dispatch_policy"], "remote_first");
+    assert_eq!(body["local_max_jobs"], 2);
+    assert_eq!(body["local_active_jobs"], 1);
+    assert_eq!(body["local"]["hw_decoders"], json!(["h264", "hevc"]));
+    assert_eq!(body["local"]["hw_encoders_verified"], true);
+    assert_eq!(body["local"]["adapt_backend_mode"], "prefer_qsv");
+    assert_eq!(body["local"]["cpu_usage_pct"], 18.5);
+    assert_eq!(body["local"]["gpu_usage_pct"], 22.0);
+
+    let w = &body["workers"][0];
+    assert_eq!(w["hw_decoders"], json!(["h264", "hevc", "av1"]));
+    assert_eq!(w["hw_encoders_verified"], true);
+    assert_eq!(w["adapt_backend_mode"], "gpu");
+    assert_eq!(w["cpu_usage_pct"], 42.5);
+    assert_eq!(w["gpu_usage_pct"], 71.0);
+    assert!(
+        w["rtt_ms"].as_f64().is_some(),
+        "expected finite rtt_ms on worker view: {w}"
+    );
+
+    // 3. Partial & full PUT round-trip preserves untouched field and writes audit entry.
+    let (st, p1) = call_admin(
+        &rt_a,
+        Method::PUT,
+        "/transcode",
+        Some(json!({ "dispatch_policy": "local_first" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "PUT policy-only failed: {p1}");
+    assert_eq!(p1["dispatch_policy"], "local_first");
+    assert_eq!(p1["local_max_jobs"], 2);
+
+    let (st, p2) = call_admin(
+        &rt_a,
+        Method::PUT,
+        "/transcode",
+        Some(json!({ "local_max_jobs": 5 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "PUT local_max_jobs-only failed: {p2}");
+    assert_eq!(p2["dispatch_policy"], "local_first");
+    assert_eq!(p2["local_max_jobs"], 5);
+
+    let (st, p3) = call_admin(
+        &rt_a,
+        Method::PUT,
+        "/transcode",
+        Some(json!({ "dispatch_policy": "balanced", "local_max_jobs": 3 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "PUT both failed: {p3}");
+    assert_eq!(p3["dispatch_policy"], "balanced");
+    assert_eq!(p3["local_max_jobs"], 3);
+
+    let audits = audit_actions_list(&db_a);
+    assert_eq!(
+        audits
+            .iter()
+            .filter(|a| a.as_str() == "peer_transcode_policy_updated")
+            .count(),
+        3
+    );
+
+    // 4. Invalid dispatch_policy and out-of-range local_max_jobs return 400 INVALID_REQUEST
+    //    and leave persisted settings untouched.
+    for bad in [
+        json!({ "dispatch_policy": "bogus_policy" }),
+        json!({ "dispatch_policy": "" }),
+        json!({ "local_max_jobs": 0 }),
+        json!({ "local_max_jobs": -2 }),
+        json!({ "local_max_jobs": 65 }),
+    ] {
+        let (bad_st, bad_body) = call_admin(&rt_a, Method::PUT, "/transcode", Some(bad)).await;
+        assert_eq!(bad_st, StatusCode::BAD_REQUEST, "expected 400: {bad_body}");
+        assert_eq!(bad_body["code"], "INVALID_REQUEST");
+    }
+    let (st, after_bad) = call_admin(&rt_a, Method::GET, "/transcode", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(after_bad["dispatch_policy"], "balanced");
+    assert_eq!(after_bad["local_max_jobs"], 3);
+
+    // 5. clear_link_state removes cached remote_load as well.
+    rt_a.transcode_state.clear_link_state(&a_link_id);
+    assert_eq!(rt_a.transcode_state.remote_load_for(&a_link_id), None);
+
     rt_a.shutdown_all().await;
     rt_b.shutdown_all().await;
 }

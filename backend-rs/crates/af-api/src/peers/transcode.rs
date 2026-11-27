@@ -39,7 +39,10 @@ use super::{
 };
 use crate::auth::AuthUser;
 use crate::ws::{extract_client_ip_for_peer, PeerIp};
-use af_db::peers::{self as db_peers, PeerLink, PeerMount, TranscodeJob, TranscodeWorker};
+use af_db::peers::{
+    self as db_peers, PeerLink, PeerMount, TranscodeDispatchPolicy, TranscodeDispatchSettings,
+    TranscodeJob, TranscodeWorker,
+};
 use af_models::constant_time_eq;
 use af_runner::{
     systemd_escape_path, validate_peer_mount_segment, JellyfinTranscodePaths,
@@ -50,8 +53,7 @@ use af_runner::{
 };
 use af_transcode::argv;
 use af_transcode::capabilities::{
-    probe_capabilities, select_render_node, CapabilitiesConfig, RenderNodeInfo,
-    TranscodeCapabilities,
+    probe_capabilities, CapabilitiesConfig, RenderNodeInfo, TranscodeCapabilities,
 };
 use af_transcode::config::{
     configured_dispatcher_socket_path, configured_worker_socket_path, validate_absolute_clean_path,
@@ -105,6 +107,8 @@ pub const RECENT_JOBS_LIMIT: usize = 50;
 pub const TRANSCODE_JOB_RETENTION_DAYS: i64 = 7;
 
 const LOCAL_CAPS_CACHE_TTL: Duration = Duration::from_secs(60);
+const LOCAL_LOAD_CACHE_TTL: Duration = Duration::from_secs(2);
+const LOCAL_TRACKED_PID_MAX_AGE: Duration = Duration::from_secs(12 * 3600);
 const ADMIN_TRANSCODE_BODY_LIMIT_BYTES: usize = 32 * 1024;
 const WORKER_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_millis(1_000);
 const KILL_SIGNAL_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
@@ -352,22 +356,97 @@ pub(crate) struct DispatcherHandle {
     pub(crate) task: tokio::task::JoinHandle<()>,
 }
 
+/// Compact live CPU/GPU utilization snapshot exchanged on tunnel `GET /health` and used by the
+/// distributed transcode dispatcher for load-aware worker scoring.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkerLoadSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_usage_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_usage_pct: Option<f64>,
+}
+
 struct CachedLocalCaps {
     fetched_at: Instant,
     caps: Option<TranscodeCapabilities>,
 }
 
+struct CachedLocalLoad {
+    fetched_at: Instant,
+    load: Option<WorkerLoadSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalTrackedPid {
+    proc_starttime: Option<u64>,
+    started_at: Instant,
+}
+
+/// Parses `(state, starttime)` (fields 3 and 22) from `/proc/<pid>/stat`, safely handling process
+/// names (`comm`) that contain spaces or parentheses.
+pub(crate) fn parse_proc_stat_state_and_starttime(raw: &str) -> Option<(char, u64)> {
+    let close_paren = raw.rfind(')')?;
+    let after = raw.get(close_paren + 1..)?.trim_start();
+    let mut fields = after.split_ascii_whitespace();
+    let state = fields.next()?.chars().next()?;
+    // Field 3 is `state`, so field 22 (`starttime`) is the 19th token after `state` (`nth(18)`).
+    let starttime = fields.nth(18)?.parse::<u64>().ok()?;
+    Some((state, starttime))
+}
+
+fn read_proc_starttime(pid: i32) -> Option<u64> {
+    if pid <= 0 {
+        return None;
+    }
+    let raw = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_proc_stat_state_and_starttime(&raw).map(|(_, st)| st)
+}
+
+fn is_local_pid_alive(pid: i32, expected_starttime: Option<u64>) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: `kill(pid, 0)` only checks process existence without delivering a signal.
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return false;
+    }
+    // Note: `EPERM` indicates the process (e.g. owned by `jellyfin`) IS alive.
+    if let Ok(raw) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if let Some((state, starttime)) = parse_proc_stat_state_and_starttime(&raw) {
+            if matches!(state, 'Z' | 'X' | 'x') {
+                return false;
+            }
+            if let Some(expected) = expected_starttime {
+                if starttime != expected {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Shared per-`PeerRuntime` transcoding state (dispatcher lifecycle, worker health cooldowns,
-/// active-job concurrency counters, local/remote capability caches, and mismatch notifications).
+/// active-job concurrency counters, local/remote capability & load caches, local PID tracking,
+/// and mismatch notifications).
 pub(crate) struct TranscodeRuntimeState {
     dispatcher: TokioMutex<Option<DispatcherHandle>>,
     enabled_fallback: AtomicBool,
     active_jobs: StdMutex<HashMap<String, usize>>,
+    local_active_pids: StdMutex<HashMap<i32, LocalTrackedPid>>,
+    #[cfg(test)]
+    local_active_jobs_override: StdMutex<Option<usize>>,
     unhealthy_until: StdMutex<HashMap<String, DateTime<Utc>>>,
     local_caps_cache: StdMutex<Option<CachedLocalCaps>>,
     local_caps_refreshing: AtomicBool,
     local_caps_override: StdMutex<Option<Option<TranscodeCapabilities>>>,
+    local_load_cache: StdMutex<Option<CachedLocalLoad>>,
+    local_load_refreshing: AtomicBool,
+    #[cfg(test)]
+    local_load_override: StdMutex<Option<Option<WorkerLoadSnapshot>>>,
     remote_caps: StdMutex<HashMap<String, TranscodeCapabilities>>,
+    remote_load: StdMutex<HashMap<String, WorkerLoadSnapshot>>,
     last_notified_mismatch: StdMutex<HashMap<String, (String, String)>>,
     jellyfin_probe: StdMutex<Arc<dyn JellyfinFfmpegProbe>>,
     dispatcher_socket_override: StdMutex<Option<PathBuf>>,
@@ -383,11 +462,19 @@ impl TranscodeRuntimeState {
             dispatcher: TokioMutex::new(None),
             enabled_fallback: AtomicBool::new(false),
             active_jobs: StdMutex::new(HashMap::new()),
+            local_active_pids: StdMutex::new(HashMap::new()),
+            #[cfg(test)]
+            local_active_jobs_override: StdMutex::new(None),
             unhealthy_until: StdMutex::new(HashMap::new()),
             local_caps_cache: StdMutex::new(None),
             local_caps_refreshing: AtomicBool::new(false),
             local_caps_override: StdMutex::new(None),
+            local_load_cache: StdMutex::new(None),
+            local_load_refreshing: AtomicBool::new(false),
+            #[cfg(test)]
+            local_load_override: StdMutex::new(None),
             remote_caps: StdMutex::new(HashMap::new()),
+            remote_load: StdMutex::new(HashMap::new()),
             last_notified_mismatch: StdMutex::new(HashMap::new()),
             jellyfin_probe: StdMutex::new(Arc::new(ProductionJellyfinFfmpegProbe)),
             dispatcher_socket_override: StdMutex::new(None),
@@ -513,12 +600,111 @@ impl TranscodeRuntimeState {
             .cloned()
     }
 
+    pub(crate) fn record_remote_load(&self, link_id: &str, load: WorkerLoadSnapshot) {
+        self.remote_load
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(link_id.to_string(), load);
+    }
+
+    pub(crate) fn remote_load_for(&self, link_id: &str) -> Option<WorkerLoadSnapshot> {
+        self.remote_load
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(link_id)
+            .cloned()
+    }
+
+    pub(crate) fn prune_and_count_local_jobs(&self) -> usize {
+        #[cfg(test)]
+        if let Some(override_count) = *self
+            .local_active_jobs_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            return override_count;
+        }
+        let mut map = self
+            .local_active_pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.retain(|&pid, entry| {
+            entry.started_at.elapsed() <= LOCAL_TRACKED_PID_MAX_AGE
+                && is_local_pid_alive(pid, entry.proc_starttime)
+        });
+        map.len()
+    }
+
+    /// Atomically prunes dead local PIDs, checks `active < local_max_jobs`, and records `pid`
+    /// under a single mutex acquisition so concurrent local dispatches cannot overshoot
+    /// `local_max_jobs`.
+    pub(crate) fn try_claim_local_job_slot(&self, pid: Option<i32>, local_max_jobs: usize) -> bool {
+        if local_max_jobs == 0 {
+            return false;
+        }
+        #[cfg(test)]
+        if let Some(override_count) = *self
+            .local_active_jobs_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            return override_count < local_max_jobs;
+        }
+        let trackable_pid = pid.filter(|&p| p > 0 && p != (std::process::id() as i32));
+        let proc_starttime = trackable_pid.and_then(read_proc_starttime);
+        let mut map = self
+            .local_active_pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.retain(|&existing_pid, entry| {
+            entry.started_at.elapsed() <= LOCAL_TRACKED_PID_MAX_AGE
+                && is_local_pid_alive(existing_pid, entry.proc_starttime)
+        });
+        if map.len() >= local_max_jobs {
+            return false;
+        }
+        if let Some(p) = trackable_pid {
+            map.insert(
+                p,
+                LocalTrackedPid {
+                    proc_starttime,
+                    started_at: Instant::now(),
+                },
+            );
+        }
+        true
+    }
+
+    pub(crate) fn record_local_job_pid(&self, pid: Option<i32>) {
+        let Some(pid) = pid else {
+            return;
+        };
+        if pid <= 0 || pid == (std::process::id() as i32) {
+            return;
+        }
+        let proc_starttime = read_proc_starttime(pid);
+        self.local_active_pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                pid,
+                LocalTrackedPid {
+                    proc_starttime,
+                    started_at: Instant::now(),
+                },
+            );
+    }
+
     pub(crate) fn clear_link_state(&self, link_id: &str) {
         self.unhealthy_until
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(link_id);
         self.remote_caps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(link_id);
+        self.remote_load
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(link_id);
@@ -562,6 +748,22 @@ impl TranscodeRuntimeState {
             .local_caps_override
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(caps);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_local_load_override(&self, load: Option<WorkerLoadSnapshot>) {
+        *self
+            .local_load_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(load);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_local_active_jobs_override(&self, count: Option<usize>) {
+        *self
+            .local_active_jobs_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = count;
     }
 
     #[cfg(test)]
@@ -763,6 +965,133 @@ pub(crate) async fn refresh_local_capabilities_if_stale(
         });
     }
     probed
+}
+
+fn sample_local_worker_load_sync() -> WorkerLoadSnapshot {
+    let metrics = af_hardware::get_system_metrics_core();
+    let cpu_usage_pct = metrics
+        .cpu_usage
+        .is_finite()
+        .then(|| metrics.cpu_usage.clamp(0.0, 100.0));
+    let gpu_usage_pct = metrics
+        .gpus
+        .iter()
+        .map(|g| g.usage_pct)
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.0, 100.0))
+        .reduce(f64::max);
+    WorkerLoadSnapshot {
+        cpu_usage_pct,
+        gpu_usage_pct,
+    }
+}
+
+/// Returns cached local CPU/GPU utilization immediately without ever blocking `/health`.
+///
+/// When the cache is cold or past its 2-second TTL, spawns at most one blocking telemetry refresh
+/// task and returns the last known snapshot (or `None`).
+pub(crate) fn cached_local_load_nonblocking(runtime: &PeerRuntime) -> Option<WorkerLoadSnapshot> {
+    let state = &runtime.transcode_state;
+    #[cfg(test)]
+    if let Some(override_val) = state
+        .local_load_override
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return override_val;
+    }
+
+    let (snapshot, needs_refresh) = {
+        let guard = state
+            .local_load_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(entry) if entry.fetched_at.elapsed() < LOCAL_LOAD_CACHE_TTL => {
+                (entry.load.clone(), false)
+            }
+            Some(entry) => (entry.load.clone(), true),
+            None => (None, true),
+        }
+    };
+
+    if needs_refresh
+        && state
+            .local_load_refreshing
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .is_ok()
+    {
+        let state_arc = Arc::clone(state);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let sampled = tokio::task::spawn_blocking(sample_local_worker_load_sync)
+                    .await
+                    .ok();
+                {
+                    let mut guard = state_arc
+                        .local_load_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    *guard = Some(CachedLocalLoad {
+                        fetched_at: Instant::now(),
+                        load: sampled,
+                    });
+                }
+                state_arc
+                    .local_load_refreshing
+                    .store(false, AtomicOrdering::Release);
+            });
+        } else {
+            state
+                .local_load_refreshing
+                .store(false, AtomicOrdering::Release);
+        }
+    }
+
+    snapshot
+}
+
+/// Refreshes local CPU/GPU utilization asynchronously if the 2-second cache is cold or stale.
+/// Used by `GET /api/v1/admin/peers/transcode` (never by tunnel `/health`).
+async fn refresh_local_load_if_stale(runtime: &PeerRuntime) -> Option<WorkerLoadSnapshot> {
+    let state = &runtime.transcode_state;
+    #[cfg(test)]
+    if let Some(override_val) = state
+        .local_load_override
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return override_val;
+    }
+
+    {
+        let guard = state
+            .local_load_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = guard.as_ref() {
+            if entry.fetched_at.elapsed() < LOCAL_LOAD_CACHE_TTL {
+                return entry.load.clone();
+            }
+        }
+    }
+
+    let sampled = tokio::task::spawn_blocking(sample_local_worker_load_sync)
+        .await
+        .ok();
+    {
+        let mut guard = state
+            .local_load_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(CachedLocalLoad {
+            fetched_at: Instant::now(),
+            load: sampled.clone(),
+        });
+    }
+    sampled
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1623,14 +1952,43 @@ pub(crate) fn bind_dispatcher_socket(
         metadata.mode() & 0o7777
     );
 
-    // SAFETY: `parent_dir` is a valid open directory fd; released when `parent_dir` drops.
-    if unsafe { libc::flock(parent_dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    struct DirFlockGuard(fs::File);
+    impl Drop for DirFlockGuard {
+        fn drop(&mut self) {
+            // Explicitly unlock so a concurrent `fork()`-before-`execve()` cannot keep the
+            // open-file-description flock alive past return.
+            // SAFETY: `self.0` is a valid open directory fd owned exclusively here.
+            unsafe {
+                let _ = libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+
+    // Retry briefly on transient `EWOULDBLOCK` (e.g. a sibling thread's short-lived `fork()`
+    // before `execve()` inherited an earlier lock fd) while still failing promptly if locked.
+    let mut flock_err: Option<io::Error> = None;
+    for attempt in 0..20 {
+        // SAFETY: `parent_dir` is a valid open directory fd.
+        if unsafe { libc::flock(parent_dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            flock_err = None;
+            break;
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::WouldBlock && attempt + 1 < 20 {
+            std::thread::sleep(Duration::from_millis(5));
+            flock_err = Some(err);
+            continue;
+        }
+        flock_err = Some(err);
+        break;
+    }
+    if let Some(err) = flock_err {
         return Err(anyhow::anyhow!(
-            "failed locking dispatcher socket directory '{}': {}",
-            parent.display(),
-            io::Error::last_os_error()
+            "failed locking dispatcher socket directory '{}': {err}",
+            parent.display()
         ));
     }
+    let _parent_lock = DirFlockGuard(parent_dir);
 
     match fs::symlink_metadata(socket_path) {
         Ok(existing) => {
@@ -4017,8 +4375,101 @@ async fn relay_worker_ws_session(
 #[derive(Debug, Clone)]
 struct EligibleWorkerCandidate {
     link: PeerLink,
+    configured_weight: u64,
     weight: u64,
     max_jobs: usize,
+}
+
+/// Computes the local baseline weight for `balanced` dispatch from the eligible remote workers'
+/// configured weights (rounded mean clamped to `1..=100`, defaulting to `1` when empty) so
+/// clusters using the default `weight = 1` balance evenly instead of starving remote workers.
+pub(crate) fn balanced_local_baseline_weight(remote_configured_weights: &[u64]) -> u64 {
+    if remote_configured_weights.is_empty() {
+        return WORKER_WEIGHT_MIN as u64;
+    }
+    let min_w = WORKER_WEIGHT_MIN as u64;
+    let max_w = WORKER_WEIGHT_MAX as u64;
+    let sum: u64 = remote_configured_weights
+        .iter()
+        .map(|&w| w.clamp(min_w, max_w))
+        .sum();
+    let count = remote_configured_weights.len() as u64;
+    ((sum + (count / 2)) / count).clamp(min_w, max_w)
+}
+
+#[derive(Debug, Clone)]
+enum DispatchChoice {
+    Local { weight: u64 },
+    Remote(EligibleWorkerCandidate),
+}
+
+impl DispatchChoice {
+    fn weight(&self) -> u64 {
+        match self {
+            Self::Local { weight } => *weight,
+            Self::Remote(c) => c.weight,
+        }
+    }
+}
+
+/// Computes a load-, slot-, and latency-aware weighted dispatch score for a worker (or local
+/// host in `balanced` mode).
+///
+/// Returns `0` when the candidate has no remaining free slots (`active_jobs >= max_jobs`). When
+/// idle with no load telemetry and LAN/absent RTT (`<= 5 ms`), returns exact `weight * 100` so
+/// operator-configured weight ratios are preserved exactly.
+pub(crate) fn score_worker_candidate(
+    weight: u64,
+    active_jobs: usize,
+    max_jobs: usize,
+    load: Option<&WorkerLoadSnapshot>,
+    rtt_ms: Option<f64>,
+    requires_hardware: bool,
+) -> u64 {
+    let free_slots = max_jobs.saturating_sub(active_jobs);
+    if free_slots == 0 {
+        return 0;
+    }
+
+    let base = (weight.clamp(WORKER_WEIGHT_MIN as u64, WORKER_WEIGHT_MAX as u64) as f64) * 100.0;
+    let slot_factor = (free_slots as f64) / (max_jobs.max(1) as f64);
+
+    let sanitize_pct = |v: f64| -> f64 {
+        if v.is_finite() {
+            v.clamp(0.0, 100.0)
+        } else {
+            0.0
+        }
+    };
+    let load_factor = match load {
+        None => 1.0,
+        Some(snap) => {
+            let gpu = snap.gpu_usage_pct.map(sanitize_pct);
+            let cpu = snap.cpu_usage_pct.map(sanitize_pct);
+            let util = if requires_hardware {
+                match (gpu, cpu) {
+                    (Some(g), Some(c)) => 0.7 * g + 0.3 * c,
+                    (Some(g), None) => g,
+                    (None, Some(c)) => c,
+                    (None, None) => 0.0,
+                }
+            } else {
+                cpu.unwrap_or(0.0)
+            };
+            (1.0 - (util / 100.0) * 0.90).clamp(0.10, 1.0)
+        }
+    };
+
+    let rtt_factor = match rtt_ms {
+        None => 1.0,
+        Some(rtt) if !rtt.is_finite() || rtt <= 5.0 => 1.0,
+        Some(rtt) if rtt <= 25.0 => 1.0 - ((rtt - 5.0) / 20.0) * 0.15,
+        Some(rtt) => (0.85 / (1.0 + (rtt - 25.0) / 25.0)).max(0.05),
+    };
+
+    (base * slot_factor * load_factor * rtt_factor)
+        .round()
+        .max(1.0) as u64
 }
 
 /// Pure deterministic weighted-index selection helper for both production dispatch and tests.
@@ -4037,20 +4488,18 @@ pub(crate) fn select_weighted_index(weights: &[u64], roll: u64) -> Option<usize>
     Some(weights.len() - 1)
 }
 
-fn pick_weighted_candidate(
-    candidates: &mut Vec<EligibleWorkerCandidate>,
-) -> Option<EligibleWorkerCandidate> {
-    if candidates.is_empty() {
+fn pick_weighted_choice(choices: &mut Vec<DispatchChoice>) -> Option<DispatchChoice> {
+    if choices.is_empty() {
         return None;
     }
-    let weights: Vec<u64> = candidates.iter().map(|c| c.weight.max(1)).collect();
+    let weights: Vec<u64> = choices.iter().map(|c| c.weight().max(1)).collect();
     let total: u64 = weights.iter().sum();
     if total == 0 {
-        return Some(candidates.swap_remove(0));
+        return Some(choices.swap_remove(0));
     }
     let roll = rand::thread_rng().gen_range(0..total);
     let idx = select_weighted_index(&weights, roll)?;
-    Some(candidates.swap_remove(idx))
+    Some(choices.swap_remove(idx))
 }
 
 fn parse_encoders_json(raw: Option<&str>) -> Vec<String> {
@@ -4059,19 +4508,85 @@ fn parse_encoders_json(raw: Option<&str>) -> Vec<String> {
 }
 
 fn worker_supports_required_capability(
+    args: &[String],
     cap: &argv::Capability,
+    remote_caps: Option<&TranscodeCapabilities>,
     encoders: &[String],
     render_nodes: &[af_hardware::RenderNode],
 ) -> bool {
-    if let Some(req_enc) = cap.required_encoder() {
-        if !encoders.iter().any(|enc| enc.eq_ignore_ascii_case(req_enc)) {
-            return false;
-        }
+    let adapt_mode = remote_caps
+        .map(TranscodeCapabilities::effective_adapt_backend_mode)
+        .unwrap_or(af_transcode::BackendAdaptMode::Off);
+    let hw_decoders: &[String] = remote_caps.map(|c| c.hw_decoders.as_slice()).unwrap_or(&[]);
+    af_transcode::argv::plan_backend_adaptation(
+        args,
+        cap,
+        adapt_mode,
+        encoders,
+        hw_decoders,
+        render_nodes,
+    )
+    .is_some()
+}
+
+fn local_supports_job(
+    runtime: &PeerRuntime,
+    args: &[String],
+    required_cap: &argv::Capability,
+) -> bool {
+    let Some(local_caps) = cached_local_capabilities_nonblocking(runtime) else {
+        return true;
+    };
+    let local_render_nodes: Vec<af_hardware::RenderNode> = local_caps
+        .render_nodes
+        .iter()
+        .map(|n| af_hardware::RenderNode {
+            path: PathBuf::from(&n.path),
+            vendor_id: n.vendor_id.clone(),
+        })
+        .collect();
+    af_transcode::argv::plan_backend_adaptation(
+        args,
+        required_cap,
+        af_transcode::BackendAdaptMode::Off,
+        &local_caps.encoders,
+        &local_caps.hw_decoders,
+        &local_render_nodes,
+    )
+    .is_some()
+}
+
+async fn effective_dispatch_settings(runtime: &PeerRuntime) -> (TranscodeDispatchPolicy, usize) {
+    let server = runtime.local_server_name();
+    let db_row = runtime
+        .db
+        .read(&server, "transcode_dispatch_settings", |conn| {
+            if !crate::auth::table_exists(conn, "transcode_dispatch_settings").unwrap_or(false) {
+                return Ok(None);
+            }
+            Ok(db_peers::get_transcode_dispatch_settings(conn)
+                .ok()
+                .flatten())
+        })
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(row) = db_row {
+        return (
+            row.dispatch_policy,
+            row.local_max_jobs
+                .clamp(WORKER_MAX_JOBS_MIN, WORKER_MAX_JOBS_MAX) as usize,
+        );
     }
-    if cap.requires_hardware() && select_render_node(cap, render_nodes).is_none() {
-        return false;
-    }
-    true
+
+    let policy = af_transcode::config::configured_dispatch_policy_raw()
+        .and_then(|s| TranscodeDispatchPolicy::parse_str(&s))
+        .unwrap_or(TranscodeDispatchPolicy::RemoteFirst);
+    let local_max_jobs = af_transcode::config::configured_local_max_jobs()
+        .unwrap_or(2)
+        .clamp(WORKER_MAX_JOBS_MIN as usize, WORKER_MAX_JOBS_MAX as usize);
+    (policy, local_max_jobs)
 }
 
 fn worker_render_nodes_for(
@@ -4117,6 +4632,7 @@ pub(crate) fn effective_worker_max_jobs(
 
 async fn collect_eligible_workers(
     runtime: &PeerRuntime,
+    args: &[String],
     required_cap: &argv::Capability,
 ) -> Vec<EligibleWorkerCandidate> {
     let local_caps = cached_local_capabilities_nonblocking(runtime);
@@ -4184,7 +4700,8 @@ async fn collect_eligible_workers(
 
         let remote_caps = runtime.transcode_state.remote_capabilities_for(&link.id);
         let max_jobs = effective_worker_max_jobs(worker.max_jobs, remote_caps.as_ref());
-        if runtime.transcode_state.active_jobs_for(&link.id) >= max_jobs {
+        let active_jobs = runtime.transcode_state.active_jobs_for(&link.id);
+        if active_jobs >= max_jobs {
             continue;
         }
         let worker_pkg_ver = remote_caps
@@ -4217,13 +4734,34 @@ async fn collect_eligible_workers(
         };
         let worker_nodes =
             worker_render_nodes_for(remote_caps.as_ref(), worker.render_node.as_deref());
-        if !worker_supports_required_capability(required_cap, &worker_encoders, &worker_nodes) {
+        if !worker_supports_required_capability(
+            args,
+            required_cap,
+            remote_caps.as_ref(),
+            &worker_encoders,
+            &worker_nodes,
+        ) {
+            continue;
+        }
+
+        let remote_load = runtime.transcode_state.remote_load_for(&link.id);
+        let configured_weight = worker.weight.clamp(WORKER_WEIGHT_MIN, WORKER_WEIGHT_MAX) as u64;
+        let effective_weight = score_worker_candidate(
+            configured_weight,
+            active_jobs,
+            max_jobs,
+            remote_load.as_ref(),
+            link.rtt_ms,
+            required_cap.requires_hardware(),
+        );
+        if effective_weight == 0 {
             continue;
         }
 
         eligible.push(EligibleWorkerCandidate {
             link,
-            weight: worker.weight.clamp(WORKER_WEIGHT_MIN, WORKER_WEIGHT_MAX) as u64,
+            configured_weight,
+            weight: effective_weight,
             max_jobs,
         });
     }
@@ -4520,6 +5058,7 @@ async fn handle_dispatcher_connection(
     stream: UnixStream,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
+    let peer_pid = stream.peer_cred().ok().and_then(|cred| cred.pid());
     let (mut shim_reader, mut shim_writer) = stream.into_split();
     let remote_start_budget = runtime.transcode_state.remote_start_timeout();
     let start_deadline = tokio::time::Instant::now() + remote_start_budget;
@@ -4561,6 +5100,7 @@ async fn handle_dispatcher_connection(
         let job_id = Uuid::new_v4().to_string();
         let request_id = format!("tc-{}", Uuid::new_v4().simple());
         let now_rfc = runtime.now().to_rfc3339();
+        runtime.transcode_state.record_local_job_pid(peer_pid);
         let _ = tokio::time::timeout(
             DEFAULT_FRAME_WRITE_TIMEOUT,
             write_frame(&mut shim_writer, &Frame::RunLocal),
@@ -4587,10 +5127,77 @@ async fn handle_dispatcher_connection(
     let request_id = format!("tc-{}", Uuid::new_v4().simple());
     let started_at = runtime.now().to_rfc3339();
 
+    let (dispatch_policy, local_max_jobs) = effective_dispatch_settings(&runtime).await;
+
+    // Local-first overflow policy: run on the local host while below `local_max_jobs` and capable,
+    // overflowing to eligible remote workers once local slots are saturated or incompatible.
+    if dispatch_policy == TranscodeDispatchPolicy::LocalFirst
+        && local_supports_job(&runtime, &start_req.args, &required_cap)
+        && runtime
+            .transcode_state
+            .try_claim_local_job_slot(peer_pid, local_max_jobs)
+    {
+        let _ = tokio::time::timeout(
+            DEFAULT_FRAME_WRITE_TIMEOUT,
+            write_frame(&mut shim_writer, &Frame::RunLocal),
+        )
+        .await;
+        insert_transcode_job_row(
+            &runtime,
+            TranscodeJob {
+                id: job_id,
+                link_id: None,
+                started_at,
+                ended_at: Some(runtime.now().to_rfc3339()),
+                exit_code: None,
+                request_id: Some(request_id),
+                ran_locally: true,
+            },
+        )
+        .await;
+        return;
+    }
+
+    // 2. Collect eligible remote workers and build weighted dispatch choices (including the local
+    //    host alongside remote workers under `balanced` policy when local capacity is available).
+    let eligible_workers = collect_eligible_workers(&runtime, &start_req.args, &required_cap).await;
+    let remote_configured_weights: Vec<u64> = eligible_workers
+        .iter()
+        .map(|worker| worker.configured_weight)
+        .collect();
+    let mut choices: Vec<DispatchChoice> = eligible_workers
+        .into_iter()
+        .map(DispatchChoice::Remote)
+        .collect();
+
+    if dispatch_policy == TranscodeDispatchPolicy::Balanced {
+        let local_active = runtime.transcode_state.prune_and_count_local_jobs();
+        if local_active < local_max_jobs
+            && local_supports_job(&runtime, &start_req.args, &required_cap)
+        {
+            let local_load = cached_local_load_nonblocking(&runtime);
+            let local_baseline_weight = balanced_local_baseline_weight(&remote_configured_weights);
+            let local_score = score_worker_candidate(
+                local_baseline_weight,
+                local_active,
+                local_max_jobs,
+                local_load.as_ref(),
+                Some(0.0),
+                required_cap.requires_hardware(),
+            );
+            if local_score > 0 {
+                choices.push(DispatchChoice::Local {
+                    weight: local_score,
+                });
+            }
+        }
+    }
+
     let start_payload = match encode_frame_payload(&Frame::Start(start_req)) {
         Ok(bytes) => bytes,
         Err(err) => {
             tracing::warn!(error = %err, "Failed encoding Start frame; falling back locally");
+            runtime.transcode_state.record_local_job_pid(peer_pid);
             let _ = tokio::time::timeout(
                 KILL_SIGNAL_WRITE_TIMEOUT,
                 write_frame(&mut shim_writer, &Frame::RunLocal),
@@ -4613,10 +5220,38 @@ async fn handle_dispatcher_connection(
         }
     };
 
-    // 2. Collect eligible workers and iterate in weighted-random order without replacement.
-    let mut candidates = collect_eligible_workers(&runtime, &required_cap).await;
+    while let Some(choice) = pick_weighted_choice(&mut choices) {
+        let candidate = match choice {
+            DispatchChoice::Local { .. } => {
+                if !runtime
+                    .transcode_state
+                    .try_claim_local_job_slot(peer_pid, local_max_jobs)
+                {
+                    continue;
+                }
+                let _ = tokio::time::timeout(
+                    DEFAULT_FRAME_WRITE_TIMEOUT,
+                    write_frame(&mut shim_writer, &Frame::RunLocal),
+                )
+                .await;
+                insert_transcode_job_row(
+                    &runtime,
+                    TranscodeJob {
+                        id: job_id,
+                        link_id: None,
+                        started_at,
+                        ended_at: Some(runtime.now().to_rfc3339()),
+                        exit_code: None,
+                        request_id: Some(request_id),
+                        ran_locally: true,
+                    },
+                )
+                .await;
+                return;
+            }
+            DispatchChoice::Remote(candidate) => candidate,
+        };
 
-    while let Some(candidate) = pick_weighted_candidate(&mut candidates) {
         if *shutdown_rx.borrow() || tokio::time::Instant::now() >= start_deadline {
             break;
         }
@@ -4865,6 +5500,7 @@ async fn handle_dispatcher_connection(
     }
 
     // 3. Definite pre-start fallback: NO worker received a complete Frame::Start.
+    runtime.transcode_state.record_local_job_pid(peer_pid);
     let _ = tokio::time::timeout(
         DEFAULT_FRAME_WRITE_TIMEOUT,
         write_frame(&mut shim_writer, &Frame::RunLocal),
@@ -5584,6 +6220,16 @@ pub struct LocalTranscodeInfoView {
     pub package_name: Option<String>,
     pub package_version: Option<String>,
     pub encoders: Vec<String>,
+    #[serde(default)]
+    pub hw_decoders: Vec<String>,
+    #[serde(default)]
+    pub hw_encoders_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapt_backend_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_usage_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_usage_pct: Option<f64>,
     pub render_nodes: Vec<RenderNodeInfo>,
     pub primary_render_node: Option<String>,
     pub transcoding_temp_path: String,
@@ -5615,6 +6261,16 @@ pub struct TranscodeWorkerView {
     pub ffmpeg_mismatch_message: Option<String>,
     pub align_target: Option<&'static str>,
     pub encoders: Vec<String>,
+    pub hw_decoders: Vec<String>,
+    pub hw_encoders_verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapt_backend_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_usage_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_usage_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
     pub render_node: Option<String>,
     pub parity_ok: bool,
     pub parity_error: Option<String>,
@@ -5652,6 +6308,9 @@ pub struct TranscodeConfigResponse {
     pub jellyfin_dropin_enabled: bool,
     pub jellyfin_reported_ffmpeg: Option<String>,
     pub api_restart_scheduled: bool,
+    pub dispatch_policy: String,
+    pub local_max_jobs: i64,
+    pub local_active_jobs: usize,
     pub local: LocalTranscodeInfoView,
     pub workers: Vec<TranscodeWorkerView>,
     pub recent_jobs: Vec<TranscodeJobView>,
@@ -5675,6 +6334,10 @@ struct UpdateTranscodeConfigReq {
     enabled: Option<bool>,
     #[serde(default)]
     worker_service_enabled: Option<bool>,
+    #[serde(default)]
+    dispatch_policy: Option<String>,
+    #[serde(default)]
+    local_max_jobs: Option<i64>,
     #[serde(default)]
     workers: Option<Vec<UpdateTranscodeWorkerReq>>,
     #[serde(default)]
@@ -5742,6 +6405,9 @@ async fn build_transcode_config_response(
     let server_name = runtime.local_server_name();
     let now = runtime.now();
     let local_caps = refresh_local_capabilities_if_stale(runtime).await;
+    let local_load = refresh_local_load_if_stale(runtime).await;
+    let (dispatch_policy_enum, local_max_jobs_usize) = effective_dispatch_settings(runtime).await;
+    let local_active_jobs = runtime.transcode_state.prune_and_count_local_jobs();
     let (paths, inspected) = inspect_jellyfin_paths_best_effort(runtime).await;
     let dispatcher_active = runtime.transcode_state.is_dispatcher_active().await;
     let dispatcher_socket = runtime
@@ -5845,6 +6511,25 @@ async fn build_transcode_config_response(
             Some(caps) if !caps.encoders.is_empty() => caps.encoders.clone(),
             _ => parse_encoders_json(db_w.and_then(|w| w.encoders.as_deref())),
         };
+        let hw_decoders = remote_caps
+            .as_ref()
+            .map(|c| c.hw_decoders.clone())
+            .unwrap_or_default();
+        let hw_encoders_verified = remote_caps.as_ref().is_some_and(|c| c.hw_encoders_verified);
+        let adapt_backend_mode = remote_caps
+            .as_ref()
+            .and_then(|c| c.adapt_backend_mode)
+            .map(|m| m.as_str().to_string());
+        let remote_load = runtime.transcode_state.remote_load_for(&link.id);
+        let cpu_usage_pct = remote_load
+            .as_ref()
+            .and_then(|l| l.cpu_usage_pct)
+            .filter(|v| v.is_finite());
+        let gpu_usage_pct = remote_load
+            .as_ref()
+            .and_then(|l| l.gpu_usage_pct)
+            .filter(|v| v.is_finite());
+        let rtt_ms = link.rtt_ms.filter(|v| v.is_finite());
         let render_node = remote_caps
             .as_ref()
             .and_then(|c| c.primary_render_node.clone())
@@ -5932,6 +6617,12 @@ async fn build_transcode_config_response(
             ffmpeg_mismatch_message: alignment.message,
             align_target: alignment.align_target,
             encoders,
+            hw_decoders,
+            hw_encoders_verified,
+            adapt_backend_mode,
+            cpu_usage_pct,
+            gpu_usage_pct,
+            rtt_ms,
             render_node,
             parity_ok,
             parity_error,
@@ -5982,6 +6673,23 @@ async fn build_transcode_config_response(
             .as_ref()
             .map(|c| c.encoders.clone())
             .unwrap_or_default(),
+        hw_decoders: local_caps
+            .as_ref()
+            .map(|c| c.hw_decoders.clone())
+            .unwrap_or_default(),
+        hw_encoders_verified: local_caps.as_ref().is_some_and(|c| c.hw_encoders_verified),
+        adapt_backend_mode: local_caps
+            .as_ref()
+            .and_then(|c| c.adapt_backend_mode)
+            .map(|m| m.as_str().to_string()),
+        cpu_usage_pct: local_load
+            .as_ref()
+            .and_then(|l| l.cpu_usage_pct)
+            .filter(|v| v.is_finite()),
+        gpu_usage_pct: local_load
+            .as_ref()
+            .and_then(|l| l.gpu_usage_pct)
+            .filter(|v| v.is_finite()),
         render_nodes: local_caps
             .as_ref()
             .map(|c| c.render_nodes.clone())
@@ -6004,6 +6712,9 @@ async fn build_transcode_config_response(
         jellyfin_dropin_enabled: paths.dropin_enabled,
         jellyfin_reported_ffmpeg,
         api_restart_scheduled: false,
+        dispatch_policy: dispatch_policy_enum.as_str().to_string(),
+        local_max_jobs: local_max_jobs_usize as i64,
+        local_active_jobs,
         local: local_info,
         workers: worker_views,
         recent_jobs,
@@ -6413,7 +7124,36 @@ async fn put_transcode_settings_inner(
     let req: UpdateTranscodeConfigReq =
         parse_required_json_bytes(headers, raw_body, &server, step)?;
 
-    // Pre-validate worker updates and parity link target before mutating anything.
+    // Pre-validate dispatch policy, local_max_jobs, worker updates, and parity link target
+    // before mutating anything.
+    let parsed_dispatch_policy = if let Some(ref raw_policy) = req.dispatch_policy {
+        let parsed = TranscodeDispatchPolicy::parse_str(raw_policy).ok_or_else(|| {
+            PeerError::invalid_request(
+                &server,
+                step,
+                format!("Invalid dispatch_policy '{}'", raw_policy.trim()),
+                "Choose one of 'remote_first', 'local_first', or 'balanced'",
+            )
+        })?;
+        Some(parsed)
+    } else {
+        None
+    };
+
+    if let Some(local_max_jobs) = req.local_max_jobs {
+        if !(WORKER_MAX_JOBS_MIN..=WORKER_MAX_JOBS_MAX).contains(&local_max_jobs) {
+            return Err(PeerError::invalid_request(
+                &server,
+                step,
+                format!(
+                    "local_max_jobs {} must be between {WORKER_MAX_JOBS_MIN} and {WORKER_MAX_JOBS_MAX}",
+                    local_max_jobs
+                ),
+                "Choose local_max_jobs between 1 and 64",
+            ));
+        }
+    }
+
     let mut validated_workers: Vec<(PeerLink, &UpdateTranscodeWorkerReq)> = Vec::new();
     if let Some(ref updates) = req.workers {
         let mut seen = HashSet::with_capacity(updates.len());
@@ -6462,6 +7202,59 @@ async fn put_transcode_settings_inner(
 
     let client_ip = extract_client_ip_for_peer(headers, peer_ip);
     let mut need_api_restart = false;
+
+    // 0. Persist dispatch policy / local_max_jobs settings when requested.
+    if parsed_dispatch_policy.is_some() || req.local_max_jobs.is_some() {
+        let (fallback_policy, fallback_local_max) = effective_dispatch_settings(runtime).await;
+        let updated_at = runtime.now().to_rfc3339();
+        let requested_local_max = req.local_max_jobs;
+        let server_c = server.clone();
+        let saved = runtime
+            .db
+            .write(&server, "update_transcode_policy", move |conn| {
+                db_peers::ensure_transcode_settings_schema_invariants(conn).map_err(|err| {
+                    PeerError::internal(&server_c, "update_transcode_policy", err.to_string())
+                })?;
+                let existing = db_peers::get_transcode_dispatch_settings(conn).map_err(|err| {
+                    PeerError::internal(&server_c, "update_transcode_policy", err.to_string())
+                })?;
+                let next_policy = parsed_dispatch_policy
+                    .or_else(|| existing.as_ref().map(|e| e.dispatch_policy))
+                    .unwrap_or(fallback_policy);
+                let next_local_max_jobs = requested_local_max
+                    .or_else(|| existing.as_ref().map(|e| e.local_max_jobs))
+                    .unwrap_or(fallback_local_max as i64)
+                    .clamp(WORKER_MAX_JOBS_MIN, WORKER_MAX_JOBS_MAX);
+                let settings = TranscodeDispatchSettings {
+                    dispatch_policy: next_policy,
+                    local_max_jobs: next_local_max_jobs,
+                    updated_at,
+                };
+                db_peers::upsert_transcode_dispatch_settings(conn, &settings).map_err(|err| {
+                    PeerError::internal(&server_c, "update_transcode_policy", err.to_string())
+                })?;
+                Ok(settings)
+            })
+            .await?;
+
+        runtime
+            .db
+            .record_audit(
+                auth_user.user_id,
+                auth_user.username.clone(),
+                "peer_transcode_policy_updated".to_string(),
+                "peer_transcode".to_string(),
+                server.clone(),
+                format!(
+                    "Updated transcode dispatch policy (dispatch_policy={}, local_max_jobs={})",
+                    saved.dispatch_policy.as_str(),
+                    saved.local_max_jobs
+                ),
+                client_ip.clone(),
+                String::new(),
+            )
+            .await;
+    }
 
     // 1. Toggle Jellyfin dispatcher enabled/disabled.
     if let Some(enable) = req.enabled {

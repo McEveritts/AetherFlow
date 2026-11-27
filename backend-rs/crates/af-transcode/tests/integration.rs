@@ -1220,6 +1220,7 @@ exit 1
     let cfg = CapabilitiesConfig {
         real_ffmpeg: fake_ffmpeg.clone(),
         dpkg_query_path: Some(fake_dpkg),
+        vainfo_path: None,
         render_nodes_override: Some(vec![RenderNode {
             path: PathBuf::from("/dev/dri/renderD128"),
             vendor_id: Some("0x8086".to_string()),
@@ -1741,4 +1742,749 @@ async fn worker_injects_local_whitelist_per_input_and_clamps_untrusted_and_symli
 
     let _ = shutdown_tx.send(());
     let _ = worker_handle.await;
+}
+
+#[tokio::test]
+async fn capabilities_probe_with_fake_vainfo_filters_encoders_and_reports_hw_decoders() {
+    let dir = TempDir::new("vainfo-caps");
+    let fake_ffmpeg = write_executable_script(
+        dir.path(),
+        "real-ffmpeg",
+        r#"#!/bin/sh
+if [ "$1" = "-version" ]; then
+    echo "ffmpeg version 8.1.3-Jellyfin"
+    exit 0
+fi
+if [ "$1" = "-hide_banner" ] && [ "$2" = "-encoders" ]; then
+    cat <<'EOF'
+Encoders:
+ V..... = Video
+ ------
+ V..... av1_qsv              AV1 QSV
+ V....D av1_vaapi            AV1 VAAPI
+ V....D h264_qsv             H.264 QSV
+ V....D h264_vaapi           H.264 VAAPI
+ V..... hevc_qsv             HEVC QSV
+ V....D hevc_vaapi           HEVC VAAPI
+ V....D libx264              libx264 H.264
+ V..... vp9_qsv              VP9 QSV
+ V....D vp9_vaapi            VP9 VAAPI
+EOF
+    exit 0
+fi
+exit 1
+"#,
+    );
+    let fake_vainfo = write_executable_script(
+        dir.path(),
+        "vainfo",
+        r#"#!/bin/sh
+cat <<'EOF'
+vainfo: Driver version: Intel iHD driver 25.2.3
+vainfo: Supported profile and entrypoints
+      VAProfileNone                   :	VAEntrypointVideoProc
+      VAProfileH264Main               :	VAEntrypointVLD
+      VAProfileH264Main               :	VAEntrypointEncSlice
+      VAProfileHEVCMain               :	VAEntrypointVLD
+      VAProfileHEVCMain               :	VAEntrypointEncSlice
+      VAProfileHEVCMain10             :	VAEntrypointVLD
+      VAProfileHEVCMain10             :	VAEntrypointEncSlice
+      VAProfileVP9Profile0            :	VAEntrypointVLD
+      VAProfileVP9Profile2            :	VAEntrypointVLD
+EOF
+"#,
+    );
+
+    // 1. Intel HD 630 fixture: keeps h264/hevc vaapi+qsv and libx264; strips av1 & vp9 hw encoders.
+    let intel_cfg = CapabilitiesConfig {
+        real_ffmpeg: fake_ffmpeg.clone(),
+        dpkg_query_path: None,
+        vainfo_path: Some(fake_vainfo.clone()),
+        render_nodes_override: Some(vec![RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x8086".to_string()),
+        }]),
+        probe_timeout: Duration::from_secs(5),
+    };
+    let intel_report = probe_capabilities(&intel_cfg).await.expect("probe intel");
+    assert!(intel_report.hw_encoders_verified);
+    assert_eq!(
+        intel_report.encoders,
+        vec![
+            "h264_qsv",
+            "h264_vaapi",
+            "hevc_qsv",
+            "hevc_vaapi",
+            "libx264"
+        ]
+    );
+    assert_eq!(
+        intel_report.hw_decoders,
+        vec!["h264", "hevc", "hevc_10bit", "vp9", "vp9_10bit"]
+    );
+    assert_eq!(
+        intel_report.render_nodes[0].vaapi_driver.as_deref(),
+        Some("Intel iHD driver 25.2.3")
+    );
+    assert!(intel_report.render_nodes[0].supports_vpp);
+
+    // 2. AMD-only fixture: strips ALL *_qsv encoders while keeping supported *_vaapi and libx264.
+    let amd_cfg = CapabilitiesConfig {
+        real_ffmpeg: fake_ffmpeg,
+        dpkg_query_path: None,
+        vainfo_path: Some(fake_vainfo),
+        render_nodes_override: Some(vec![RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x1002".to_string()),
+        }]),
+        probe_timeout: Duration::from_secs(5),
+    };
+    let amd_report = probe_capabilities(&amd_cfg).await.expect("probe amd");
+    assert!(amd_report.hw_encoders_verified);
+    assert_eq!(
+        amd_report.encoders,
+        vec!["h264_vaapi", "hevc_vaapi", "libx264"]
+    );
+}
+
+#[tokio::test]
+async fn worker_backend_adaptation_thread_cap_vulkan_opt_and_env_invariants() {
+    use af_transcode::config::{BackendAdaptMode, ENV_WORKER_SOCKET};
+
+    let dir = TempDir::new("adapt-opt");
+    let fake_ffmpeg = write_executable_script(
+        dir.path(),
+        "real-ffmpeg",
+        "#!/bin/sh\nprintf 'ARG:%s\\n' \"$@\"\n",
+    );
+
+    let run_worker_args = |sock: PathBuf, args: Vec<String>, cwd: String| async move {
+        let mut s = UnixStream::connect(&sock).await.unwrap();
+        write_frame(
+            &mut s,
+            &Frame::Start(StartRequest {
+                args,
+                cwd,
+                env_subset: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+        let first = read_frame(&mut s).await.unwrap().expect("first frame");
+        match first {
+            Frame::Started => {
+                let mut out = Vec::new();
+                while let Some(frame) = read_frame(&mut s).await.unwrap() {
+                    match frame {
+                        Frame::Stdout(b) => out.extend_from_slice(&b),
+                        Frame::Exit(code) => {
+                            assert_eq!(code, 0);
+                            break;
+                        }
+                        other => panic!("unexpected frame: {other:?}"),
+                    }
+                }
+                Ok(String::from_utf8_lossy(&out)
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("ARG:"))
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>())
+            }
+            Frame::Error { kind, message } => Err((kind, message)),
+            other => panic!("unexpected initial reply: {other:?}"),
+        }
+    };
+
+    // 1. AMD-only worker with Gpu adaptation + thread cap 4 + Vulkan tonemap optimization.
+    let amd_sock = dir.path().join("amd.sock");
+    let mut amd_cfg = WorkerConfig::for_paths(amd_sock.clone(), fake_ffmpeg.clone());
+    amd_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }]);
+    amd_cfg.adapt_backend_mode = BackendAdaptMode::Gpu;
+    amd_cfg.ffmpeg_max_threads = Some(4);
+    amd_cfg.optimize_vulkan_tonemap = true;
+    let (amd_shutdown, amd_worker) = start_fixture_worker(amd_cfg).await;
+
+    let cwd = dir.path().to_string_lossy().into_owned();
+
+    // 1a. QSV job adapts to VA-API on AMD node, strips QSV-only flags, caps threads, injects whitelist.
+    let qsv_adapted = run_worker_args(
+        amd_sock.clone(),
+        vec![
+            "-init_hw_device".into(),
+            "vaapi=va:/dev/dri/renderD129,driver=iHD".into(),
+            "-init_hw_device".into(),
+            "qsv=qs@va".into(),
+            "-filter_hw_device".into(),
+            "qs".into(),
+            "-hwaccel".into(),
+            "qsv".into(),
+            "-hwaccel_output_format".into(),
+            "qsv".into(),
+            "-c:v".into(),
+            "hevc_qsv".into(),
+            "-i".into(),
+            "/srv/media/in.mkv".into(),
+            "-vf".into(),
+            "vpp_qsv=w=1920:h=1080:format=nv12".into(),
+            "-c:v".into(),
+            "h264_qsv".into(),
+            "-preset".into(),
+            "faster".into(),
+            "-global_quality".into(),
+            "20".into(),
+            "-threads".into(),
+            "0".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await
+    .expect("QSV job should adapt on AMD");
+    assert_eq!(
+        qsv_adapted,
+        vec![
+            "-init_hw_device",
+            "vaapi=va:/dev/dri/renderD128",
+            "-filter_hw_device",
+            "va",
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_output_format",
+            "vaapi",
+            "-c:v",
+            "hevc",
+            "-threads",
+            "4",
+            "-protocol_whitelist",
+            WORKER_LOCAL_PROTOCOL_WHITELIST,
+            "-i",
+            "/srv/media/in.mkv",
+            "-vf",
+            "scale_vaapi=w=1920:h=1080:format=nv12",
+            "-c:v",
+            "h264_vaapi",
+            "-qp",
+            "20",
+            "-threads",
+            "4",
+            "out.m3u8",
+        ]
+    );
+
+    // 1b. Unadaptable QSV vpp_qsv=tonemap=1 fails with DeviceUnavailable.
+    let bad_qsv = run_worker_args(
+        amd_sock.clone(),
+        vec![
+            "-qsv_device".into(),
+            "/dev/dri/renderD128".into(),
+            "-i".into(),
+            "/srv/media/hdr.mkv".into(),
+            "-vf".into(),
+            "vpp_qsv=tonemap=1:format=nv12".into(),
+            "-c:v".into(),
+            "h264_qsv".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await;
+    assert!(matches!(bad_qsv, Err((ErrorKind::DeviceUnavailable, _))));
+
+    // 1c. VA-API + Vulkan libplacebo job receives scale_vaapi pre-scaling before hwmap.
+    let vk_opt = run_worker_args(
+        amd_sock.clone(),
+        vec![
+            "-init_hw_device".into(),
+            "vaapi=va:/dev/dri/renderD128".into(),
+            "-init_hw_device".into(),
+            "vulkan=vk@va".into(),
+            "-filter_hw_device".into(),
+            "va".into(),
+            "-hwaccel".into(),
+            "vaapi".into(),
+            "-hwaccel_output_format".into(),
+            "vaapi".into(),
+            "-i".into(),
+            "/srv/media/hdr.mkv".into(),
+            "-vf".into(),
+            "hwmap=derive_device=vulkan,libplacebo=w=1920:h=1080:tonemapping=bt.2390:format=nv12,hwmap=derive_device=vaapi:reverse=1".into(),
+            "-c:v".into(),
+            "h264_vaapi".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await
+    .expect("VA-API + Vulkan job should succeed");
+    assert!(vk_opt.iter().any(|a| a.starts_with(
+        "scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=vulkan,libplacebo="
+    )));
+
+    // 1d. Caller env_subset still rejects newly added worker GPU vars (e.g. RUSTICL_ENABLE).
+    for forbidden_caller_env in [
+        ("RUSTICL_ENABLE", "radeonsi"),
+        ("RADV_PERFTEST", "video_decode"),
+        ("MESA_SHADER_CACHE_DIR", "/tmp/shader-cache"),
+        ("MESA_SHADER_CACHE_MAX_SIZE", "512M"),
+        ("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/radeon_icd.json"),
+        ("OCL_ICD_VENDORS", "/etc/OpenCL/vendors"),
+    ] {
+        let mut s = UnixStream::connect(&amd_sock).await.unwrap();
+        write_frame(
+            &mut s,
+            &Frame::Start(StartRequest {
+                args: vec!["-i".into(), "/srv/media/a.mkv".into(), "out.m3u8".into()],
+                cwd: cwd.clone(),
+                env_subset: vec![(forbidden_caller_env.0.into(), forbidden_caller_env.1.into())],
+            }),
+        )
+        .await
+        .unwrap();
+        let reply = read_frame(&mut s).await.unwrap().expect("error reply");
+        assert!(
+            matches!(
+                reply,
+                Frame::Error {
+                    kind: ErrorKind::InvalidRequest,
+                    ..
+                }
+            ),
+            "caller env {} must be rejected with InvalidRequest",
+            forbidden_caller_env.0
+        );
+    }
+
+    let _ = amd_shutdown.send(());
+    let _ = amd_worker.await;
+
+    // 2. Intel worker with PreferQsv upgrades clean VA-API job to QSV.
+    let intel_sock = dir.path().join("intel.sock");
+    let mut intel_cfg = WorkerConfig::for_paths(intel_sock.clone(), fake_ffmpeg.clone());
+    intel_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD129"),
+        vendor_id: Some("0x8086".to_string()),
+    }]);
+    intel_cfg.adapt_backend_mode = BackendAdaptMode::PreferQsv;
+    let (intel_shutdown, intel_worker) = start_fixture_worker(intel_cfg).await;
+
+    let qsv_upgraded = run_worker_args(
+        intel_sock,
+        vec![
+            "-init_hw_device".into(),
+            "vaapi=va:/dev/dri/renderD128".into(),
+            "-filter_hw_device".into(),
+            "va".into(),
+            "-hwaccel".into(),
+            "vaapi".into(),
+            "-hwaccel_output_format".into(),
+            "vaapi".into(),
+            "-c:v".into(),
+            "hevc".into(),
+            "-i".into(),
+            "/srv/media/in.mkv".into(),
+            "-vf".into(),
+            "scale_vaapi=w=1280:h=720:format=nv12".into(),
+            "-c:v".into(),
+            "h264_vaapi".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await
+    .expect("PreferQsv should upgrade clean VA-API job");
+    assert!(qsv_upgraded.contains(&"qsv=qs@va".to_string()));
+    assert!(qsv_upgraded.contains(&"hevc_qsv".to_string()));
+    assert!(qsv_upgraded.contains(&"h264_qsv".to_string()));
+    assert!(qsv_upgraded.contains(&"scale_qsv=w=1280:h=720:format=nv12".to_string()));
+
+    let _ = intel_shutdown.send(());
+    let _ = intel_worker.await;
+
+    // 3. CPU-only worker with All adapts VA-API H.264 to libx264, while still rejecting tonemap_vaapi.
+    let cpu_sock = dir.path().join("cpu.sock");
+    let mut cpu_cfg = WorkerConfig::for_paths(cpu_sock.clone(), fake_ffmpeg);
+    cpu_cfg.render_nodes_override = Some(vec![]);
+    cpu_cfg.adapt_backend_mode = BackendAdaptMode::All;
+    let (cpu_shutdown, cpu_worker) = start_fixture_worker(cpu_cfg).await;
+
+    let cpu_adapted = run_worker_args(
+        cpu_sock.clone(),
+        vec![
+            "-vaapi_device".into(),
+            "/dev/dri/renderD128".into(),
+            "-hwaccel".into(),
+            "vaapi".into(),
+            "-i".into(),
+            "/srv/media/in.mkv".into(),
+            "-vf".into(),
+            "scale_vaapi=w=1280:h=720:format=nv12".into(),
+            "-c:v".into(),
+            "h264_vaapi".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await
+    .expect("All mode should adapt VA-API H.264 to CPU");
+    assert_eq!(
+        cpu_adapted,
+        vec![
+            "-protocol_whitelist",
+            WORKER_LOCAL_PROTOCOL_WHITELIST,
+            "-i",
+            "/srv/media/in.mkv",
+            "-vf",
+            "scale=w=1280:h=720,format=yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "out.m3u8",
+        ]
+    );
+
+    let cpu_tonemap_err = run_worker_args(
+        cpu_sock,
+        vec![
+            "-vaapi_device".into(),
+            "/dev/dri/renderD128".into(),
+            "-i".into(),
+            "/srv/media/hdr.mkv".into(),
+            "-vf".into(),
+            "tonemap_vaapi=format=nv12".into(),
+            "-c:v".into(),
+            "h264_vaapi".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await;
+    assert!(matches!(
+        cpu_tonemap_err,
+        Err((ErrorKind::DeviceUnavailable, _))
+    ));
+
+    let _ = cpu_shutdown.send(());
+    let _ = cpu_worker.await;
+
+    // 4. Real `af-transcode worker` subprocess passes worker-local GPU env vars and creates MESA_SHADER_CACHE_DIR.
+    let env_sock = dir.path().join("env-worker.sock");
+    let shader_cache = dir.path().join("mesa-cache/sub");
+    let env_ffmpeg = write_executable_script(
+        dir.path(),
+        "env-ffmpeg",
+        "#!/bin/sh\nprintf 'RUSTICL=%s\\nRADV=%s\\nCACHE=%s\\nCACHE_MAX=%s\\n' \"$RUSTICL_ENABLE\" \"$RADV_PERFTEST\" \"$MESA_SHADER_CACHE_DIR\" \"$MESA_SHADER_CACHE_MAX_SIZE\"\n",
+    );
+    let mut worker_proc = StdCommand::new(af_transcode_bin())
+        .arg("worker")
+        .env(ENV_WORKER_SOCKET, &env_sock)
+        .env(ENV_REAL_FFMPEG, &env_ffmpeg)
+        .env("RUSTICL_ENABLE", "radeonsi")
+        .env("RADV_PERFTEST", "video_decode,video_encode")
+        .env("MESA_SHADER_CACHE_DIR", &shader_cache)
+        .env("MESA_SHADER_CACHE_MAX_SIZE", "512M")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn af-transcode worker");
+
+    let wait_deadline = Instant::now() + Duration::from_secs(3);
+    while !env_sock.exists() && Instant::now() < wait_deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(env_sock.exists(), "worker socket did not appear in time");
+
+    let mut s = UnixStream::connect(&env_sock).await.unwrap();
+    write_frame(
+        &mut s,
+        &Frame::Start(StartRequest {
+            args: vec!["-i".into(), "/srv/media/in.mkv".into(), "out.m3u8".into()],
+            cwd,
+            env_subset: vec![],
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read_frame(&mut s).await.unwrap(), Some(Frame::Started));
+    let mut env_out = Vec::new();
+    while let Some(frame) = read_frame(&mut s).await.unwrap() {
+        match frame {
+            Frame::Stdout(b) => env_out.extend_from_slice(&b),
+            Frame::Exit(code) => {
+                assert_eq!(code, 0);
+                break;
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+    let env_text = String::from_utf8_lossy(&env_out);
+    assert!(env_text.contains("RUSTICL=radeonsi\n"), "got: {env_text}");
+    assert!(
+        env_text.contains("RADV=video_decode,video_encode\n"),
+        "got: {env_text}"
+    );
+    assert!(
+        env_text.contains(&format!("CACHE={}\n", shader_cache.display())),
+        "got: {env_text}"
+    );
+    assert!(env_text.contains("CACHE_MAX=512M\n"), "got: {env_text}");
+    assert!(
+        shader_cache.is_dir(),
+        "worker must create clean absolute MESA_SHADER_CACHE_DIR"
+    );
+
+    let _ = kill(Pid::from_raw(worker_proc.id() as i32), Signal::SIGTERM);
+    let _ = worker_proc.wait();
+}
+
+#[tokio::test]
+async fn worker_unifies_plan_backend_adaptation_with_probed_encoders_and_hw_decoders() {
+    use af_transcode::capabilities::RenderNodeInfo;
+    use af_transcode::config::BackendAdaptMode;
+
+    let dir = TempDir::new("adapt-unified");
+    let fake_ffmpeg = write_executable_script(
+        dir.path(),
+        "real-ffmpeg",
+        "#!/bin/sh\nprintf 'ARG:%s\\n' \"$@\"\n",
+    );
+    let cwd = dir.path().to_string_lossy().into_owned();
+
+    let run_worker_args = |sock: PathBuf, args: Vec<String>, cwd: String| async move {
+        let mut s = UnixStream::connect(&sock).await.unwrap();
+        write_frame(
+            &mut s,
+            &Frame::Start(StartRequest {
+                args,
+                cwd,
+                env_subset: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+        let first = read_frame(&mut s).await.unwrap().expect("first frame");
+        match first {
+            Frame::Started => {
+                let mut out = Vec::new();
+                while let Some(frame) = read_frame(&mut s).await.unwrap() {
+                    match frame {
+                        Frame::Stdout(b) => out.extend_from_slice(&b),
+                        Frame::Exit(code) => {
+                            assert_eq!(code, 0);
+                            break;
+                        }
+                        other => panic!("unexpected frame: {other:?}"),
+                    }
+                }
+                Ok(String::from_utf8_lossy(&out)
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("ARG:"))
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>())
+            }
+            Frame::Error { kind, message } => Err((kind, message)),
+            other => panic!("unexpected initial reply: {other:?}"),
+        }
+    };
+
+    // 1. Intel HD 630 GPU worker lacking AV1 HW decode (hw_decoders = ["h264", "hevc"]),
+    //    encoders = ["h264_vaapi", "libx264"], adapt_backend_mode = All:
+    //    AV1 VA-API job MUST adapt to CPU (`libx264`), NOT run unadapted native VA-API!
+    let hd630_sock = dir.path().join("hd630.sock");
+    let mut hd630_cfg = WorkerConfig::for_paths(hd630_sock.clone(), fake_ffmpeg.clone());
+    hd630_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x8086".to_string()),
+    }]);
+    hd630_cfg.adapt_backend_mode = BackendAdaptMode::All;
+    hd630_cfg.capabilities_override = Some(TranscodeCapabilities {
+        ffmpeg_path: fake_ffmpeg.to_string_lossy().into_owned(),
+        encoders: vec!["h264_vaapi".into(), "libx264".into()],
+        hw_decoders: vec!["h264".into(), "hevc".into()],
+        render_nodes: vec![RenderNodeInfo {
+            path: "/dev/dri/renderD128".into(),
+            vendor_id: Some("0x8086".into()),
+            vendor: Some("intel".into()),
+            vaapi_decode_codecs: vec!["h264".into(), "hevc".into()],
+            vaapi_encode_codecs: vec!["h264".into()],
+            ..Default::default()
+        }],
+        primary_render_node: Some("/dev/dri/renderD128".into()),
+        hw_encoders_verified: true,
+        adapt_backend_mode: Some(BackendAdaptMode::All),
+        ..Default::default()
+    });
+    let (hd630_shutdown, hd630_worker) = start_fixture_worker(hd630_cfg).await;
+
+    let av1_adapted = run_worker_args(
+        hd630_sock.clone(),
+        vec![
+            "-init_hw_device".into(),
+            "vaapi=va:/dev/dri/renderD128".into(),
+            "-filter_hw_device".into(),
+            "va".into(),
+            "-hwaccel".into(),
+            "vaapi".into(),
+            "-hwaccel_output_format".into(),
+            "vaapi".into(),
+            "-c:v".into(),
+            "av1".into(),
+            "-i".into(),
+            "/srv/media/av1.mkv".into(),
+            "-vf".into(),
+            "scale_vaapi=w=1280:h=720:format=nv12".into(),
+            "-c:v".into(),
+            "h264_vaapi".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await
+    .expect("HD 630 in All mode should adapt unsupported AV1 VA-API job to CPU");
+    assert!(
+        av1_adapted.contains(&"libx264".to_string()),
+        "expected CPU libx264 adaptation, got: {av1_adapted:?}"
+    );
+    assert!(
+        !av1_adapted.contains(&"h264_vaapi".to_string())
+            && !av1_adapted.contains(&"-hwaccel".to_string()),
+        "must not execute unadapted VA-API command when worker lacks AV1 HW decode: {av1_adapted:?}"
+    );
+
+    let _ = hd630_shutdown.send(());
+    let _ = hd630_worker.await;
+
+    // 2. Intel node in PreferQsv mode WITHOUT `h264_qsv` in worker encoders:
+    //    VA-API H.264 job MUST stay Native (`h264_vaapi`), NOT rewrite to `h264_qsv`!
+    let no_qsv_sock = dir.path().join("intel-no-qsv.sock");
+    let mut no_qsv_cfg = WorkerConfig::for_paths(no_qsv_sock.clone(), fake_ffmpeg.clone());
+    no_qsv_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD129"),
+        vendor_id: Some("0x8086".to_string()),
+    }]);
+    no_qsv_cfg.adapt_backend_mode = BackendAdaptMode::PreferQsv;
+    no_qsv_cfg.capabilities_override = Some(TranscodeCapabilities {
+        ffmpeg_path: fake_ffmpeg.to_string_lossy().into_owned(),
+        encoders: vec!["h264_vaapi".into(), "libx264".into()],
+        hw_decoders: vec!["h264".into(), "hevc".into()],
+        render_nodes: vec![RenderNodeInfo {
+            path: "/dev/dri/renderD129".into(),
+            vendor_id: Some("0x8086".into()),
+            vendor: Some("intel".into()),
+            ..Default::default()
+        }],
+        primary_render_node: Some("/dev/dri/renderD129".into()),
+        hw_encoders_verified: true,
+        adapt_backend_mode: Some(BackendAdaptMode::PreferQsv),
+        ..Default::default()
+    });
+    let (no_qsv_shutdown, no_qsv_worker) = start_fixture_worker(no_qsv_cfg).await;
+
+    let stayed_native = run_worker_args(
+        no_qsv_sock,
+        vec![
+            "-init_hw_device".into(),
+            "vaapi=va:/dev/dri/renderD128".into(),
+            "-filter_hw_device".into(),
+            "va".into(),
+            "-hwaccel".into(),
+            "vaapi".into(),
+            "-hwaccel_output_format".into(),
+            "vaapi".into(),
+            "-c:v".into(),
+            "hevc".into(),
+            "-i".into(),
+            "/srv/media/in.mkv".into(),
+            "-vf".into(),
+            "scale_vaapi=w=1280:h=720:format=nv12".into(),
+            "-c:v".into(),
+            "h264_vaapi".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await
+    .expect("PreferQsv without h264_qsv should stay Native VA-API");
+    assert!(
+        stayed_native.contains(&"h264_vaapi".to_string()),
+        "expected Native h264_vaapi, got: {stayed_native:?}"
+    );
+    assert!(
+        !stayed_native.contains(&"h264_qsv".to_string()),
+        "must not rewrite to missing h264_qsv: {stayed_native:?}"
+    );
+    assert!(
+        stayed_native.contains(&"vaapi=va:/dev/dri/renderD129".to_string()),
+        "Native path must still remap render node to renderD129: {stayed_native:?}"
+    );
+
+    let _ = no_qsv_shutdown.send(());
+    let _ = no_qsv_worker.await;
+
+    // 3. Intel node in Gpu mode lacking `h264_vaapi` but having `h264_qsv`:
+    //    VA-API H.264 job adapts to QSV (`h264_qsv`) even though render node exists!
+    let qsv_fb_sock = dir.path().join("intel-qsv-fb.sock");
+    let mut qsv_fb_cfg = WorkerConfig::for_paths(qsv_fb_sock.clone(), fake_ffmpeg.clone());
+    qsv_fb_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD129"),
+        vendor_id: Some("0x8086".to_string()),
+    }]);
+    qsv_fb_cfg.adapt_backend_mode = BackendAdaptMode::Gpu;
+    qsv_fb_cfg.capabilities_override = Some(TranscodeCapabilities {
+        ffmpeg_path: fake_ffmpeg.to_string_lossy().into_owned(),
+        encoders: vec!["h264_qsv".into(), "libx264".into()],
+        hw_decoders: vec!["h264".into(), "hevc".into()],
+        render_nodes: vec![RenderNodeInfo {
+            path: "/dev/dri/renderD129".into(),
+            vendor_id: Some("0x8086".into()),
+            vendor: Some("intel".into()),
+            ..Default::default()
+        }],
+        primary_render_node: Some("/dev/dri/renderD129".into()),
+        hw_encoders_verified: true,
+        adapt_backend_mode: Some(BackendAdaptMode::Gpu),
+        ..Default::default()
+    });
+    let (qsv_fb_shutdown, qsv_fb_worker) = start_fixture_worker(qsv_fb_cfg).await;
+
+    let adapted_to_qsv = run_worker_args(
+        qsv_fb_sock,
+        vec![
+            "-init_hw_device".into(),
+            "vaapi=va:/dev/dri/renderD128".into(),
+            "-filter_hw_device".into(),
+            "va".into(),
+            "-hwaccel".into(),
+            "vaapi".into(),
+            "-hwaccel_output_format".into(),
+            "vaapi".into(),
+            "-c:v".into(),
+            "hevc".into(),
+            "-i".into(),
+            "/srv/media/in.mkv".into(),
+            "-vf".into(),
+            "scale_vaapi=w=1280:h=720:format=nv12".into(),
+            "-c:v".into(),
+            "h264_vaapi".into(),
+            "out.m3u8".into(),
+        ],
+        cwd,
+    )
+    .await
+    .expect("Gpu mode should fall back VA-API -> QSV when worker only has h264_qsv");
+    assert!(
+        adapted_to_qsv.contains(&"h264_qsv".to_string()),
+        "expected VA-API -> QSV fallback, got: {adapted_to_qsv:?}"
+    );
+    assert!(
+        adapted_to_qsv.contains(&"vaapi=va:/dev/dri/renderD129".to_string()),
+        "expected render node renderD129, got: {adapted_to_qsv:?}"
+    );
+
+    let _ = qsv_fb_shutdown.send(());
+    let _ = qsv_fb_worker.await;
 }

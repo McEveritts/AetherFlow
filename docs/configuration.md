@@ -190,11 +190,18 @@ Distributed Jellyfin transcoding overrides live in a dedicated, secret-free envi
 | :--- | :--- | :--- |
 | `AF_TRANSCODE_REAL_FFMPEG` | Absolute path to the real FFmpeg binary executed by the Jellyfin shim and worker. | `/usr/lib/jellyfin-ffmpeg/ffmpeg` |
 | `AF_TRANSCODE_WORKER_MAX_JOBS` | Maximum concurrent transcode jobs permitted on a worker (`1..=64`, clamped automatically). Advertised over link-authenticated tunnel `GET /health` as `worker_max_jobs` so controllers auto-clamp per-worker concurrency (`effective_max_jobs = min(max_jobs, worker_max_jobs)`). | `8` |
+| `AF_TRANSCODE_DISPATCH_POLICY` | Controller default dispatch policy (`remote_first`, `local_first`, or `balanced`) when not overridden in **Cluster → Jellyfin transcoding** (SQLite `transcode_dispatch_settings`). | `remote_first` |
+| `AF_TRANSCODE_LOCAL_MAX_JOBS` | Maximum concurrent local Jellyfin transcode jobs (`1..=64`, clamped automatically) tracked via `SO_PEERCRED` under `local_first` and `balanced` dispatch policies. | `2` |
+| `AF_TRANSCODE_FFMPEG_THREADS` | Optional per-job worker FFmpeg thread cap (`1..=128`, clamped automatically; unset or `0` disables capping) applied to `-threads`, `-filter_threads`, and `-filter_complex_threads`. | `(Unset / uncapped)` |
+| `AF_TRANSCODE_ADAPT_BACKEND` | Opt-in worker cross-backend adaptation mode: `off` (strict), `gpu` (or `cross_gpu`, QSV → VA-API when no Intel node is available), `prefer_qsv` (promote VA-API → QSV on Intel workers + QSV → VA-API fallback), or `all` (or `gpu_and_cpu`, adds hardware → CPU software overflow). | `off` |
+| `AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP` | Opt-in flag (`1` / `true` / `yes` / `on`) rewriting linear VA-API → Vulkan `libplacebo` HDR tone-mapping filtergraphs to pre-scale via `scale_vaapi` before Vulkan upload/tonemapping. | `false` |
 | `AF_TRANSCODE_DISPATCHER_SOCK` | Override for the controller dispatcher Unix socket shared between `aetherflow-api.service` and `jellyfin.service`. | `/run/aetherflow-transcode/transcode.sock` |
 | `AF_TRANSCODE_WORKER_SOCK` | Override for the `af-transcode-worker.service` Unix socket path. | `/run/aetherflow-transcode-worker/worker.sock` |
 | `AF_TRANSCODE_WORKER_SOCKET_MODE` | Octal permission mode for the worker Unix socket (fails closed on invalid or world-accessible modes). | `0660` |
 | `AF_TRANSCODE_HANDSHAKE_TIMEOUT_MS` | End-to-end handshake timeout (ms) for the Jellyfin FFmpeg shim before falling back to local `ffmpeg`. | `2000` |
 | `AETHERFLOW_TRANSCODE_BIN` | Runner-only (`aetherflow-runner.service`) explicit override path to the `af-transcode` binary (defaults to release bundle `bin/af-transcode`). | `<release-dir>/bin/af-transcode` |
+| `MESA_SHADER_CACHE_DIR` / `MESA_SHADER_CACHE_MAX_SIZE` / `MESA_SHADER_CACHE_DISABLE` | Worker-local host Mesa shader cache overrides (never accepted from remote callers). `af-transcode-worker.service` sets `CacheDirectory=aetherflow-transcode-worker` and defaults cache path/size automatically. | `/var/cache/aetherflow-transcode-worker/mesa-cache` / `512M` |
+| `RUSTICL_ENABLE` / `RADV_PERFTEST` / `ANV_VIDEO_DECODE` / `LIBVA_*` / `VK_*` / `OCL_ICD_VENDORS` / `AMD_VULKAN_ICD` / `ONEVPL_PRIORITY_PATH` / `MFX_HOME` | Optional worker-local GPU driver, Vulkan/OpenCL/Rusticl, VA-API, and oneVPL environment keys preserved strictly from the worker's own systemd environment and `/etc/aetherflow/transcode.env` (never accepted from remote callers). | `(Unset)` |
 
 *(Internal guard variable `AF_TRANSCODE_SHIM_ACTIVE` is set automatically by the shim to prevent recursive invocation and must not be configured manually.)*
 

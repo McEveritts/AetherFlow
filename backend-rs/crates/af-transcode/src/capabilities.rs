@@ -2,8 +2,8 @@
 
 use crate::argv::{Capability, HwAccel};
 use crate::config::{
-    configured_real_ffmpeg_path, configured_worker_max_jobs, validate_real_ffmpeg_path,
-    DEFAULT_PROBE_TIMEOUT,
+    configured_real_ffmpeg_path, configured_worker_adapt_backend, configured_worker_max_jobs,
+    validate_real_ffmpeg_path, BackendAdaptMode, DEFAULT_PROBE_TIMEOUT,
 };
 use af_hardware::RenderNode;
 use anyhow::Context;
@@ -21,14 +21,31 @@ pub const PCI_VENDOR_INTEL: &str = "0x8086";
 pub const PCI_VENDOR_AMD: &str = "0x1002";
 pub const PCI_VENDOR_NVIDIA: &str = "0x10de";
 
+/// Parsed VA-API profile & entrypoint summary from `vainfo --display drm --device <node>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VaInfoProfileSummary {
+    pub driver: Option<String>,
+    pub decode_codecs: Vec<String>,
+    pub encode_codecs: Vec<String>,
+    pub supports_vpp: bool,
+}
+
 /// Serializable render-node entry for `af-transcode capabilities` and P9 `/health` JSON.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderNodeInfo {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vendor_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vaapi_driver: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vaapi_decode_codecs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vaapi_encode_codecs: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_vpp: bool,
 }
 
 impl From<&RenderNode> for RenderNodeInfo {
@@ -42,12 +59,16 @@ impl From<&RenderNode> for RenderNodeInfo {
             path: node.path.to_string_lossy().into_owned(),
             vendor_id: node.vendor_id.clone(),
             vendor,
+            vaapi_driver: None,
+            vaapi_decode_codecs: Vec::new(),
+            vaapi_encode_codecs: Vec::new(),
+            supports_vpp: false,
         }
     }
 }
 
 /// Complete capability report emitted by `af-transcode capabilities` and consumed by P9 `/health`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscodeCapabilities {
     pub ffmpeg_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,6 +85,19 @@ pub struct TranscodeCapabilities {
     pub primary_render_node: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_max_jobs: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hw_decoders: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hw_encoders_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapt_backend_mode: Option<BackendAdaptMode>,
+}
+
+impl TranscodeCapabilities {
+    /// Returns the effective worker backend adaptation mode (`Off` when omitted).
+    pub fn effective_adapt_backend_mode(&self) -> BackendAdaptMode {
+        self.adapt_backend_mode.unwrap_or(BackendAdaptMode::Off)
+    }
 }
 
 /// Configuration for probing transcode capabilities (supports isolated fixtures in tests).
@@ -71,6 +105,7 @@ pub struct TranscodeCapabilities {
 pub struct CapabilitiesConfig {
     pub real_ffmpeg: PathBuf,
     pub dpkg_query_path: Option<PathBuf>,
+    pub vainfo_path: Option<PathBuf>,
     pub render_nodes_override: Option<Vec<RenderNode>>,
     pub probe_timeout: Duration,
 }
@@ -80,6 +115,7 @@ impl CapabilitiesConfig {
         Self {
             real_ffmpeg: configured_real_ffmpeg_path(),
             dpkg_query_path: Some(PathBuf::from("/usr/bin/dpkg-query")),
+            vainfo_path: Some(PathBuf::from("/usr/bin/vainfo")),
             render_nodes_override: None,
             probe_timeout: DEFAULT_PROBE_TIMEOUT,
         }
@@ -142,6 +178,14 @@ pub fn select_render_node(cap: &Capability, nodes: &[RenderNode]) -> Option<Path
             .is_some_and(|e| e.to_ascii_lowercase().ends_with("_vaapi"));
 
     if needs_vaapi {
+        if cap.requires_vaapi_tonemap {
+            // `tonemap_vaapi` relies on Intel VA-API VPP HDR tonemapping and fails on AMD Mesa VA-API.
+            return nodes
+                .iter()
+                .find(|n| normalized_vendor_id(n).as_deref() == Some(PCI_VENDOR_INTEL))
+                .or_else(|| nodes.iter().find(|n| normalized_vendor_id(n).is_none()))
+                .map(|n| n.path.clone());
+        }
         return nodes
             .iter()
             .find(|n| {
@@ -242,6 +286,179 @@ pub fn parse_dpkg_jellyfin_ffmpeg_version(stdout: &str) -> (Option<String>, Opti
         .unwrap_or((None, None))
 }
 
+fn vainfo_profile_codec_tags(profile: &str) -> &'static [&'static str] {
+    if profile.starts_with("VAProfileH264") {
+        &["h264"]
+    } else if profile == "VAProfileHEVCMain10" {
+        &["hevc", "hevc_10bit"]
+    } else if profile.starts_with("VAProfileHEVC") {
+        &["hevc"]
+    } else if matches!(profile, "VAProfileVP9Profile2" | "VAProfileVP9Profile3") {
+        &["vp9", "vp9_10bit"]
+    } else if matches!(profile, "VAProfileVP9Profile0" | "VAProfileVP9Profile1") {
+        &["vp9"]
+    } else if matches!(profile, "VAProfileAV1Profile0" | "VAProfileAV1Profile1") {
+        &["av1", "av1_10bit"]
+    } else if profile.starts_with("VAProfileMPEG2") {
+        &["mpeg2video"]
+    } else if profile.starts_with("VAProfileVC1") {
+        &["vc1"]
+    } else if profile.starts_with("VAProfileVP8") {
+        &["vp8"]
+    } else if profile == "VAProfileJPEGBaseline" {
+        &["mjpeg"]
+    } else {
+        &[]
+    }
+}
+
+/// Parses driver version, supported decode/encode codecs, and VPP support from
+/// `vainfo --display drm --device <render_node>` output.
+pub fn parse_vainfo_output(stdout: &str) -> VaInfoProfileSummary {
+    let mut driver: Option<String> = None;
+    let mut decode_set = BTreeSet::new();
+    let mut encode_set = BTreeSet::new();
+    let mut supports_vpp = false;
+
+    for raw_line in stdout.lines() {
+        let trimmed = raw_line.trim();
+        if let Some(rest) = trimmed.strip_prefix("vainfo: Driver version:") {
+            let val = rest.trim();
+            if !val.is_empty() {
+                driver = Some(val.to_string());
+            }
+            continue;
+        }
+        if !trimmed.starts_with("VAProfile") {
+            continue;
+        }
+        let Some((raw_profile, raw_entrypoint)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let profile = raw_profile.trim();
+        let entrypoint = raw_entrypoint.trim();
+        match entrypoint {
+            "VAEntrypointVideoProc" => {
+                supports_vpp = true;
+            }
+            "VAEntrypointVLD" => {
+                for &tag in vainfo_profile_codec_tags(profile) {
+                    decode_set.insert(tag.to_string());
+                }
+            }
+            "VAEntrypointEncSlice" | "VAEntrypointEncSliceLP" | "VAEntrypointEncPicture" => {
+                for &tag in vainfo_profile_codec_tags(profile) {
+                    encode_set.insert(tag.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    VaInfoProfileSummary {
+        driver,
+        decode_codecs: decode_set.into_iter().collect(),
+        encode_codecs: encode_set.into_iter().collect(),
+        supports_vpp,
+    }
+}
+
+fn node_has_vainfo_data(node: &RenderNodeInfo) -> bool {
+    !node.vaapi_decode_codecs.is_empty()
+        || !node.vaapi_encode_codecs.is_empty()
+        || node.vaapi_driver.is_some()
+}
+
+fn is_nvidia_node_info(node: &RenderNodeInfo) -> bool {
+    node.vendor_id
+        .as_deref()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case(PCI_VENDOR_NVIDIA))
+        || node
+            .vendor
+            .as_deref()
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("nvidia"))
+}
+
+fn is_intel_node_info(node: &RenderNodeInfo) -> bool {
+    node.vendor_id
+        .as_deref()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case(PCI_VENDOR_INTEL))
+        || node
+            .vendor
+            .as_deref()
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("intel"))
+}
+
+fn vaapi_codec_for_hw_encoder_prefix(prefix: &str) -> Option<&'static str> {
+    match prefix {
+        "h264" => Some("h264"),
+        "hevc" => Some("hevc"),
+        "vp9" => Some("vp9"),
+        "av1" => Some("av1"),
+        "mpeg2" => Some("mpeg2video"),
+        "vp8" => Some("vp8"),
+        "mjpeg" => Some("mjpeg"),
+        _ => None,
+    }
+}
+
+/// Filters `ffmpeg -encoders` against silicon-accurate `vainfo` encode profiles when at least
+/// one render node was probed by `vainfo`.
+///
+/// Returns `(filtered_encoders, verified)`. When no render node has `vainfo` probe data, returns
+/// `(encoders, false)` unchanged for backward compatibility.
+pub fn filter_encoders_with_vainfo(
+    encoders: Vec<String>,
+    render_nodes: &[RenderNodeInfo],
+) -> (Vec<String>, bool) {
+    if !render_nodes.iter().any(node_has_vainfo_data) {
+        return (encoders, false);
+    }
+
+    let mut non_nvidia_encode = BTreeSet::new();
+    let mut intel_encode = BTreeSet::new();
+    let mut has_probed_intel = false;
+
+    for node in render_nodes {
+        if !node_has_vainfo_data(node) || is_nvidia_node_info(node) {
+            continue;
+        }
+        let is_intel = is_intel_node_info(node);
+        if is_intel {
+            has_probed_intel = true;
+        }
+        for codec in &node.vaapi_encode_codecs {
+            let c = codec.to_ascii_lowercase();
+            non_nvidia_encode.insert(c.clone());
+            if is_intel {
+                intel_encode.insert(c);
+            }
+        }
+    }
+
+    let filtered = encoders
+        .into_iter()
+        .filter(|enc| {
+            let lower = enc.to_ascii_lowercase();
+            if let Some(prefix) = lower.strip_suffix("_vaapi") {
+                match vaapi_codec_for_hw_encoder_prefix(prefix) {
+                    Some(codec) => non_nvidia_encode.contains(codec),
+                    None => true,
+                }
+            } else if let Some(prefix) = lower.strip_suffix("_qsv") {
+                match vaapi_codec_for_hw_encoder_prefix(prefix) {
+                    Some(codec) => intel_encode.contains(codec),
+                    None => has_probed_intel,
+                }
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    (filtered, true)
+}
+
 /// Runs a probe command in its own process group with a strict wall-clock deadline.
 async fn run_bounded_output(
     program: &Path,
@@ -330,9 +547,45 @@ pub async fn probe_capabilities(
         Some(nodes) => nodes.clone(),
         None => af_hardware::detect_render_nodes(),
     };
-    let render_nodes: Vec<RenderNodeInfo> =
+    let mut render_nodes: Vec<RenderNodeInfo> =
         detected_nodes.iter().map(RenderNodeInfo::from).collect();
+
+    if let Some(ref vainfo_path) = config.vainfo_path {
+        if vainfo_path.exists() {
+            for node in &mut render_nodes {
+                if is_nvidia_node_info(node) {
+                    continue;
+                }
+                if let Ok(out) = run_bounded_output(
+                    vainfo_path,
+                    &["--display", "drm", "--device", &node.path],
+                    config.probe_timeout,
+                )
+                .await
+                {
+                    if out.status.success() {
+                        let summary = parse_vainfo_output(&String::from_utf8_lossy(&out.stdout));
+                        node.vaapi_driver = summary.driver;
+                        node.vaapi_decode_codecs = summary.decode_codecs;
+                        node.vaapi_encode_codecs = summary.encode_codecs;
+                        node.supports_vpp = summary.supports_vpp;
+                    }
+                }
+            }
+        }
+    }
+
+    let hw_decoders: Vec<String> = render_nodes
+        .iter()
+        .flat_map(|n| n.vaapi_decode_codecs.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let (encoders, hw_encoders_verified) = filter_encoders_with_vainfo(encoders, &render_nodes);
     let primary_render_node = render_nodes.first().map(|n| n.path.clone());
+    let adapt_backend_mode =
+        Some(configured_worker_adapt_backend()).filter(|m| *m != BackendAdaptMode::Off);
 
     Ok(TranscodeCapabilities {
         ffmpeg_path: config.real_ffmpeg.to_string_lossy().into_owned(),
@@ -344,6 +597,9 @@ pub async fn probe_capabilities(
         render_nodes,
         primary_render_node,
         worker_max_jobs: Some(configured_worker_max_jobs()),
+        hw_decoders,
+        hw_encoders_verified,
+        adapt_backend_mode,
     })
 }
 
@@ -481,5 +737,227 @@ install ok installed\tjellyfin-ffmpeg8\t8.1.3-1-trixie
         let round_trip: TranscodeCapabilities =
             serde_json::from_str(&advertised_json).expect("deserialize round trip");
         assert_eq!(round_trip.worker_max_jobs, Some(12));
+    }
+
+    #[test]
+    fn parse_vainfo_output_extracts_intel_and_amd_profiles_and_vpp() {
+        let hd630_sample = "\
+Trying display: drm
+vainfo: VA-API version: 1.22 (libva 2.22.0)
+vainfo: Driver version: Intel iHD driver for Intel(R) Gen Graphics - 25.2.3 ()
+vainfo: Supported profile and entrypoints
+      VAProfileNone                   :\tVAEntrypointVideoProc
+      VAProfileNone                   :\tVAEntrypointStats
+      VAProfileMPEG2Simple            :\tVAEntrypointVLD
+      VAProfileMPEG2Main              :\tVAEntrypointEncSlice
+      VAProfileH264Main               :\tVAEntrypointVLD
+      VAProfileH264Main               :\tVAEntrypointEncSliceLP
+      VAProfileH264High               :\tVAEntrypointFEI
+      VAProfileVC1Advanced            :\tVAEntrypointVLD
+      VAProfileJPEGBaseline           :\tVAEntrypointVLD
+      VAProfileJPEGBaseline           :\tVAEntrypointEncPicture
+      VAProfileVP8Version0_3          :\tVAEntrypointVLD
+      VAProfileVP8Version0_3          :\tVAEntrypointEncSlice
+      VAProfileHEVCMain               :\tVAEntrypointVLD
+      VAProfileHEVCMain               :\tVAEntrypointEncSlice
+      VAProfileHEVCMain10             :\tVAEntrypointVLD
+      VAProfileHEVCMain10             :\tVAEntrypointEncSlice
+      VAProfileVP9Profile0            :\tVAEntrypointVLD
+      VAProfileVP9Profile2            :\tVAEntrypointVLD
+";
+        let summary = parse_vainfo_output(hd630_sample);
+        assert_eq!(
+            summary.driver.as_deref(),
+            Some("Intel iHD driver for Intel(R) Gen Graphics - 25.2.3 ()")
+        );
+        assert!(summary.supports_vpp);
+        assert_eq!(
+            summary.decode_codecs,
+            vec![
+                "h264",
+                "hevc",
+                "hevc_10bit",
+                "mjpeg",
+                "mpeg2video",
+                "vc1",
+                "vp8",
+                "vp9",
+                "vp9_10bit",
+            ]
+        );
+        assert_eq!(
+            summary.encode_codecs,
+            vec!["h264", "hevc", "hevc_10bit", "mjpeg", "mpeg2video", "vp8",]
+        );
+
+        let av1_sample = "\
+vainfo: Driver version: Mesa Gallium driver 25.0 for AMD Radeon
+      VAProfileAV1Profile0            : VAEntrypointVLD
+      VAProfileAV1Profile1            : VAEntrypointEncSlice
+      VAProfileVP9Profile3            : VAEntrypointVLD
+";
+        let av1 = parse_vainfo_output(av1_sample);
+        assert!(!av1.supports_vpp);
+        assert_eq!(
+            av1.decode_codecs,
+            vec!["av1", "av1_10bit", "vp9", "vp9_10bit"]
+        );
+        assert_eq!(av1.encode_codecs, vec!["av1", "av1_10bit"]);
+    }
+
+    #[test]
+    fn filter_encoders_with_vainfo_respects_silicon_and_unprobed_fallback() {
+        let raw_encoders = vec![
+            "av1_nvenc",
+            "av1_qsv",
+            "av1_vaapi",
+            "h264_nvenc",
+            "h264_qsv",
+            "h264_vaapi",
+            "hevc_qsv",
+            "hevc_vaapi",
+            "libx264",
+            "libx265",
+            "vp9_qsv",
+            "vp9_vaapi",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+
+        // 1. No vainfo probe data -> unchanged, verified=false.
+        let unprobed = vec![RenderNodeInfo {
+            path: "/dev/dri/renderD128".to_string(),
+            vendor_id: Some(PCI_VENDOR_INTEL.to_string()),
+            vendor: Some("intel".to_string()),
+            ..Default::default()
+        }];
+        let (unchanged, verified) = filter_encoders_with_vainfo(raw_encoders.clone(), &unprobed);
+        assert!(!verified);
+        assert_eq!(unchanged, raw_encoders);
+
+        // 2. Intel HD 630 (H.264 + HEVC encode only) -> strips av1/vp9 vaapi+qsv, keeps nvenc/sw.
+        let hd630 = vec![RenderNodeInfo {
+            path: "/dev/dri/renderD128".to_string(),
+            vendor_id: Some(PCI_VENDOR_INTEL.to_string()),
+            vendor: Some("intel".to_string()),
+            vaapi_driver: Some("Intel iHD".to_string()),
+            vaapi_decode_codecs: vec!["h264".into(), "hevc".into(), "vp9".into()],
+            vaapi_encode_codecs: vec!["h264".into(), "hevc".into(), "hevc_10bit".into()],
+            supports_vpp: true,
+        }];
+        let (intel_filtered, intel_verified) =
+            filter_encoders_with_vainfo(raw_encoders.clone(), &hd630);
+        assert!(intel_verified);
+        assert_eq!(
+            intel_filtered,
+            vec![
+                "av1_nvenc",
+                "h264_nvenc",
+                "h264_qsv",
+                "h264_vaapi",
+                "hevc_qsv",
+                "hevc_vaapi",
+                "libx264",
+                "libx265",
+            ]
+        );
+
+        // 3. AMD-only probed host -> strips ALL *_qsv encoders and unsupported *_vaapi encoders.
+        let amd_only = vec![RenderNodeInfo {
+            path: "/dev/dri/renderD128".to_string(),
+            vendor_id: Some(PCI_VENDOR_AMD.to_string()),
+            vendor: Some("amd".to_string()),
+            vaapi_driver: Some("Mesa Gallium".to_string()),
+            vaapi_decode_codecs: vec!["h264".into(), "hevc".into()],
+            vaapi_encode_codecs: vec!["h264".into(), "hevc".into()],
+            supports_vpp: true,
+        }];
+        let (amd_filtered, amd_verified) = filter_encoders_with_vainfo(raw_encoders, &amd_only);
+        assert!(amd_verified);
+        assert_eq!(
+            amd_filtered,
+            vec![
+                "av1_nvenc",
+                "h264_nvenc",
+                "h264_vaapi",
+                "hevc_vaapi",
+                "libx264",
+                "libx265",
+            ]
+        );
+    }
+
+    #[test]
+    fn select_render_node_excludes_amd_when_vaapi_tonemap_is_required() {
+        let amd = RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some(PCI_VENDOR_AMD.to_string()),
+        };
+        let intel = RenderNode {
+            path: PathBuf::from("/dev/dri/renderD129"),
+            vendor_id: Some(PCI_VENDOR_INTEL.to_string()),
+        };
+        let tonemap_cap = Capability {
+            hwaccel: Some(HwAccel::Vaapi),
+            required_hwaccels: vec![HwAccel::Vaapi],
+            encoder: Some("h264_vaapi".to_string()),
+            requires_vaapi_tonemap: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            select_render_node(&tonemap_cap, std::slice::from_ref(&amd)),
+            None
+        );
+        assert_eq!(
+            select_render_node(&tonemap_cap, &[amd, intel]),
+            Some(PathBuf::from("/dev/dri/renderD129"))
+        );
+    }
+
+    #[test]
+    fn transcode_capabilities_new_fields_serde_is_backwards_compatible() {
+        let legacy_json = r#"{
+            "ffmpeg_path": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+            "encoders": ["h264_vaapi", "libx264"],
+            "render_nodes": [{"path": "/dev/dri/renderD128", "vendor_id": "0x8086", "vendor": "intel"}],
+            "primary_render_node": "/dev/dri/renderD128"
+        }"#;
+        let parsed: TranscodeCapabilities =
+            serde_json::from_str(legacy_json).expect("deserialize legacy");
+        assert!(parsed.hw_decoders.is_empty());
+        assert!(!parsed.hw_encoders_verified);
+        assert_eq!(parsed.adapt_backend_mode, None);
+        assert_eq!(parsed.effective_adapt_backend_mode(), BackendAdaptMode::Off);
+        assert_eq!(parsed.render_nodes[0].vaapi_driver, None);
+        assert!(parsed.render_nodes[0].vaapi_decode_codecs.is_empty());
+        assert!(parsed.render_nodes[0].vaapi_encode_codecs.is_empty());
+        assert!(!parsed.render_nodes[0].supports_vpp);
+
+        // Default values are omitted on serialization.
+        let ser = serde_json::to_string(&parsed).expect("serialize defaults");
+        assert!(!ser.contains("hw_decoders"));
+        assert!(!ser.contains("hw_encoders_verified"));
+        assert!(!ser.contains("adapt_backend_mode"));
+        assert!(!ser.contains("vaapi_driver"));
+        assert!(!ser.contains("supports_vpp"));
+
+        // Populated values round-trip cleanly.
+        let mut rich = parsed;
+        rich.hw_decoders = vec!["h264".into(), "hevc".into()];
+        rich.hw_encoders_verified = true;
+        rich.adapt_backend_mode = Some(BackendAdaptMode::PreferQsv);
+        rich.render_nodes[0].vaapi_driver = Some("Intel iHD".into());
+        rich.render_nodes[0].supports_vpp = true;
+        let rich_json = serde_json::to_string(&rich).expect("serialize rich");
+        let rt: TranscodeCapabilities = serde_json::from_str(&rich_json).expect("deserialize rich");
+        assert_eq!(
+            rt.effective_adapt_backend_mode(),
+            BackendAdaptMode::PreferQsv
+        );
+        assert!(rt.hw_encoders_verified);
+        assert_eq!(rt.hw_decoders, vec!["h264", "hevc"]);
+        assert!(rt.render_nodes[0].supports_vpp);
     }
 }

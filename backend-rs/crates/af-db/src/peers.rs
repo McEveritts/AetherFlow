@@ -131,6 +131,23 @@ pub(crate) const PEER_GRANT_METADATA_MIGRATION_27_SQL: &[&str] = &[
     );"#,
 ];
 
+pub(crate) const PEER_TRANSCODE_SETTINGS_MIGRATION_28_SQL: &[&str] =
+    &[r#"CREATE TABLE IF NOT EXISTS transcode_dispatch_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        dispatch_policy TEXT NOT NULL DEFAULT 'remote_first',
+        local_max_jobs INTEGER NOT NULL DEFAULT 2,
+        updated_at TEXT NOT NULL
+    );"#];
+
+/// Ensures the `transcode_dispatch_settings` singleton table exists idempotently, including for
+/// isolated peer DB test fixtures that only bootstrap peer schema invariants.
+pub fn ensure_transcode_settings_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
+    for stmt in PEER_TRANSCODE_SETTINGS_MIGRATION_28_SQL {
+        conn.execute_batch(stmt)?;
+    }
+    Ok(())
+}
+
 /// Ensures additive unreleased Migration 27 columns and tables exist even for pre-existing
 /// databases or isolated test schemas created before staged-slot grant metadata was added.
 pub fn ensure_peer_grant_schema_invariants(conn: &Connection) -> anyhow::Result<()> {
@@ -159,6 +176,7 @@ pub fn ensure_peer_grant_schema_invariants(conn: &Connection) -> anyhow::Result<
             [],
         )?;
     }
+    ensure_transcode_settings_schema_invariants(conn)?;
     Ok(())
 }
 
@@ -526,6 +544,45 @@ pub struct TranscodeJob {
     pub ran_locally: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscodeDispatchPolicy {
+    #[default]
+    RemoteFirst,
+    LocalFirst,
+    Balanced,
+}
+
+impl TranscodeDispatchPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoteFirst => "remote_first",
+            Self::LocalFirst => "local_first",
+            Self::Balanced => "balanced",
+        }
+    }
+
+    pub fn parse_str(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.eq_ignore_ascii_case("remote_first") {
+            Some(Self::RemoteFirst)
+        } else if trimmed.eq_ignore_ascii_case("local_first") {
+            Some(Self::LocalFirst)
+        } else if trimmed.eq_ignore_ascii_case("balanced") {
+            Some(Self::Balanced)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscodeDispatchSettings {
+    pub dispatch_policy: TranscodeDispatchPolicy,
+    pub local_max_jobs: i64,
+    pub updated_at: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Row Mappers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -724,6 +781,27 @@ fn map_transcode_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscodeJ
         exit_code: row.get(4)?,
         request_id: row.get(5)?,
         ran_locally: row.get(6)?,
+    })
+}
+
+fn map_transcode_dispatch_settings_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<TranscodeDispatchSettings> {
+    let raw_policy: String = row.get(0)?;
+    let dispatch_policy = TranscodeDispatchPolicy::parse_str(&raw_policy).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid transcode dispatch_policy: {raw_policy:?}"),
+            )),
+        )
+    })?;
+    Ok(TranscodeDispatchSettings {
+        dispatch_policy,
+        local_max_jobs: row.get(1)?,
+        updated_at: row.get(2)?,
     })
 }
 
@@ -1934,6 +2012,48 @@ pub fn prune_transcode_jobs_before(
     Ok(removed)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TranscodeDispatchSettings CRUD (singleton id = 1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn get_transcode_dispatch_settings(
+    conn: &Connection,
+) -> anyhow::Result<Option<TranscodeDispatchSettings>> {
+    Ok(conn
+        .query_row(
+            "SELECT dispatch_policy, local_max_jobs, updated_at \
+             FROM transcode_dispatch_settings WHERE id = 1",
+            [],
+            map_transcode_dispatch_settings_row,
+        )
+        .optional()?)
+}
+
+pub fn upsert_transcode_dispatch_settings(
+    conn: &Connection,
+    settings: &TranscodeDispatchSettings,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO transcode_dispatch_settings (id, dispatch_policy, local_max_jobs, updated_at) \
+         VALUES (1, ?1, ?2, ?3) \
+         ON CONFLICT(id) DO UPDATE SET \
+             dispatch_policy = excluded.dispatch_policy, \
+             local_max_jobs = excluded.local_max_jobs, \
+             updated_at = excluded.updated_at",
+        params![
+            settings.dispatch_policy.as_str(),
+            settings.local_max_jobs,
+            settings.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_transcode_dispatch_settings(conn: &Connection) -> anyhow::Result<bool> {
+    let changed = conn.execute("DELETE FROM transcode_dispatch_settings WHERE id = 1", [])?;
+    Ok(changed > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1968,6 +2088,13 @@ mod tests {
             PEER_GRANT_METADATA_MIGRATION_27_SQL,
         )
         .expect("apply migration 27");
+        migrate(
+            &conn,
+            28,
+            "Add distributed transcode dispatch policy settings",
+            PEER_TRANSCODE_SETTINGS_MIGRATION_28_SQL,
+        )
+        .expect("apply migration 28");
         conn
     }
 
@@ -2916,5 +3043,220 @@ mod tests {
         assert_eq!(loaded.credential_id, None);
         assert_eq!(loaded.effective_credential_id(), "link-legacy");
         assert!(list_peer_received_grant_cleanups(&conn).unwrap().is_empty());
+        assert_eq!(get_transcode_dispatch_settings(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn transcode_dispatch_policy_parse_str_and_serde_round_trips() {
+        assert_eq!(
+            TranscodeDispatchPolicy::default(),
+            TranscodeDispatchPolicy::RemoteFirst
+        );
+
+        for (policy, expected_str) in [
+            (TranscodeDispatchPolicy::RemoteFirst, "remote_first"),
+            (TranscodeDispatchPolicy::LocalFirst, "local_first"),
+            (TranscodeDispatchPolicy::Balanced, "balanced"),
+        ] {
+            assert_eq!(policy.as_str(), expected_str);
+            assert_eq!(
+                TranscodeDispatchPolicy::parse_str(expected_str),
+                Some(policy)
+            );
+            assert_eq!(
+                TranscodeDispatchPolicy::parse_str(&format!(
+                    "  {} \t\n",
+                    expected_str.to_ascii_uppercase()
+                )),
+                Some(policy)
+            );
+            let encoded = serde_json::to_string(&policy).unwrap();
+            assert_eq!(encoded, format!("\"{expected_str}\""));
+            let decoded: TranscodeDispatchPolicy = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, policy);
+        }
+
+        assert_eq!(
+            TranscodeDispatchPolicy::parse_str("ReMoTe_FiRsT"),
+            Some(TranscodeDispatchPolicy::RemoteFirst)
+        );
+        assert_eq!(
+            TranscodeDispatchPolicy::parse_str("Local_First"),
+            Some(TranscodeDispatchPolicy::LocalFirst)
+        );
+        assert_eq!(
+            TranscodeDispatchPolicy::parse_str("Balanced"),
+            Some(TranscodeDispatchPolicy::Balanced)
+        );
+
+        for invalid in ["", "   ", "remote", "local", "remote-first", "round_robin"] {
+            assert_eq!(TranscodeDispatchPolicy::parse_str(invalid), None);
+            assert!(
+                serde_json::from_str::<TranscodeDispatchPolicy>(&format!("\"{invalid}\"")).is_err()
+            );
+        }
+
+        let settings = TranscodeDispatchSettings {
+            dispatch_policy: TranscodeDispatchPolicy::Balanced,
+            local_max_jobs: 3,
+            updated_at: "2026-11-27T04:30:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let round_tripped: TranscodeDispatchSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, settings);
+    }
+
+    #[test]
+    fn transcode_dispatch_settings_singleton_crud_and_invalid_policy_error() {
+        let conn = open_migrated_in_memory_db();
+        assert_eq!(get_transcode_dispatch_settings(&conn).unwrap(), None);
+        assert!(!delete_transcode_dispatch_settings(&conn).unwrap());
+
+        let initial = TranscodeDispatchSettings {
+            dispatch_policy: TranscodeDispatchPolicy::RemoteFirst,
+            local_max_jobs: 2,
+            updated_at: "2026-11-27T04:00:00Z".to_string(),
+        };
+        upsert_transcode_dispatch_settings(&conn, &initial).unwrap();
+        assert_eq!(
+            get_transcode_dispatch_settings(&conn).unwrap(),
+            Some(initial)
+        );
+
+        // Upsert updates singleton id = 1 in place
+        let updated = TranscodeDispatchSettings {
+            dispatch_policy: TranscodeDispatchPolicy::Balanced,
+            local_max_jobs: 6,
+            updated_at: "2026-11-27T04:10:00Z".to_string(),
+        };
+        upsert_transcode_dispatch_settings(&conn, &updated).unwrap();
+        assert_eq!(
+            get_transcode_dispatch_settings(&conn).unwrap(),
+            Some(updated)
+        );
+
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcode_dispatch_settings",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_count, 1);
+
+        // CHECK (id = 1) rejects non-singleton row IDs
+        assert!(conn
+            .execute(
+                "INSERT INTO transcode_dispatch_settings (id, dispatch_policy, local_max_jobs, updated_at)
+                 VALUES (2, 'local_first', 1, '2026-11-27T04:15:00Z')",
+                [],
+            )
+            .is_err());
+
+        // Corrupt policy string fails cleanly via rusqlite::Error::FromSqlConversionFailure
+        conn.execute(
+            "UPDATE transcode_dispatch_settings SET dispatch_policy = 'bogus_policy' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let err = get_transcode_dispatch_settings(&conn)
+            .expect_err("invalid dispatch_policy text must fail read cleanly");
+        let sql_err = err
+            .downcast_ref::<rusqlite::Error>()
+            .expect("error should wrap rusqlite::Error");
+        assert!(matches!(
+            sql_err,
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, _)
+        ));
+
+        // Delete removes singleton row and is idempotent on repeat
+        assert!(delete_transcode_dispatch_settings(&conn).unwrap());
+        assert_eq!(get_transcode_dispatch_settings(&conn).unwrap(), None);
+        assert!(!delete_transcode_dispatch_settings(&conn).unwrap());
+
+        // Column defaults apply when inserting only id + updated_at
+        conn.execute(
+            "INSERT INTO transcode_dispatch_settings (id, updated_at) VALUES (1, '2026-11-27T04:20:00Z')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            get_transcode_dispatch_settings(&conn).unwrap(),
+            Some(TranscodeDispatchSettings {
+                dispatch_policy: TranscodeDispatchPolicy::RemoteFirst,
+                local_max_jobs: 2,
+                updated_at: "2026-11-27T04:20:00Z".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn transcode_dispatch_settings_migration_28_and_schema_invariants_are_idempotent() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE schema_versions (
+                 version INTEGER PRIMARY KEY,
+                 description TEXT NOT NULL,
+                 applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+             );",
+        )
+        .unwrap();
+
+        // Direct invariant helper creates table idempotently before migration runs
+        ensure_transcode_settings_schema_invariants(&conn).unwrap();
+        ensure_transcode_settings_schema_invariants(&conn).unwrap();
+
+        let seeded = TranscodeDispatchSettings {
+            dispatch_policy: TranscodeDispatchPolicy::LocalFirst,
+            local_max_jobs: 4,
+            updated_at: "2026-11-27T04:25:00Z".to_string(),
+        };
+        upsert_transcode_dispatch_settings(&conn, &seeded).unwrap();
+
+        // Running migration 28 afterwards is idempotent and preserves existing row
+        migrate(
+            &conn,
+            28,
+            "Add distributed transcode dispatch policy settings",
+            PEER_TRANSCODE_SETTINGS_MIGRATION_28_SQL,
+        )
+        .unwrap();
+        migrate(
+            &conn,
+            28,
+            "Add distributed transcode dispatch policy settings",
+            PEER_TRANSCODE_SETTINGS_MIGRATION_28_SQL,
+        )
+        .unwrap();
+        ensure_transcode_settings_schema_invariants(&conn).unwrap();
+
+        assert_eq!(
+            get_transcode_dispatch_settings(&conn).unwrap(),
+            Some(seeded)
+        );
+        let version_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version = 28",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version_rows, 1);
+
+        // Isolated peer fixture calling only ensure_peer_grant_schema_invariants also gets the table
+        let isolated = Connection::open_in_memory().expect("open isolated db");
+        ensure_peer_grant_schema_invariants(&isolated).unwrap();
+        ensure_peer_grant_schema_invariants(&isolated).unwrap();
+        assert_eq!(get_transcode_dispatch_settings(&isolated).unwrap(), None);
+        let isolated_settings = TranscodeDispatchSettings {
+            dispatch_policy: TranscodeDispatchPolicy::Balanced,
+            local_max_jobs: 3,
+            updated_at: "2026-11-27T04:30:00Z".to_string(),
+        };
+        upsert_transcode_dispatch_settings(&isolated, &isolated_settings).unwrap();
+        assert_eq!(
+            get_transcode_dispatch_settings(&isolated).unwrap(),
+            Some(isolated_settings)
+        );
     }
 }

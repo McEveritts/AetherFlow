@@ -2326,10 +2326,15 @@ async fn worker_unit_hardening_and_dynamic_readwritepaths_dropin_lifecycle() {
         "RestrictAddressFamilies=AF_UNIX\n",
         "ProtectSystem=strict\n",
         "ProtectHome=read-only\n",
+        "CacheDirectory=aetherflow-transcode-worker\n",
+        "CacheDirectoryMode=0750\n",
         "WorkingDirectory=/run/aetherflow-transcode-worker\n",
+        "Environment=MESA_SHADER_CACHE_DIR=/var/cache/aetherflow-transcode-worker/mesa-cache\n",
+        "Environment=MESA_SHADER_CACHE_MAX_SIZE=512M\n",
         "DevicePolicy=closed\n",
         "DeviceAllow=char-drm rw\n",
         "DeviceAllow=/dev/dri rw\n",
+        "DeviceAllow=/dev/kfd rw\n",
         "DeviceAllow=char-nvidia-frontend rw\n",
         "DeviceAllow=char-nvidia-uvm rw\n",
         "DeviceAllow=char-nvidia-caps rw\n",
@@ -2694,4 +2699,151 @@ async fn schedule_api_restart_debounces_deterministically_and_resets_failed_unit
     assert_eq!(results.iter().filter(|r| r.changed).count(), 1);
     assert_eq!(results.iter().filter(|r| !r.changed).count(), 2);
     assert_eq!(*stateful_runner.systemd_run_count.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn worker_unit_sets_host_local_mesa_shader_cache_before_env_file_and_allows_kfd() {
+    assert_eq!(
+        crate::DEFAULT_WORKER_CACHE_DIR,
+        "/var/cache/aetherflow-transcode-worker"
+    );
+    assert_eq!(
+        crate::DEFAULT_MESA_SHADER_CACHE_DIR,
+        "/var/cache/aetherflow-transcode-worker/mesa-cache"
+    );
+    assert_eq!(crate::DEFAULT_MESA_SHADER_CACHE_MAX_SIZE, "512M");
+    assert!(
+        crate::DEFAULT_MESA_SHADER_CACHE_DIR.starts_with(crate::DEFAULT_WORKER_CACHE_DIR),
+        "Mesa shader cache dir must reside under the host-local worker cache dir"
+    );
+    assert!(
+        !crate::DEFAULT_MESA_SHADER_CACHE_DIR.starts_with(DEFAULT_JELLYFIN_CACHE_DIR),
+        "Mesa shader cache dir must not reside under NFS-mounted Jellyfin cache dir"
+    );
+
+    let fx = TranscodeFixture::new();
+    let mgr = fx.manager();
+    mgr.install_worker_unit().await.unwrap();
+
+    let unit_text = fs::read_to_string(
+        fx.root
+            .join("etc/systemd/system/af-transcode-worker.service"),
+    )
+    .unwrap();
+
+    // CacheDirectory directives appear immediately after RuntimeDirectoryMode=0750.
+    assert!(
+        unit_text.contains(
+            "RuntimeDirectoryMode=0750\n\
+             CacheDirectory=aetherflow-transcode-worker\n\
+             CacheDirectoryMode=0750\n"
+        ),
+        "CacheDirectory directives missing or misplaced in:\n{unit_text}"
+    );
+
+    // Default Mesa shader cache env lines MUST precede EnvironmentFile so /etc/aetherflow/transcode.env
+    // overrides take precedence, while worker socket lines MUST stay after EnvironmentFile.
+    let mesa_dir_line =
+        format!("Environment=MESA_SHADER_CACHE_DIR={DEFAULT_MESA_SHADER_CACHE_DIR}\n");
+    let mesa_size_line =
+        format!("Environment=MESA_SHADER_CACHE_MAX_SIZE={DEFAULT_MESA_SHADER_CACHE_MAX_SIZE}\n");
+    let env_file_line = format!("EnvironmentFile=-{DEFAULT_TRANSCODE_ENV_FILE}\n");
+    let sock_line = format!("Environment=AF_TRANSCODE_WORKER_SOCK={DEFAULT_WORKER_SOCKET_PATH}\n");
+    let sock_mode_line =
+        format!("Environment=AF_TRANSCODE_WORKER_SOCKET_MODE={DEFAULT_WORKER_SOCKET_MODE_STR}\n");
+
+    let mesa_dir_pos = unit_text
+        .find(&mesa_dir_line)
+        .expect("missing MESA_SHADER_CACHE_DIR line");
+    let mesa_size_pos = unit_text
+        .find(&mesa_size_line)
+        .expect("missing MESA_SHADER_CACHE_MAX_SIZE line");
+    let env_file_pos = unit_text
+        .find(&env_file_line)
+        .expect("missing EnvironmentFile line");
+    let sock_pos = unit_text
+        .find(&sock_line)
+        .expect("missing AF_TRANSCODE_WORKER_SOCK line");
+    let sock_mode_pos = unit_text
+        .find(&sock_mode_line)
+        .expect("missing AF_TRANSCODE_WORKER_SOCKET_MODE line");
+
+    assert!(
+        mesa_dir_pos < env_file_pos && mesa_size_pos < env_file_pos,
+        "Mesa shader cache defaults must precede EnvironmentFile in:\n{unit_text}"
+    );
+    assert!(
+        env_file_pos < sock_pos && env_file_pos < sock_mode_pos,
+        "Worker socket Environment lines must remain after EnvironmentFile in:\n{unit_text}"
+    );
+
+    // AMD ROCm/OpenCL compute device allowance and preserved security hardening invariants.
+    for expected in [
+        "DeviceAllow=/dev/kfd rw\n",
+        "ProtectSystem=strict\n",
+        "ProtectHome=read-only\n",
+        "PrivateNetwork=yes\n",
+        "RestrictAddressFamilies=AF_UNIX\n",
+        "DevicePolicy=closed\n",
+        "NoNewPrivileges=yes\n",
+    ] {
+        assert!(
+            unit_text.contains(expected),
+            "missing required directive {expected:?} in:\n{unit_text}"
+        );
+    }
+    assert!(!unit_text.contains("aetherflow.env"));
+    assert!(!unit_text.contains("Group=aetherflow"));
+}
+
+#[test]
+fn default_transcode_env_file_is_secret_free_commented_out_and_documents_tuning_vars() {
+    let content = render_default_transcode_env_file();
+
+    // Every non-empty line must be commented out so defaults remain unchanged out of the box.
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            assert!(
+                trimmed.starts_with('#'),
+                "default transcode.env must keep tuning lines commented out, found: {line:?}"
+            );
+        }
+    }
+
+    // Secret-free invariant.
+    for forbidden in [
+        "AES_MASTER_KEY",
+        "JWT_SECRET",
+        "AETHERFLOW_TOKEN",
+        "API_KEY",
+        "PASSWORD",
+        "PRIVATE_KEY",
+        "aetherflow.env",
+    ] {
+        assert!(
+            !content.contains(forbidden),
+            "default transcode.env must not reference secret identifier {forbidden:?}"
+        );
+    }
+
+    // All documented secret-free tuning variables.
+    for documented in [
+        "# AF_TRANSCODE_REAL_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg",
+        "# AF_TRANSCODE_WORKER_MAX_JOBS=8",
+        "# AF_TRANSCODE_FFMPEG_THREADS=",
+        "# AF_TRANSCODE_ADAPT_BACKEND=off",
+        "# AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=false",
+        "# RUSTICL_ENABLE=radeonsi",
+        "# MESA_SHADER_CACHE_DIR=/var/cache/aetherflow-transcode-worker/mesa-cache",
+        "# MESA_SHADER_CACHE_MAX_SIZE=512M",
+        "# AF_TRANSCODE_HANDSHAKE_TIMEOUT_MS=2000",
+        "# AF_TRANSCODE_DISPATCH_POLICY=remote_first",
+        "# AF_TRANSCODE_LOCAL_MAX_JOBS=2",
+    ] {
+        assert!(
+            content.contains(documented),
+            "default transcode.env missing documented variable {documented:?}:\n{content}"
+        );
+    }
 }

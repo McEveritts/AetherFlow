@@ -19,15 +19,20 @@
 //!   via `killpg` and immediate `SIGKILL` process-group cleanup whenever the socket closes without
 //!   a clean `Exit` or the worker shuts down.
 
-use crate::argv;
-use crate::capabilities;
+use crate::argv::{self, AdaptedTargetBackend, Capability, HwAccel};
+use crate::capabilities::{
+    self, CapabilitiesConfig, TranscodeCapabilities, PCI_VENDOR_AMD, PCI_VENDOR_INTEL,
+    PCI_VENDOR_NVIDIA,
+};
 use crate::config::{
-    configured_real_ffmpeg_path, configured_worker_max_jobs, configured_worker_socket_mode,
-    configured_worker_socket_path, resolve_worker_child_cwd, validate_absolute_clean_path,
-    validate_real_ffmpeg_path, validate_socket_mode, validate_start_request, ConfigError,
-    DEFAULT_FRAME_WRITE_TIMEOUT, DEFAULT_JELLYFIN_CACHE_DIR, DEFAULT_WORKER_MAX_JOBS,
-    DEFAULT_WORKER_SOCKET_MODE, DEFAULT_WORKER_START_FRAME_TIMEOUT, MAX_UNIX_SOCKET_PATH_BYTES,
-    MAX_WORKER_MAX_JOBS, WORKER_BASELINE_ENV_KEYS,
+    configured_real_ffmpeg_path, configured_worker_adapt_backend, configured_worker_ffmpeg_threads,
+    configured_worker_max_jobs, configured_worker_optimize_vulkan_tonemap,
+    configured_worker_socket_mode, configured_worker_socket_path, resolve_worker_child_cwd,
+    validate_absolute_clean_path, validate_real_ffmpeg_path, validate_safe_dir,
+    validate_socket_mode, validate_start_request, BackendAdaptMode, ConfigError,
+    DEFAULT_FRAME_WRITE_TIMEOUT, DEFAULT_JELLYFIN_CACHE_DIR, DEFAULT_PROBE_TIMEOUT,
+    DEFAULT_WORKER_MAX_JOBS, DEFAULT_WORKER_SOCKET_MODE, DEFAULT_WORKER_START_FRAME_TIMEOUT,
+    MAX_UNIX_SOCKET_PATH_BYTES, MAX_WORKER_MAX_JOBS, WORKER_BASELINE_ENV_KEYS,
 };
 use crate::protocol::{
     bounded_frame_channel, encode_framed, read_frame, write_frame, ErrorKind, Frame, ProtocolError,
@@ -44,7 +49,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -75,6 +80,16 @@ pub struct WorkerConfig {
     /// Optional explicit allowlist of canonicalized directory roots permitted for child `cwd`.
     /// Defaults to `[safe_cwd, /var/cache/jellyfin]`.
     pub allowed_cwd_roots: Option<Vec<PathBuf>>,
+    /// Optional per-job `ffmpeg` thread cap applied to `-threads`, `-filter_threads`, and
+    /// `-filter_complex_threads`.
+    pub ffmpeg_max_threads: Option<usize>,
+    /// Backend adaptation policy (`Off`, `Gpu`, `PreferQsv`, `All`).
+    pub adapt_backend_mode: BackendAdaptMode,
+    /// When `true`, pre-scales linear VA-API -> Vulkan `libplacebo` tonemapping graphs on VA-API.
+    pub optimize_vulkan_tonemap: bool,
+    /// Optional explicit worker capabilities override (primarily for tests/fixtures).
+    /// When `None` and `adapt_backend_mode != Off`, the worker probes capabilities once at startup.
+    pub capabilities_override: Option<TranscodeCapabilities>,
 }
 
 impl WorkerConfig {
@@ -90,6 +105,10 @@ impl WorkerConfig {
             allowed_peer_uids: None,
             safe_cwd: None,
             allowed_cwd_roots: None,
+            ffmpeg_max_threads: configured_worker_ffmpeg_threads(),
+            adapt_backend_mode: configured_worker_adapt_backend(),
+            optimize_vulkan_tonemap: configured_worker_optimize_vulkan_tonemap(),
+            capabilities_override: None,
         })
     }
 
@@ -106,6 +125,10 @@ impl WorkerConfig {
             allowed_peer_uids: None,
             safe_cwd: None,
             allowed_cwd_roots: None,
+            ffmpeg_max_threads: None,
+            adapt_backend_mode: BackendAdaptMode::Off,
+            optimize_vulkan_tonemap: false,
+            capabilities_override: None,
         }
     }
 }
@@ -356,6 +379,95 @@ pub async fn run_worker(
     serve_worker_listener(bound, config, real_ffmpeg, shutdown).await
 }
 
+const MAX_MESA_SHADER_CACHE_DIR_BYTES: usize = 4096;
+
+/// Safely validates and creates `MESA_SHADER_CACHE_DIR` without following symlinks on any
+/// existing path component, enforcing a 4096-byte length bound and forbidding `/`.
+fn ensure_safe_mesa_shader_cache_dir(path: &Path) -> anyhow::Result<PathBuf> {
+    validate_absolute_clean_path(path)?;
+    let path_bytes = path.as_os_str().as_encoded_bytes().len();
+    anyhow::ensure!(
+        path_bytes <= MAX_MESA_SHADER_CACHE_DIR_BYTES,
+        "MESA_SHADER_CACHE_DIR path ({path_bytes} bytes) exceeds {MAX_MESA_SHADER_CACHE_DIR_BYTES} bytes"
+    );
+    anyhow::ensure!(
+        path != Path::new("/"),
+        "MESA_SHADER_CACHE_DIR must not be '/'"
+    );
+
+    let mut segments = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(seg) => segments.push(seg),
+            Component::ParentDir | Component::Prefix(_) => {
+                anyhow::bail!("MESA_SHADER_CACHE_DIR contains invalid path component");
+            }
+        }
+    }
+    anyhow::ensure!(
+        !segments.is_empty(),
+        "MESA_SHADER_CACHE_DIR must not be '/'"
+    );
+
+    let mut prefix = PathBuf::from("/");
+    for seg in segments {
+        prefix.push(seg);
+        match fs::symlink_metadata(&prefix) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    anyhow::bail!(
+                        "refusing symlink component '{}' in MESA_SHADER_CACHE_DIR",
+                        prefix.display()
+                    );
+                }
+                if !meta.file_type().is_dir() {
+                    anyhow::bail!(
+                        "non-directory component '{}' in MESA_SHADER_CACHE_DIR",
+                        prefix.display()
+                    );
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => match fs::create_dir(&prefix) {
+                Ok(()) => {}
+                Err(create_err) if create_err.kind() == io::ErrorKind::AlreadyExists => {
+                    let meta = fs::symlink_metadata(&prefix).with_context(|| {
+                        format!(
+                            "inspect MESA_SHADER_CACHE_DIR component '{}'",
+                            prefix.display()
+                        )
+                    })?;
+                    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+                        anyhow::bail!(
+                            "refusing symlink or non-directory component '{}' in MESA_SHADER_CACHE_DIR",
+                            prefix.display()
+                        );
+                    }
+                }
+                Err(create_err) => {
+                    return Err(create_err).with_context(|| {
+                        format!(
+                            "create MESA_SHADER_CACHE_DIR component '{}'",
+                            prefix.display()
+                        )
+                    });
+                }
+            },
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "inspect MESA_SHADER_CACHE_DIR component '{}'",
+                        prefix.display()
+                    )
+                });
+            }
+        }
+    }
+
+    validate_safe_dir(&prefix)
+        .with_context(|| format!("validate MESA_SHADER_CACHE_DIR '{}'", path.display()))
+}
+
 /// Serves an already-bound worker socket until `shutdown` resolves.
 ///
 /// Exposed so tests can bind synchronously, know the exact ready socket path with zero race,
@@ -366,6 +478,54 @@ pub async fn serve_worker_listener(
     validated_real_ffmpeg: PathBuf,
     shutdown: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
+    // Best-effort, symlink-safe creation of worker-local MESA_SHADER_CACHE_DIR once at startup.
+    if let Some(cache_dir) = env::var_os("MESA_SHADER_CACHE_DIR") {
+        let cache_path = Path::new(&cache_dir);
+        if let Err(err) = ensure_safe_mesa_shader_cache_dir(cache_path) {
+            tracing::debug!(
+                path = %cache_path.display(),
+                error = %err,
+                "skipping unsafe or unavailable MESA_SHADER_CACHE_DIR creation"
+            );
+        }
+    }
+
+    // Probe or load worker capabilities once at startup when backend adaptation is enabled so
+    // worker-side `plan_backend_adaptation` decisions match the controller identically.
+    let worker_capabilities: Arc<Option<TranscodeCapabilities>> = Arc::new(
+        if config.adapt_backend_mode == BackendAdaptMode::Off {
+            config.capabilities_override.clone()
+        } else if let Some(override_caps) = config.capabilities_override.clone() {
+            Some(override_caps)
+        } else {
+            let probe_cfg = CapabilitiesConfig {
+                real_ffmpeg: validated_real_ffmpeg.clone(),
+                dpkg_query_path: None,
+                vainfo_path: CapabilitiesConfig::from_env().vainfo_path,
+                render_nodes_override: config.render_nodes_override.clone(),
+                probe_timeout: DEFAULT_PROBE_TIMEOUT,
+            };
+            match capabilities::probe_capabilities(&probe_cfg).await {
+                Ok(caps) if !caps.encoders.is_empty() => Some(caps),
+                Ok(_) => {
+                    tracing::debug!(
+                        ffmpeg = %validated_real_ffmpeg.display(),
+                        "worker capability probe returned no video encoders; falling back to node-derived capability synthesis"
+                    );
+                    None
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ffmpeg = %validated_real_ffmpeg.display(),
+                        error = %err,
+                        "worker capability probe failed; falling back to node-derived capability synthesis"
+                    );
+                    None
+                }
+            }
+        },
+    );
+
     let max_jobs = config.max_concurrent_jobs.clamp(1, MAX_WORKER_MAX_JOBS);
     let job_semaphore = Arc::new(Semaphore::new(max_jobs));
     // Bound pending pre-Start connections so silent sockets cannot exhaust file descriptors.
@@ -429,12 +589,13 @@ pub async fn serve_worker_listener(
 
                 let cfg = Arc::clone(&shared_cfg);
                 let ffmpeg = Arc::clone(&real_ffmpeg);
+                let caps = Arc::clone(&worker_capabilities);
                 let jobs = Arc::clone(&job_semaphore);
                 let conn_shutdown = shutdown_rx.clone();
 
                 connections.spawn(async move {
                     let _pending = pending_permit;
-                    handle_connection(stream, cfg, ffmpeg, jobs, conn_shutdown).await;
+                    handle_connection(stream, cfg, ffmpeg, caps, jobs, conn_shutdown).await;
                 });
             }
         }
@@ -488,10 +649,197 @@ async fn send_error_and_close(
     .await;
 }
 
+fn select_intel_node(nodes: &[RenderNode]) -> Option<&Path> {
+    nodes
+        .iter()
+        .find(|n| {
+            n.vendor_id
+                .as_deref()
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(PCI_VENDOR_INTEL))
+        })
+        .map(|n| n.path.as_path())
+}
+
+fn resolve_worker_render_nodes(config: &WorkerConfig) -> Vec<RenderNode> {
+    if let Some(nodes) = &config.render_nodes_override {
+        return nodes.clone();
+    }
+    if let Some(caps) = &config.capabilities_override {
+        return caps
+            .render_nodes
+            .iter()
+            .map(|n| RenderNode {
+                path: PathBuf::from(&n.path),
+                vendor_id: n.vendor_id.clone(),
+            })
+            .collect();
+    }
+    af_hardware::detect_render_nodes()
+}
+
+fn synthesize_fallback_encoders(nodes: &[RenderNode], capability: &Capability) -> Vec<String> {
+    let mut encoders = vec!["libx264".to_string(), "libx265".to_string()];
+
+    let has_vaapi = nodes.iter().any(|n| {
+        let vendor = n
+            .vendor_id
+            .as_deref()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty());
+        matches!(
+            vendor.as_deref(),
+            Some(PCI_VENDOR_INTEL | PCI_VENDOR_AMD) | None
+        )
+    });
+    let has_intel_or_unknown = nodes.iter().any(|n| {
+        n.vendor_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none_or(|v| v.eq_ignore_ascii_case(PCI_VENDOR_INTEL))
+    });
+    let has_nvidia_or_unknown = nodes.iter().any(|n| {
+        n.vendor_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none_or(|v| v.eq_ignore_ascii_case(PCI_VENDOR_NVIDIA))
+    });
+
+    if has_vaapi {
+        for enc in [
+            "h264_vaapi",
+            "hevc_vaapi",
+            "av1_vaapi",
+            "vp9_vaapi",
+            "mjpeg_vaapi",
+            "mpeg2_vaapi",
+        ] {
+            encoders.push(enc.to_string());
+        }
+    }
+    if has_intel_or_unknown {
+        for enc in [
+            "h264_qsv",
+            "hevc_qsv",
+            "av1_qsv",
+            "vp9_qsv",
+            "mjpeg_qsv",
+            "mpeg2_qsv",
+        ] {
+            encoders.push(enc.to_string());
+        }
+    }
+    if has_nvidia_or_unknown {
+        for enc in ["h264_nvenc", "hevc_nvenc", "av1_nvenc"] {
+            encoders.push(enc.to_string());
+        }
+    }
+    if !nodes.is_empty() {
+        for enc in ["h264_vulkan", "hevc_vulkan"] {
+            encoders.push(enc.to_string());
+        }
+    }
+    if !capability.requires_hardware() {
+        if let Some(enc) = capability.required_encoder() {
+            if !encoders.iter().any(|e| e.eq_ignore_ascii_case(enc)) {
+                encoders.push(enc.to_string());
+            }
+        }
+    }
+
+    encoders
+}
+
+fn adapt_worker_args(
+    args: &[String],
+    capability: &Capability,
+    mode: BackendAdaptMode,
+    worker_capabilities: Option<&TranscodeCapabilities>,
+    detected_nodes: &[RenderNode],
+) -> Result<Vec<String>, String> {
+    let fallback_encoders;
+    let (worker_encoders, worker_hw_decoders): (&[String], &[String]) =
+        if let Some(caps) = worker_capabilities {
+            (&caps.encoders, &caps.hw_decoders)
+        } else {
+            fallback_encoders = synthesize_fallback_encoders(detected_nodes, capability);
+            (&fallback_encoders, &[])
+        };
+
+    match argv::plan_backend_adaptation(
+        args,
+        capability,
+        mode,
+        worker_encoders,
+        worker_hw_decoders,
+        detected_nodes,
+    ) {
+        Some(AdaptedTargetBackend::Native) => {
+            if !capability.render_nodes.is_empty() {
+                let Some(selected_node) =
+                    capabilities::select_render_node(capability, detected_nodes)
+                else {
+                    return Err(format!(
+                        "no suitable DRM render node available on worker for {:?}",
+                        capability.hwaccel
+                    ));
+                };
+                let Some(selected_str) = selected_node.to_str() else {
+                    return Err("selected render node path is not valid UTF-8".to_string());
+                };
+                Ok(argv::rewrite_any_render_node(args, selected_str))
+            } else {
+                Ok(args.to_vec())
+            }
+        }
+        Some(AdaptedTargetBackend::Vaapi) => {
+            let vaapi_cap = Capability {
+                hwaccel: Some(HwAccel::Vaapi),
+                required_hwaccels: vec![HwAccel::Vaapi],
+                requires_vaapi_tonemap: capability.requires_vaapi_tonemap,
+                ..Default::default()
+            };
+            let Some(vaapi_node) = capabilities::select_render_node(&vaapi_cap, detected_nodes)
+            else {
+                return Err(format!(
+                    "no suitable VA-API DRM render node available on worker (adaptation mode {})",
+                    mode.as_str()
+                ));
+            };
+            let Some(node_str) = vaapi_node.to_str() else {
+                return Err("selected VA-API render node path is not valid UTF-8".to_string());
+            };
+            argv::adapt_args_for_backend(args, AdaptedTargetBackend::Vaapi, Some(node_str))
+        }
+        Some(AdaptedTargetBackend::Qsv) => {
+            let Some(intel_node) = select_intel_node(detected_nodes) else {
+                return Err(format!(
+                    "no suitable Intel QSV DRM render node available on worker (adaptation mode {})",
+                    mode.as_str()
+                ));
+            };
+            let Some(node_str) = intel_node.to_str() else {
+                return Err("selected Intel QSV render node path is not valid UTF-8".to_string());
+            };
+            argv::adapt_args_for_backend(args, AdaptedTargetBackend::Qsv, Some(node_str))
+        }
+        Some(AdaptedTargetBackend::Cpu) => {
+            argv::adapt_args_for_backend(args, AdaptedTargetBackend::Cpu, None)
+        }
+        None => Err(format!(
+            "no suitable worker backend available for {:?} (adaptation mode {})",
+            capability.hwaccel,
+            mode.as_str()
+        )),
+    }
+}
+
 async fn handle_connection(
     stream: UnixStream,
     config: Arc<WorkerConfig>,
     real_ffmpeg: Arc<PathBuf>,
+    worker_capabilities: Arc<Option<TranscodeCapabilities>>,
     job_semaphore: Arc<Semaphore>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -644,41 +992,88 @@ async fn handle_connection(
         );
     }
 
-    // Infer required hardware capability and rewrite DRM render node if args reference one.
+    // Infer required hardware capability, apply optional backend adaptation, and rewrite DRM render node.
     let capability = argv::required_capability(&start_req.args);
-    let rewritten_args = if !capability.render_nodes.is_empty() {
-        let detected_nodes = match &config.render_nodes_override {
-            Some(nodes) => nodes.clone(),
-            None => af_hardware::detect_render_nodes(),
-        };
-        let Some(selected_node) = capabilities::select_render_node(&capability, &detected_nodes)
-        else {
-            send_error_and_close(
-                &mut writer,
-                ErrorKind::DeviceUnavailable,
-                format!(
-                    "no suitable DRM render node available on worker for {:?}",
-                    capability.hwaccel
-                ),
-                config.frame_write_timeout,
-            )
-            .await;
-            return;
-        };
-        let Some(selected_str) = selected_node.to_str() else {
-            send_error_and_close(
-                &mut writer,
-                ErrorKind::DeviceUnavailable,
-                "selected render node path is not valid UTF-8".to_string(),
-                config.frame_write_timeout,
-            )
-            .await;
-            return;
-        };
-        argv::rewrite_any_render_node(&start_req.args, selected_str)
+    let rewritten_args = if config.adapt_backend_mode == BackendAdaptMode::Off {
+        if !capability.render_nodes.is_empty() {
+            let detected_nodes = resolve_worker_render_nodes(&config);
+            let Some(selected_node) =
+                capabilities::select_render_node(&capability, &detected_nodes)
+            else {
+                send_error_and_close(
+                    &mut writer,
+                    ErrorKind::DeviceUnavailable,
+                    format!(
+                        "no suitable DRM render node available on worker for {:?}",
+                        capability.hwaccel
+                    ),
+                    config.frame_write_timeout,
+                )
+                .await;
+                return;
+            };
+            let Some(selected_str) = selected_node.to_str() else {
+                send_error_and_close(
+                    &mut writer,
+                    ErrorKind::DeviceUnavailable,
+                    "selected render node path is not valid UTF-8".to_string(),
+                    config.frame_write_timeout,
+                )
+                .await;
+                return;
+            };
+            argv::rewrite_any_render_node(&start_req.args, selected_str)
+        } else {
+            start_req.args.clone()
+        }
     } else {
-        start_req.args.clone()
+        let detected_nodes = resolve_worker_render_nodes(&config);
+        match adapt_worker_args(
+            &start_req.args,
+            &capability,
+            config.adapt_backend_mode,
+            worker_capabilities.as_ref().as_ref(),
+            &detected_nodes,
+        ) {
+            Ok(args) => args,
+            Err(reason) => {
+                send_error_and_close(
+                    &mut writer,
+                    ErrorKind::DeviceUnavailable,
+                    reason,
+                    config.frame_write_timeout,
+                )
+                .await;
+                return;
+            }
+        }
     };
+
+    // Optional Vulkan libplacebo scale-before-tonemap optimization.
+    let rewritten_args = if config.optimize_vulkan_tonemap {
+        argv::optimize_vulkan_tonemap_args(&rewritten_args)
+    } else {
+        rewritten_args
+    };
+
+    // Optional worker-local FFmpeg thread cap.
+    let rewritten_args = if let Some(max_threads) = config.ffmpeg_max_threads {
+        argv::apply_ffmpeg_thread_cap(&rewritten_args, max_threads)
+    } else {
+        rewritten_args
+    };
+
+    // Defense-in-depth re-validation after argument rewrites.
+    if let Err(reason) = argv::validate_worker_args(&rewritten_args) {
+        send_error_and_close(
+            &mut writer,
+            ErrorKind::InvalidRequest,
+            format!("adapted worker arguments failed safety validation: {reason}"),
+            config.frame_write_timeout,
+        )
+        .await;
+        return;
+    }
 
     // Enforce local-only `-protocol_whitelist` on every input before spawning real `ffmpeg`.
     let final_args = argv::inject_local_protocol_whitelist(&rewritten_args);
@@ -996,4 +1391,68 @@ async fn handle_connection(
         let _ = writer_task.await;
     }
     drop(job_permit);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn unique_worker_test_dir(tag: &str) -> PathBuf {
+        let seq = TEMP_SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = PathBuf::from(format!("/tmp/af-wtest-{tag}-{}-{seq}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .expect("create test dir");
+        dir
+    }
+
+    #[test]
+    fn ensure_safe_mesa_shader_cache_dir_creates_clean_dir_and_refuses_symlinks_and_bounds() {
+        let dir = unique_worker_test_dir("mesa-cache");
+
+        // 1. Clean nested path is created and validated.
+        let clean = dir.join("nested/shader/cache");
+        let canonical = ensure_safe_mesa_shader_cache_dir(&clean).expect("create clean cache dir");
+        assert!(clean.is_dir());
+        assert_eq!(canonical, fs::canonicalize(&clean).unwrap());
+
+        // 2. Symlinked leaf path is refused.
+        let target_dir = dir.join("real-target");
+        fs::create_dir(&target_dir).unwrap();
+        let symlink_leaf = dir.join("sym-leaf");
+        symlink(&target_dir, &symlink_leaf).unwrap();
+        assert!(
+            ensure_safe_mesa_shader_cache_dir(&symlink_leaf).is_err(),
+            "symlinked leaf cache path must be refused"
+        );
+
+        // 3. Symlinked ancestor parent is refused and MUST NOT create child dirs through the symlink.
+        let symlink_child = symlink_leaf.join("should-not-exist/deep");
+        assert!(
+            ensure_safe_mesa_shader_cache_dir(&symlink_child).is_err(),
+            "symlinked parent component must be refused"
+        );
+        assert!(
+            !target_dir.join("should-not-exist").exists(),
+            "must never create directories through a symlinked parent"
+        );
+
+        // 4. Root `/`, relative paths, `..` traversal, regular file component, and >4096-byte paths are refused.
+        assert!(ensure_safe_mesa_shader_cache_dir(Path::new("/")).is_err());
+        assert!(ensure_safe_mesa_shader_cache_dir(Path::new("relative/cache")).is_err());
+        assert!(ensure_safe_mesa_shader_cache_dir(&dir.join("../escape")).is_err());
+
+        let regular_file = dir.join("not-a-dir");
+        fs::write(&regular_file, b"x").unwrap();
+        assert!(ensure_safe_mesa_shader_cache_dir(&regular_file.join("sub")).is_err());
+
+        let long_path = PathBuf::from(format!("/{}", "a".repeat(MAX_MESA_SHADER_CACHE_DIR_BYTES)));
+        assert!(ensure_safe_mesa_shader_cache_dir(&long_path).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

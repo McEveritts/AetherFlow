@@ -46,6 +46,27 @@ pub const ENV_WORKER_SOCKET: &str = "AF_TRANSCODE_WORKER_SOCK";
 /// Environment variable overriding maximum concurrent worker jobs (`1..=64`).
 pub const ENV_WORKER_MAX_JOBS: &str = "AF_TRANSCODE_WORKER_MAX_JOBS";
 
+/// Environment variable capping per-job worker `ffmpeg` threads (`1..=128`; `0`/unset disables cap).
+pub const ENV_WORKER_FFMPEG_THREADS: &str = "AF_TRANSCODE_FFMPEG_THREADS";
+
+/// Minimum explicit positive thread count for `ENV_WORKER_FFMPEG_THREADS`.
+pub const MIN_FFMPEG_THREADS: usize = 1;
+
+/// Hard upper bound for `ENV_WORKER_FFMPEG_THREADS`.
+pub const MAX_FFMPEG_THREADS: usize = 128;
+
+/// Environment variable configuring worker backend adaptation (`off`, `gpu`, `prefer_qsv`, `all`).
+pub const ENV_WORKER_ADAPT_BACKEND: &str = "AF_TRANSCODE_ADAPT_BACKEND";
+
+/// Environment variable enabling worker-side Vulkan `libplacebo` scale-before-tonemap optimization.
+pub const ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP: &str = "AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP";
+
+/// Environment variable configuring cluster transcode dispatch policy (consumed by dispatcher).
+pub const ENV_DISPATCH_POLICY: &str = "AF_TRANSCODE_DISPATCH_POLICY";
+
+/// Environment variable capping local concurrent transcode jobs (`1..=64`, consumed by dispatcher).
+pub const ENV_LOCAL_MAX_JOBS: &str = "AF_TRANSCODE_LOCAL_MAX_JOBS";
+
 /// Environment variable overriding the worker Unix socket permissions in octal (e.g. `0660`).
 pub const ENV_WORKER_SOCKET_MODE: &str = "AF_TRANSCODE_WORKER_SOCKET_MODE";
 
@@ -106,7 +127,61 @@ pub const WORKER_BASELINE_ENV_KEYS: &[&str] = &[
     "LIBVA_DRIVER_NAME",
     "LIBVA_DRIVERS_PATH",
     "MESA_SHADER_CACHE_DIR",
+    "MESA_SHADER_CACHE_MAX_SIZE",
+    "MESA_SHADER_CACHE_DISABLE",
+    "RUSTICL_ENABLE",
+    "RADV_PERFTEST",
+    "ANV_VIDEO_DECODE",
+    "VK_ICD_FILENAMES",
+    "VK_DRIVER_FILES",
+    "OCL_ICD_VENDORS",
+    "AMD_VULKAN_ICD",
+    "ONEVPL_PRIORITY_PATH",
+    "MFX_HOME",
 ];
+
+/// Worker-local hardware/software backend adaptation policy.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendAdaptMode {
+    #[default]
+    Off,
+    Gpu,
+    PreferQsv,
+    All,
+}
+
+impl BackendAdaptMode {
+    /// Returns the canonical snake_case identifier for this adaptation mode.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Gpu => "gpu",
+            Self::PreferQsv => "prefer_qsv",
+            Self::All => "all",
+        }
+    }
+
+    /// Parses a trimmed ASCII case-insensitive mode name (accepting `"cross_gpu"` for [`Self::Gpu`]
+    /// and `"gpu_and_cpu"` for [`Self::All`]).
+    pub fn parse_str(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "gpu" | "cross_gpu" => Some(Self::Gpu),
+            "prefer_qsv" => Some(Self::PreferQsv),
+            "all" | "gpu_and_cpu" => Some(Self::All),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for BackendAdaptMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Configuration and validation errors.
 #[derive(Debug, Error)]
@@ -359,16 +434,20 @@ pub fn configured_handshake_timeout() -> Duration {
         .unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT)
 }
 
-fn resolve_worker_max_jobs(env_override: Option<&str>, env_file: &Path) -> usize {
-    let raw = env_override
+fn resolve_env_or_file(env_override: Option<&str>, env_file: &Path, key: &str) -> Option<String> {
+    env_override
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .or_else(|| {
-            read_transcode_env_var_from_path(env_file, ENV_WORKER_MAX_JOBS)
+            read_transcode_env_var_from_path(env_file, key)
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-        });
+        })
+}
+
+fn resolve_worker_max_jobs(env_override: Option<&str>, env_file: &Path) -> usize {
+    let raw = resolve_env_or_file(env_override, env_file, ENV_WORKER_MAX_JOBS);
     raw.and_then(|value| value.parse::<usize>().ok())
         .map(|n| n.clamp(1, MAX_WORKER_MAX_JOBS))
         .unwrap_or(DEFAULT_WORKER_MAX_JOBS)
@@ -387,6 +466,108 @@ pub fn configured_worker_max_jobs_with_env_file(env_file: &Path) -> usize {
 /// (clamped `1..=64`).
 pub fn configured_worker_max_jobs() -> usize {
     configured_worker_max_jobs_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
+}
+
+fn resolve_worker_ffmpeg_threads(env_override: Option<&str>, env_file: &Path) -> Option<usize> {
+    resolve_env_or_file(env_override, env_file, ENV_WORKER_FFMPEG_THREADS)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&n| n >= MIN_FFMPEG_THREADS)
+        .map(|n| n.clamp(MIN_FFMPEG_THREADS, MAX_FFMPEG_THREADS))
+}
+
+/// Resolves the configured per-job worker `ffmpeg` thread cap from `AF_TRANSCODE_FFMPEG_THREADS`,
+/// falling back to the given dedicated transcode env file (clamped `1..=128`; `None` when unset/empty/0/invalid).
+pub fn configured_worker_ffmpeg_threads_with_env_file(env_file: &Path) -> Option<usize> {
+    let env_val = env::var(ENV_WORKER_FFMPEG_THREADS).ok();
+    resolve_worker_ffmpeg_threads(env_val.as_deref(), env_file)
+}
+
+/// Resolves the configured per-job worker `ffmpeg` thread cap from `AF_TRANSCODE_FFMPEG_THREADS`,
+/// falling back to `/etc/aetherflow/transcode.env` (clamped `1..=128`; `None` when unset/empty/0/invalid).
+pub fn configured_worker_ffmpeg_threads() -> Option<usize> {
+    configured_worker_ffmpeg_threads_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
+}
+
+fn resolve_worker_adapt_backend(env_override: Option<&str>, env_file: &Path) -> BackendAdaptMode {
+    resolve_env_or_file(env_override, env_file, ENV_WORKER_ADAPT_BACKEND)
+        .as_deref()
+        .and_then(BackendAdaptMode::parse_str)
+        .unwrap_or(BackendAdaptMode::Off)
+}
+
+/// Resolves the configured worker backend adaptation policy from `AF_TRANSCODE_ADAPT_BACKEND`,
+/// falling back to the given dedicated transcode env file and finally [`BackendAdaptMode::Off`].
+pub fn configured_worker_adapt_backend_with_env_file(env_file: &Path) -> BackendAdaptMode {
+    let env_val = env::var(ENV_WORKER_ADAPT_BACKEND).ok();
+    resolve_worker_adapt_backend(env_val.as_deref(), env_file)
+}
+
+/// Resolves the configured worker backend adaptation policy from `AF_TRANSCODE_ADAPT_BACKEND`,
+/// falling back to `/etc/aetherflow/transcode.env` and finally [`BackendAdaptMode::Off`].
+pub fn configured_worker_adapt_backend() -> BackendAdaptMode {
+    configured_worker_adapt_backend_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
+}
+
+fn resolve_worker_optimize_vulkan_tonemap(env_override: Option<&str>, env_file: &Path) -> bool {
+    resolve_env_or_file(env_override, env_file, ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP)
+        .as_deref()
+        .is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+/// Resolves whether Vulkan `libplacebo` scale-before-tonemap optimization is enabled from
+/// `AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP`, falling back to the given dedicated transcode env file.
+pub fn configured_worker_optimize_vulkan_tonemap_with_env_file(env_file: &Path) -> bool {
+    let env_val = env::var(ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP).ok();
+    resolve_worker_optimize_vulkan_tonemap(env_val.as_deref(), env_file)
+}
+
+/// Resolves whether Vulkan `libplacebo` scale-before-tonemap optimization is enabled from
+/// `AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP`, falling back to `/etc/aetherflow/transcode.env`.
+pub fn configured_worker_optimize_vulkan_tonemap() -> bool {
+    configured_worker_optimize_vulkan_tonemap_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
+}
+
+fn resolve_dispatch_policy_raw(env_override: Option<&str>, env_file: &Path) -> Option<String> {
+    resolve_env_or_file(env_override, env_file, ENV_DISPATCH_POLICY)
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+}
+
+/// Resolves the raw trimmed lowercase dispatch policy from `AF_TRANSCODE_DISPATCH_POLICY`,
+/// falling back to the given dedicated transcode env file.
+pub fn configured_dispatch_policy_raw_with_env_file(env_file: &Path) -> Option<String> {
+    let env_val = env::var(ENV_DISPATCH_POLICY).ok();
+    resolve_dispatch_policy_raw(env_val.as_deref(), env_file)
+}
+
+/// Resolves the raw trimmed lowercase dispatch policy from `AF_TRANSCODE_DISPATCH_POLICY`,
+/// falling back to `/etc/aetherflow/transcode.env`.
+pub fn configured_dispatch_policy_raw() -> Option<String> {
+    configured_dispatch_policy_raw_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
+}
+
+fn resolve_local_max_jobs(env_override: Option<&str>, env_file: &Path) -> Option<usize> {
+    resolve_env_or_file(env_override, env_file, ENV_LOCAL_MAX_JOBS)
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|n| n.clamp(1, MAX_WORKER_MAX_JOBS))
+}
+
+/// Resolves the configured local concurrent transcode job cap from `AF_TRANSCODE_LOCAL_MAX_JOBS`,
+/// falling back to the given dedicated transcode env file (clamped `1..=64`).
+pub fn configured_local_max_jobs_with_env_file(env_file: &Path) -> Option<usize> {
+    let env_val = env::var(ENV_LOCAL_MAX_JOBS).ok();
+    resolve_local_max_jobs(env_val.as_deref(), env_file)
+}
+
+/// Resolves the configured local concurrent transcode job cap from `AF_TRANSCODE_LOCAL_MAX_JOBS`,
+/// falling back to `/etc/aetherflow/transcode.env` (clamped `1..=64`).
+pub fn configured_local_max_jobs() -> Option<usize> {
+    configured_local_max_jobs_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
 }
 
 /// Resolves the configured worker socket mode (octal, default `0o660`).
@@ -961,6 +1142,200 @@ UNQUOTED_HASH=/opt/dir#1/ffmpeg
 
         // Symlinked fallback safe_cwd itself is rejected.
         assert!(resolve_worker_child_cwd(&allowed_sub, &escape_link, &[]).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worker_baseline_gpu_env_keys_are_rejected_in_caller_allowlist() {
+        assert_eq!(
+            ALLOWED_ENV_KEYS,
+            &[
+                "TMPDIR",
+                "TZ",
+                "LANG",
+                "LC_ALL",
+                "LC_CTYPE",
+                "FONTCONFIG_FILE",
+                "FONTCONFIG_PATH",
+            ]
+        );
+
+        let gpu_and_cache_keys = [
+            "MESA_SHADER_CACHE_DIR",
+            "MESA_SHADER_CACHE_MAX_SIZE",
+            "MESA_SHADER_CACHE_DISABLE",
+            "RUSTICL_ENABLE",
+            "RADV_PERFTEST",
+            "ANV_VIDEO_DECODE",
+            "VK_ICD_FILENAMES",
+            "VK_DRIVER_FILES",
+            "OCL_ICD_VENDORS",
+            "AMD_VULKAN_ICD",
+            "ONEVPL_PRIORITY_PATH",
+            "MFX_HOME",
+        ];
+
+        for key in gpu_and_cache_keys {
+            assert!(
+                WORKER_BASELINE_ENV_KEYS.contains(&key),
+                "{key} must be present in WORKER_BASELINE_ENV_KEYS"
+            );
+            assert!(
+                !is_allowed_env_key(key),
+                "{key} must NOT be in caller ALLOWED_ENV_KEYS"
+            );
+            assert!(
+                validate_env_entry(key, "/tmp/safe").is_err(),
+                "{key} must be rejected by validate_env_entry"
+            );
+        }
+    }
+
+    #[test]
+    fn backend_adapt_mode_parse_aliases_and_serde() {
+        assert_eq!(BackendAdaptMode::default(), BackendAdaptMode::Off);
+        assert_eq!(BackendAdaptMode::Off.as_str(), "off");
+        assert_eq!(BackendAdaptMode::Gpu.as_str(), "gpu");
+        assert_eq!(BackendAdaptMode::PreferQsv.as_str(), "prefer_qsv");
+        assert_eq!(BackendAdaptMode::All.as_str(), "all");
+
+        assert_eq!(
+            BackendAdaptMode::parse_str("off"),
+            Some(BackendAdaptMode::Off)
+        );
+        assert_eq!(
+            BackendAdaptMode::parse_str(" OFF "),
+            Some(BackendAdaptMode::Off)
+        );
+        assert_eq!(
+            BackendAdaptMode::parse_str("gpu"),
+            Some(BackendAdaptMode::Gpu)
+        );
+        assert_eq!(
+            BackendAdaptMode::parse_str("Cross_GPU"),
+            Some(BackendAdaptMode::Gpu)
+        );
+        assert_eq!(
+            BackendAdaptMode::parse_str("prefer_qsv"),
+            Some(BackendAdaptMode::PreferQsv)
+        );
+        assert_eq!(
+            BackendAdaptMode::parse_str("all"),
+            Some(BackendAdaptMode::All)
+        );
+        assert_eq!(
+            BackendAdaptMode::parse_str(" GPU_AND_CPU "),
+            Some(BackendAdaptMode::All)
+        );
+        assert_eq!(BackendAdaptMode::parse_str("unknown"), None);
+        assert_eq!(BackendAdaptMode::parse_str(""), None);
+
+        for mode in [
+            BackendAdaptMode::Off,
+            BackendAdaptMode::Gpu,
+            BackendAdaptMode::PreferQsv,
+            BackendAdaptMode::All,
+        ] {
+            let json = serde_json::to_string(&mode).expect("serialize mode");
+            assert_eq!(json, format!("\"{}\"", mode.as_str()));
+            let parsed: BackendAdaptMode = serde_json::from_str(&json).expect("deserialize mode");
+            assert_eq!(parsed, mode);
+        }
+    }
+
+    #[test]
+    fn new_transcode_config_knobs_parse_clamp_and_fallback() {
+        let dir = unique_temp_dir("newknobs");
+        let env_path = dir.join("transcode.env");
+        fs::write(
+            &env_path,
+            r#"
+AF_TRANSCODE_FFMPEG_THREADS=6
+AF_TRANSCODE_ADAPT_BACKEND=cross_gpu
+AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=yes
+AF_TRANSCODE_DISPATCH_POLICY="  Prefer_Remote  "
+AF_TRANSCODE_LOCAL_MAX_JOBS=3
+"#,
+        )
+        .expect("write env file");
+        fs::set_permissions(&env_path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        // File fallbacks
+        assert_eq!(resolve_worker_ffmpeg_threads(None, &env_path), Some(6));
+        assert_eq!(
+            resolve_worker_adapt_backend(None, &env_path),
+            BackendAdaptMode::Gpu
+        );
+        assert!(resolve_worker_optimize_vulkan_tonemap(None, &env_path));
+        assert_eq!(
+            resolve_dispatch_policy_raw(None, &env_path).as_deref(),
+            Some("prefer_remote")
+        );
+        assert_eq!(resolve_local_max_jobs(None, &env_path), Some(3));
+
+        // Process env overrides & clamping
+        assert_eq!(resolve_worker_ffmpeg_threads(Some("0"), &env_path), None);
+        assert_eq!(resolve_worker_ffmpeg_threads(Some("abc"), &env_path), None);
+        assert_eq!(
+            resolve_worker_ffmpeg_threads(Some("512"), &env_path),
+            Some(MAX_FFMPEG_THREADS)
+        );
+        assert_eq!(resolve_worker_ffmpeg_threads(Some("1"), &env_path), Some(1));
+
+        assert_eq!(
+            resolve_worker_adapt_backend(Some("prefer_qsv"), &env_path),
+            BackendAdaptMode::PreferQsv
+        );
+        assert_eq!(
+            resolve_worker_adapt_backend(Some("gpu_and_cpu"), &env_path),
+            BackendAdaptMode::All
+        );
+        assert_eq!(
+            resolve_worker_adapt_backend(Some("bogus"), &env_path),
+            BackendAdaptMode::Off
+        );
+
+        assert!(resolve_worker_optimize_vulkan_tonemap(Some("1"), &env_path));
+        assert!(resolve_worker_optimize_vulkan_tonemap(
+            Some("TRUE"),
+            &env_path
+        ));
+        assert!(resolve_worker_optimize_vulkan_tonemap(
+            Some("on"),
+            &env_path
+        ));
+        assert!(!resolve_worker_optimize_vulkan_tonemap(
+            Some("false"),
+            &env_path
+        ));
+        assert!(!resolve_worker_optimize_vulkan_tonemap(
+            Some("0"),
+            &env_path
+        ));
+
+        assert_eq!(
+            resolve_dispatch_policy_raw(Some("LOCAL_ONLY"), &env_path).as_deref(),
+            Some("local_only")
+        );
+
+        assert_eq!(resolve_local_max_jobs(Some("0"), &env_path), Some(1));
+        assert_eq!(
+            resolve_local_max_jobs(Some("200"), &env_path),
+            Some(MAX_WORKER_MAX_JOBS)
+        );
+        assert_eq!(resolve_local_max_jobs(Some("nope"), &env_path), None);
+
+        // Missing file -> safe defaults
+        let missing = dir.join("missing.env");
+        assert_eq!(resolve_worker_ffmpeg_threads(None, &missing), None);
+        assert_eq!(
+            resolve_worker_adapt_backend(None, &missing),
+            BackendAdaptMode::Off
+        );
+        assert!(!resolve_worker_optimize_vulkan_tonemap(None, &missing));
+        assert_eq!(resolve_dispatch_policy_raw(None, &missing), None);
+        assert_eq!(resolve_local_max_jobs(None, &missing), None);
 
         let _ = fs::remove_dir_all(&dir);
     }

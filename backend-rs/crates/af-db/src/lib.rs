@@ -810,10 +810,27 @@ pub fn init_db() -> anyhow::Result<()> {
         "Peer grant direction metadata migration v27 failed"
     );
 
+    migrate(
+        &conn,
+        28,
+        "Add distributed transcode dispatch policy settings",
+        peers::PEER_TRANSCODE_SETTINGS_MIGRATION_28_SQL,
+    )?;
+    let peer_transcode_settings_migration: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = 28",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        peer_transcode_settings_migration == 1,
+        "Distributed transcode dispatch policy settings migration v28 failed"
+    );
+
     ensure_security_schema_invariants(&conn)?;
     ensure_notification_schema_invariants(&conn)?;
     ensure_pending_actions_schema_invariants(&conn)?;
     peers::ensure_peer_grant_schema_invariants(&conn)?;
+    peers::ensure_transcode_settings_schema_invariants(&conn)?;
     // Streaming owns version 24. Reconcile MediaFlow independently of that epoch.
     ensure_mediaflow_schema_invariants(&conn)?;
     conn.execute_batch(ACCOUNT_STORAGE_CLEANUP_SCHEMA)?;

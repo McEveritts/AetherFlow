@@ -68,6 +68,9 @@ pub const DEFAULT_JELLYFIN_TMP_DIR: &str = "/var/cache/jellyfin/af-tmp";
 pub const DEFAULT_JELLYFIN_CACHE_DIR: &str = "/var/cache/jellyfin";
 pub const DEFAULT_DISPATCHER_RUNTIME_DIR: &str = "/run/aetherflow-transcode";
 pub const DEFAULT_WORKER_RUNTIME_DIR: &str = "/run/aetherflow-transcode-worker";
+pub const DEFAULT_WORKER_CACHE_DIR: &str = "/var/cache/aetherflow-transcode-worker";
+pub const DEFAULT_MESA_SHADER_CACHE_DIR: &str = "/var/cache/aetherflow-transcode-worker/mesa-cache";
+pub const DEFAULT_MESA_SHADER_CACHE_MAX_SIZE: &str = "512M";
 pub const DEFAULT_TRANSCODE_ENV_FILE: &str = "/etc/aetherflow/transcode.env";
 pub const PEER_TRANSCODE_WORKER_UNIT: &str = "af-transcode-worker.service";
 pub const JELLYFIN_TRANSCODE_DROPIN_NAME: &str = "20-aetherflow-transcode.conf";
@@ -1093,7 +1096,32 @@ fn render_default_transcode_env_file() -> &'static str {
      # AF_TRANSCODE_REAL_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg\n\
      #\n\
      # Override the maximum concurrent transcode jobs allowed on this worker (1..=64):\n\
-     # AF_TRANSCODE_WORKER_MAX_JOBS=8\n"
+     # AF_TRANSCODE_WORKER_MAX_JOBS=8\n\
+     #\n\
+     # Optional per-job software/filter thread cap (e.g. 4-8 on multi-NUMA hosts):\n\
+     # AF_TRANSCODE_FFMPEG_THREADS=\n\
+     #\n\
+     # Cross-vendor backend adaptation mode (off, gpu, prefer_qsv, or all for QSV<->VA-API or CPU overflow):\n\
+     # AF_TRANSCODE_ADAPT_BACKEND=off\n\
+     #\n\
+     # Scale via scale_vaapi before Vulkan libplacebo HDR tone-mapping:\n\
+     # AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=false\n\
+     #\n\
+     # Enable Mesa Rusticl OpenCL for AMD HDR tone-mapping on workers:\n\
+     # RUSTICL_ENABLE=radeonsi\n\
+     #\n\
+     # Override host-local Mesa shader cache path or max size on workers:\n\
+     # MESA_SHADER_CACHE_DIR=/var/cache/aetherflow-transcode-worker/mesa-cache\n\
+     # MESA_SHADER_CACHE_MAX_SIZE=512M\n\
+     #\n\
+     # Worker handshake timeout in milliseconds (raise e.g. to 3000 on high-RTT WAN links):\n\
+     # AF_TRANSCODE_HANDSHAKE_TIMEOUT_MS=2000\n\
+     #\n\
+     # Controller dispatch policy (remote_first, local_first, or balanced):\n\
+     # AF_TRANSCODE_DISPATCH_POLICY=remote_first\n\
+     #\n\
+     # Local concurrent job cap for local_first / balanced dispatch:\n\
+     # AF_TRANSCODE_LOCAL_MAX_JOBS=2\n"
 }
 
 fn render_api_transcode_dropin(transcode_env_path: &str) -> String {
@@ -1164,7 +1192,11 @@ fn render_worker_service_unit(
          SupplementaryGroups=render video\n\
          RuntimeDirectory=aetherflow-transcode-worker\n\
          RuntimeDirectoryMode=0750\n\
+         CacheDirectory=aetherflow-transcode-worker\n\
+         CacheDirectoryMode=0750\n\
          WorkingDirectory={DEFAULT_WORKER_RUNTIME_DIR}\n\
+         Environment=MESA_SHADER_CACHE_DIR={DEFAULT_MESA_SHADER_CACHE_DIR}\n\
+         Environment=MESA_SHADER_CACHE_MAX_SIZE={DEFAULT_MESA_SHADER_CACHE_MAX_SIZE}\n\
          EnvironmentFile=-{escaped_env}\n\
          Environment=AF_TRANSCODE_WORKER_SOCK={DEFAULT_WORKER_SOCKET_PATH}\n\
          Environment=AF_TRANSCODE_WORKER_SOCKET_MODE={DEFAULT_WORKER_SOCKET_MODE_STR}\n\
@@ -1179,6 +1211,7 @@ fn render_worker_service_unit(
          DevicePolicy=closed\n\
          DeviceAllow=char-drm rw\n\
          DeviceAllow=/dev/dri rw\n\
+         DeviceAllow=/dev/kfd rw\n\
          DeviceAllow=char-nvidia-frontend rw\n\
          DeviceAllow=char-nvidia-uvm rw\n\
          DeviceAllow=char-nvidia-caps rw\n\

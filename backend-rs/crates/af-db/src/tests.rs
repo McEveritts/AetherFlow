@@ -212,7 +212,7 @@ fn test_round3_64hex_aes_key_schema24_and_revoked_lineage_epoch_mfa() {
     let max_ver: i64 = conn
         .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(max_ver, 27, "MAX(schema_versions.version) must be 27");
+    assert_eq!(max_ver, 28, "MAX(schema_versions.version) must be 28");
 
     conn.execute(
         "INSERT INTO users (id, username, role) VALUES (777, 'r3_db_user', 'user')",
@@ -933,6 +933,10 @@ fn expected_peer_table_columns() -> &'static [(&'static str, &'static [&'static 
                 "ran_locally",
             ],
         ),
+        (
+            "transcode_dispatch_settings",
+            &["id", "dispatch_policy", "local_max_jobs", "updated_at"],
+        ),
     ]
 }
 
@@ -950,19 +954,19 @@ fn migration_v26_fresh_db_creates_peer_tables_and_omits_legacy_cluster_tables() 
     let db_file = dir.0.join("fresh.sqlite");
     env::set_var("DB_PATH", &db_file);
 
-    init_db().expect("fresh init_db must apply migrations through 27");
+    init_db().expect("fresh init_db must apply migrations through 28");
 
     {
         let conn = get_conn().unwrap();
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_ver, 27);
+        assert_eq!(max_ver, 28);
 
         let version_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version_count, 27, "versions 1..=27 must all be recorded");
+        assert_eq!(version_count, 28, "versions 1..=28 must all be recorded");
 
         let v25_desc: String = conn
             .query_row(
@@ -991,7 +995,19 @@ fn migration_v26_fresh_db_creates_peer_tables_and_omits_legacy_cluster_tables() 
             .unwrap();
         assert_eq!(v27_desc, "Peer grant direction metadata");
 
-        for expected_ver in [5, 19, 20, 21, 22, 23, 24, 25, 26, 27] {
+        let v28_desc: String = conn
+            .query_row(
+                "SELECT description FROM schema_versions WHERE version = 28",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            v28_desc,
+            "Add distributed transcode dispatch policy settings"
+        );
+
+        for expected_ver in [5, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28] {
             let count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM schema_versions WHERE version = ?1",
@@ -1035,7 +1051,7 @@ fn migration_v26_fresh_db_creates_peer_tables_and_omits_legacy_cluster_tables() 
             );
         }
 
-        // Verify exact column layout for all nine peer clustering tables
+        // Verify exact column layout for all peer clustering & distributed transcode tables
         for (table, expected_cols) in expected_peer_table_columns() {
             let actual = table_columns(&conn, table);
             let expected: Vec<String> = expected_cols.iter().map(|c| (*c).to_string()).collect();
@@ -1066,7 +1082,7 @@ fn migration_v26_fresh_db_creates_peer_tables_and_omits_legacy_cluster_tables() 
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_ver, 27);
+        assert_eq!(max_ver, 28);
         assert_no_legacy_cluster_objects(&conn);
         let account_type: String = conn
             .query_row(
@@ -1098,6 +1114,7 @@ fn migration_v25_preserves_legacy_v24_rows_and_v26_owns_legacy_deletion() {
         let conn = get_conn().unwrap();
         conn.execute_batch(
             "PRAGMA foreign_keys = OFF;
+             DROP TABLE IF EXISTS transcode_dispatch_settings;
              DROP TABLE transcode_jobs;
              DROP TABLE transcode_workers;
              DROP TABLE peer_mounts;
@@ -1110,7 +1127,7 @@ fn migration_v25_preserves_legacy_v24_rows_and_v26_owns_legacy_deletion() {
              DROP TABLE peer_grants;
              DROP TABLE peer_links;
              DROP TABLE peer_identity;
-             DELETE FROM schema_versions WHERE version IN (25, 26, 27);
+             DELETE FROM schema_versions WHERE version IN (25, 26, 27, 28);
              DROP TABLE users;
              CREATE TABLE users (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1223,15 +1240,16 @@ fn migration_v25_preserves_legacy_v24_rows_and_v26_owns_legacy_deletion() {
         .unwrap();
     }
 
-    // Now run init_db(): migration 26 owns legacy-table deletion and migration 27 adds grant direction tables
-    init_db().expect("upgrading v25 database to v27 via init_db must succeed");
+    // Now run init_db(): migration 26 owns legacy-table deletion, migration 27 adds grant direction
+    // tables, and migration 28 adds transcode dispatch settings
+    init_db().expect("upgrading v25 database to v28 via init_db must succeed");
 
     for _ in 0..2 {
         let conn = get_conn().unwrap();
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_ver, 27);
+        assert_eq!(max_ver, 28);
 
         let v25_rows: i64 = conn
             .query_row(
@@ -1295,16 +1313,16 @@ fn migration_v25_preserves_legacy_v24_rows_and_v26_owns_legacy_deletion() {
         init_db().expect("repeated restart init_db on v26 database must be idempotent");
     }
 
-    // Part 2: Direct v24 -> v27 upgrade in a single init_db() call
-    let direct_db = dir.0.join("direct_v24_to_v27.sqlite");
+    // Part 2: Direct v24 -> v28 upgrade in a single init_db() call
+    let direct_db = dir.0.join("direct_v24_to_v28.sqlite");
     prepare_v24_snapshot(&direct_db);
-    init_db().expect("direct v24 -> v27 upgrade via init_db must succeed");
+    init_db().expect("direct v24 -> v28 upgrade via init_db must succeed");
     {
         let conn = get_conn().unwrap();
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_ver, 27);
+        assert_eq!(max_ver, 28);
         assert_no_legacy_cluster_objects(&conn);
         for (table, _) in expected_peer_table_columns() {
             assert!(
@@ -1468,10 +1486,11 @@ fn migration_v26_upgrades_real_v25_legacy_fixture_and_preserves_peer_auth_and_ap
     {
         let conn = get_conn().unwrap();
         conn.execute_batch(
-            "DROP TABLE IF EXISTS peer_grant_epochs;
+            "DROP TABLE IF EXISTS transcode_dispatch_settings;
+             DROP TABLE IF EXISTS peer_grant_epochs;
              DROP TABLE IF EXISTS peer_received_grant_cleanups;
              DROP TABLE IF EXISTS peer_received_grants;
-             DELETE FROM schema_versions WHERE version IN (26, 27);",
+             DELETE FROM schema_versions WHERE version IN (26, 27, 28);",
         )
         .unwrap();
         seed_legacy_master_worker_tables(&conn);
@@ -1572,7 +1591,7 @@ fn migration_v26_upgrades_real_v25_legacy_fixture_and_preserves_peer_auth_and_ap
         ));
     }
 
-    // Upgrade migration-25 fixture -> migration 27, then run two more restarts (repeated init)
+    // Upgrade migration-25 fixture -> migration 28, then run two more restarts (repeated init)
     for pass in 0..3 {
         init_db().unwrap_or_else(|e| panic!("init_db pass {pass} failed: {e}"));
         let conn = get_conn().unwrap();
@@ -1580,14 +1599,14 @@ fn migration_v26_upgrades_real_v25_legacy_fixture_and_preserves_peer_auth_and_ap
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_ver, 27);
+        assert_eq!(max_ver, 28);
 
         let total_versions: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            total_versions, 27,
-            "all prior migrations 1..=25 plus 26 and 27 must be preserved"
+            total_versions, 28,
+            "all prior migrations 1..=25 plus 26, 27, and 28 must be preserved"
         );
         let v26_desc: String = conn
             .query_row(
@@ -1605,6 +1624,17 @@ fn migration_v26_upgrades_real_v25_legacy_fixture_and_preserves_peer_auth_and_ap
             )
             .unwrap();
         assert_eq!(v27_desc, "Peer grant direction metadata");
+        let v28_desc: String = conn
+            .query_row(
+                "SELECT description FROM schema_versions WHERE version = 28",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            v28_desc,
+            "Add distributed transcode dispatch policy settings"
+        );
 
         // All legacy master/worker tables and indexes must be removed
         assert_no_legacy_cluster_objects(&conn);
@@ -2009,10 +2039,11 @@ fn migration_v27_upgrades_v26_fixture_preserving_existing_grants_and_separating_
     {
         let conn = get_conn().unwrap();
         conn.execute_batch(
-            "DROP TABLE IF EXISTS peer_grant_epochs;
+            "DROP TABLE IF EXISTS transcode_dispatch_settings;
+             DROP TABLE IF EXISTS peer_grant_epochs;
              DROP TABLE IF EXISTS peer_received_grant_cleanups;
              DROP TABLE IF EXISTS peer_received_grants;
-             DELETE FROM schema_versions WHERE version = 27;",
+             DELETE FROM schema_versions WHERE version IN (27, 28);",
         )
         .unwrap();
         peers::insert_peer_link(&conn, &seeded_link).unwrap();
@@ -2023,13 +2054,13 @@ fn migration_v27_upgrades_v26_fixture_preserving_existing_grants_and_separating_
         assert_eq!(pre_max, 26);
     }
 
-    init_db().expect("v26 -> v27 upgrade must succeed");
+    init_db().expect("v26 -> v28 upgrade must succeed");
     {
         let conn = get_conn().unwrap();
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_ver, 27);
+        assert_eq!(max_ver, 28);
         assert!(sqlite_object_exists(&conn, "table", "peer_received_grants"));
         assert!(sqlite_object_exists(
             &conn,
@@ -2037,6 +2068,11 @@ fn migration_v27_upgrades_v26_fixture_preserving_existing_grants_and_separating_
             "peer_received_grant_cleanups"
         ));
         assert!(sqlite_object_exists(&conn, "table", "peer_grant_epochs"));
+        assert!(sqlite_object_exists(
+            &conn,
+            "table",
+            "transcode_dispatch_settings"
+        ));
         assert_eq!(
             peers::get_peer_link(&conn, "link-v26").unwrap(),
             Some(seeded_link)
@@ -2108,6 +2144,78 @@ fn migration_v27_upgrades_v26_fixture_preserving_existing_grants_and_separating_
         assert_eq!(loaded.grant_id, "grant-pre-staged");
         assert_eq!(loaded.credential_id, None);
         assert_eq!(loaded.effective_credential_id(), "link-v26");
+        assert_db_integrity(&conn);
+    }
+}
+
+#[test]
+fn migration_v28_upgrades_v27_fixture_and_persists_transcode_dispatch_settings() {
+    let _guard = TEST_DB_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _db_path_guard = TestDbPathGuard(env::var_os("DB_PATH"));
+
+    let dir = TempDirGuard(env::temp_dir().join(format!(
+        "af-peer-v27-to-v28-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    )));
+    fs::create_dir_all(&dir.0).unwrap();
+    let db_file = dir.0.join("v27_fixture.sqlite");
+    env::set_var("DB_PATH", &db_file);
+
+    // Bootstrap then step back to v27 state
+    init_db().unwrap();
+    {
+        let conn = get_conn().unwrap();
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS transcode_dispatch_settings;
+             DELETE FROM schema_versions WHERE version = 28;",
+        )
+        .unwrap();
+        let pre_max: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pre_max, 27);
+        assert!(!sqlite_object_exists(
+            &conn,
+            "table",
+            "transcode_dispatch_settings"
+        ));
+    }
+
+    init_db().expect("v27 -> v28 upgrade must succeed");
+    let expected = peers::TranscodeDispatchSettings {
+        dispatch_policy: peers::TranscodeDispatchPolicy::Balanced,
+        local_max_jobs: 4,
+        updated_at: "2026-11-27T04:30:00Z".to_string(),
+    };
+    {
+        let conn = get_conn().unwrap();
+        let max_ver: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(max_ver, 28);
+        assert!(sqlite_object_exists(
+            &conn,
+            "table",
+            "transcode_dispatch_settings"
+        ));
+        assert_eq!(peers::get_transcode_dispatch_settings(&conn).unwrap(), None);
+        peers::upsert_transcode_dispatch_settings(&conn, &expected).unwrap();
+        assert_eq!(
+            peers::get_transcode_dispatch_settings(&conn).unwrap(),
+            Some(expected.clone())
+        );
+        assert_db_integrity(&conn);
+    }
+
+    // Re-running init_db() must be idempotent and retain persisted dispatch settings
+    init_db().expect("re-init on v28 DB must succeed");
+    {
+        let conn = get_conn().unwrap();
+        assert_eq!(
+            peers::get_transcode_dispatch_settings(&conn).unwrap(),
+            Some(expected)
+        );
         assert_db_integrity(&conn);
     }
 }

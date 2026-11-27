@@ -106,6 +106,8 @@ struct RemoteHealthPayload {
     capabilities: Vec<String>,
     #[serde(default)]
     transcode: Option<af_transcode::TranscodeCapabilities>,
+    #[serde(default)]
+    load: Option<super::transcode::WorkerLoadSnapshot>,
     /// Distinguishes an absent key (`None`, older peers) from explicit `null` (`Some(None)`,
     /// remote has no active inbound grant) and an active generation (`Some(Some(g))`).
     #[serde(default, deserialize_with = "deserialize_double_option_i64")]
@@ -193,9 +195,10 @@ pub(crate) async fn run_health_tick(runtime: &Arc<PeerRuntime>) {
         return;
     }
 
-    // Warm local FFmpeg/GPU capability cache asynchronously whenever peers are active so
+    // Warm local FFmpeg/GPU capability and load caches asynchronously whenever peers are active so
     // the first transcode dispatch never falls back locally solely due to a cold cache.
     let _ = super::transcode::cached_local_capabilities_nonblocking(runtime);
+    let _ = super::transcode::cached_local_load_nonblocking(runtime);
 
     let wg_status = match runtime
         .runner
@@ -310,10 +313,14 @@ pub(crate) async fn check_single_link(
                 return;
             };
             let remote_transcode = parsed.transcode.clone();
+            let remote_load = parsed.load.clone();
             let remote_inbound_grant_gen = parsed.inbound_grant_generation;
             let committed_healthy =
                 commit_link_healthy(runtime, &link, parsed, rtt_ms, &commit_now_rfc).await;
             if committed_healthy {
+                if let Some(load) = remote_load {
+                    runtime.transcode_state.record_remote_load(&link.id, load);
+                }
                 if remote_inbound_grant_gen == Some(None) {
                     super::grants::reconcile_missing_remote_grant(runtime, &link).await;
                 }
