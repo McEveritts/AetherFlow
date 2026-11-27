@@ -160,9 +160,16 @@ async fn test_quassel_install_update_remove_and_cert_data_preservation() {
     assert!(default_cfg.contains("LOGFILE=\"/var/log/quassel/quasselcore.log\""));
 
     let sandbox_cfg = fs::read_to_string(
-        root.join("etc/systemd/system/quasselcore.service.d/aetherflow-sandbox.conf"),
+        root.join("etc/systemd/system/quasselcore.service.d/10-aetherflow-sandbox.conf"),
     )
     .unwrap();
+    assert!(
+        !root
+            .join("etc/systemd/system/quasselcore.service.d/aetherflow-sandbox.conf")
+            .exists(),
+        "legacy unnumbered aetherflow-sandbox.conf must not be written"
+    );
+    assert!(sandbox_cfg.contains("UMask=0077"));
     assert!(sandbox_cfg.contains("ReadWritePaths=-/var/lib/quassel -/var/log/quassel"));
 
     let cert_path = root.join("var/lib/quassel/quasselCert.pem");
@@ -769,10 +776,17 @@ async fn test_threadfin_install_remove_cancellation_and_rollback_in_isolated_roo
         ));
 
     let sandbox_content = fs::read_to_string(
-        root.join("etc/systemd/system/threadfin.service.d/aetherflow-sandbox.conf"),
+        root.join("etc/systemd/system/threadfin.service.d/10-aetherflow-sandbox.conf"),
     )
     .unwrap();
+    assert!(
+        !root
+            .join("etc/systemd/system/threadfin.service.d/aetherflow-sandbox.conf")
+            .exists(),
+        "legacy unnumbered aetherflow-sandbox.conf must not be written"
+    );
     assert!(sandbox_content.contains("ProtectSystem=strict"));
+    assert!(sandbox_content.contains("UMask=0077"));
     assert!(sandbox_content.contains("/var/lib/threadfin"));
 
     let version_marker = fs::read_to_string(root.join("var/lib/threadfin/.af-version")).unwrap();

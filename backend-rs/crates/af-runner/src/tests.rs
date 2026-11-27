@@ -2266,6 +2266,46 @@ fn sandbox_dropin_writes_only_canonical_10_conf_removes_legacy_and_propagates_er
     let _ = fs::remove_dir_all(&scratch);
 }
 
+#[test]
+fn sandbox_dropin_sets_group_writable_umask_only_for_shared_media_units() {
+    for unit in [
+        "qbittorrent.service",
+        "sonarr.service",
+        "radarr.service",
+        "lidarr.service",
+        "unpackerr.service",
+        "jellyfin.service",
+        "plexmediaserver.service",
+        "deluged.service",
+        "sabnzbd.service",
+    ] {
+        let rendered = render_systemd_sandbox_dropin("native", unit, &["/var/lib/app".into()]);
+        assert!(
+            rendered.contains("UMask=0002\n"),
+            "expected shared-media unit {unit} to get UMask=0002, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("UMask=0077"),
+            "shared-media unit {unit} must not use UMask=0077"
+        );
+    }
+
+    for unit in [
+        "librespeed.service",
+        "quasselcore.service",
+        "threadfin.service",
+        "vaultwarden.service",
+        "flaresolverr.service",
+        "uptime-kuma.service",
+    ] {
+        let rendered = render_systemd_sandbox_dropin("native", unit, &["/var/lib/app".into()]);
+        assert!(
+            rendered.contains("UMask=0077\n"),
+            "expected isolated unit {unit} to retain UMask=0077, got:\n{rendered}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn ingress_vhost_validates_rejects_symlinks_and_rolls_back_on_configtest_failure() {
@@ -2440,22 +2480,16 @@ async fn external_vhost_sync_self_heals_default_ssl_placeholder_and_rolls_back_o
         .unwrap();
     let healed = fs::read_to_string(&default_ssl).unwrap();
     assert!(!healed.contains("ServerName _"), "{healed}");
-    assert_eq!(
-        healed.matches("        ServerName example.org").count(),
-        2
-    );
+    assert_eq!(healed.matches("        ServerName example.org").count(), 2);
     assert_eq!(
         healed
-            .matches(
-                "        ServerAlias www.example.org direct.example.org *.example.org"
-            )
+            .matches("        ServerAlias www.example.org direct.example.org *.example.org")
             .count(),
         2
     );
 
     // Operator-customized default-ssl.conf (no ServerName _) is never overwritten.
-    let custom_ssl =
-        "<VirtualHost *:443>\n        ServerName custom.example.org\n</VirtualHost>\n";
+    let custom_ssl = "<VirtualHost *:443>\n        ServerName custom.example.org\n</VirtualHost>\n";
     fs::write(&default_ssl, custom_ssl).unwrap();
     apply_ingress_vhost_with_hooks(&req, &apache_dir, || async { Ok(()) }, || async { Ok(()) })
         .await

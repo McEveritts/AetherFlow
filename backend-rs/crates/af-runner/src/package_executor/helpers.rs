@@ -671,11 +671,16 @@ pub(super) fn apply_sandbox_in_root_with_journal(
             fs_root,
         );
         if let Some(ref mut j) = journal {
-            j.stage_file_mutation(&dropin_aether)?;
+            if dropin_aether.exists() {
+                j.stage_file_mutation(&dropin_aether)?;
+            }
             j.stage_file_mutation(&dropin_10)?;
         }
-        write_file_atomic_with_mode_bounded(&dropin_aether, content.as_bytes(), 0o644, fs_root)?;
+        // Write only the canonical numbered drop-in (`10-aetherflow-sandbox.conf`) and remove
+        // any stale unnumbered `aetherflow-sandbox.conf`, which otherwise sorts after numeric
+        // operator overrides (`20-*.conf`..`99-*.conf`) in systemd's lexicographical load order.
         write_file_atomic_with_mode_bounded(&dropin_10, content.as_bytes(), 0o644, fs_root)?;
+        let _ = fs::remove_file(&dropin_aether);
     }
 
     Ok("sandbox applied".to_string())
@@ -736,9 +741,10 @@ pub(super) fn resolve_package_sandbox_roots(
     (effective_root, systemd_root)
 }
 
-/// Ensures systemd sandbox drop-ins (`aetherflow-sandbox.conf` and `10-aetherflow-sandbox.conf`)
-/// are written on `"install"`, `"reinstall"`, and `"update"`, and removed (along with stale
-/// `.af-version` receipts) on `"remove"` / `"uninstall"` across both synthetic roots and live `/`.
+/// Ensures canonical systemd sandbox drop-in (`10-aetherflow-sandbox.conf`) is written
+/// (removing any legacy unnumbered `aetherflow-sandbox.conf`) on `"install"`, `"reinstall"`,
+/// and `"update"`, and removed (along with stale `.af-version` receipts) on `"remove"` /
+/// `"uninstall"` across both synthetic roots and live `/`.
 pub fn ensure_package_sandbox_dropin_under_root(
     install_root: Option<&Path>,
     pkg_id: &str,

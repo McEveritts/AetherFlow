@@ -540,13 +540,14 @@ def run_phase_2_fail2ban_lifecycle(
             lock_kv,
         )
 
-        dropin_path = Path("/etc/systemd/system/fail2ban.service.d/aetherflow-sandbox.conf")
+        dropin_path = Path("/etc/systemd/system/fail2ban.service.d/10-aetherflow-sandbox.conf")
+        legacy_dropin_path = Path("/etc/systemd/system/fail2ban.service.d/aetherflow-sandbox.conf")
         record_phase_assertion(
             phase,
             "fail2ban_privileged_service_exempt_from_restrictive_sandbox_dropin",
-            not dropin_path.exists(),
-            {"sandbox_dropin_exists": False},
-            {"sandbox_dropin_exists": dropin_path.exists()},
+            not dropin_path.exists() and not legacy_dropin_path.exists(),
+            {"sandbox_dropin_exists": False, "legacy_sandbox_dropin_exists": False},
+            {"sandbox_dropin_exists": dropin_path.exists(), "legacy_sandbox_dropin_exists": legacy_dropin_path.exists()},
         )
 
         unit_state_install = query_systemd_unit_state("fail2ban.service", work_root)
@@ -858,7 +859,7 @@ def run_phase_3_quassel_lifecycle(
             phase.artifacts["config_after_install"],
         )
 
-        dropin_path = Path("/etc/systemd/system/quasselcore.service.d/aetherflow-sandbox.conf")
+        dropin_path = Path("/etc/systemd/system/quasselcore.service.d/10-aetherflow-sandbox.conf")
         dropin_text = (
             dropin_path.read_text(encoding="utf-8", errors="replace")
             if dropin_path.is_file()
@@ -1328,7 +1329,7 @@ def run_phase_4_threadfin_lifecycle(
             if unit_file_path.is_file()
             else ""
         )
-        dropin_path = Path("/etc/systemd/system/threadfin.service.d/aetherflow-sandbox.conf")
+        dropin_path = Path("/etc/systemd/system/threadfin.service.d/10-aetherflow-sandbox.conf")
         dropin_text = (
             dropin_path.read_text(encoding="utf-8", errors="replace")
             if dropin_path.is_file()

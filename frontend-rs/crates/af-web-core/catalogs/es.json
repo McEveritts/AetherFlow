@@ -543,6 +543,7 @@
     "storageExportModeReadOnly": "Solo lectura",
     "storageExportModeReadWrite": "Lectura y escritura",
     "storageExportOwnerMapping": "Las escrituras remotas se asignan a UID {uid}, GID {gid}",
+    "storageExportSystemGidWarning": "El GID {gid} está en el rango del sistema local del host (1–999) y puede corresponder a otro grupo en los pares. Para escrituras o enlaces duros entre servidores, usa un grupo compartido con un GID idéntico >= 1000 (p. ej., 2000) y modo 2775 en ambos servidores.",
     "storageExportCreatedAt": "Exportado el {created_at}",
     "storageExportPathLabel": "Carpeta local para exportar",
     "storageExportPathPlaceholder": "/srv/media/movies",

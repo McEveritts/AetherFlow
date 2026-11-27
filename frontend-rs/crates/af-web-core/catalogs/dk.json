@@ -543,6 +543,7 @@
     "storageExportModeReadOnly": "Skrivebeskyttet",
     "storageExportModeReadWrite": "Læs og skriv",
     "storageExportOwnerMapping": "Fjernskrivninger tilknyttes UID {uid}, GID {gid}",
+    "storageExportSystemGidWarning": "GID {gid} ligger i det værtslokale systemområde (1–999) og kan svare til en anden gruppe på peers. Til skrivning eller hardlinks på tværs af værter bør begge servere bruge en delt gruppe med identisk GID >= 1000 (f.eks. 2000) og tilstand 2775.",
     "storageExportCreatedAt": "Eksporteret {created_at}",
     "storageExportPathLabel": "Lokal mappe til eksport",
     "storageExportPathPlaceholder": "/srv/media/movies",

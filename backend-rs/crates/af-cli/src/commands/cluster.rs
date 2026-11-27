@@ -143,6 +143,8 @@ pub struct ExportDiagnosticEntry {
     pub squash_uid: Option<u32>,
     pub squash_gid: Option<u32>,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid_alignment_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +174,8 @@ pub struct MountDiagnosticEntry {
     pub probe: Option<SentinelProbeSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_skipped_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid_alignment_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -519,6 +523,67 @@ fn build_wireguard_summary(
     }
 }
 
+const DYNAMIC_SYSTEM_GID_UPPER_BOUND: u32 = 999;
+
+fn lookup_group_name_in_etc_group(contents: &str, gid: u32) -> Option<String> {
+    let target = gid.to_string();
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split(':');
+        let name = parts.next()?.trim();
+        let _passwd = parts.next()?;
+        let gid_str = parts.next()?.trim();
+        if gid_str == target && !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn lookup_local_group_name(gid: u32) -> Option<String> {
+    let contents = std::fs::read_to_string("/etc/group").ok()?;
+    lookup_group_name_in_etc_group(&contents, gid)
+}
+
+fn detect_gid_alignment_warning_with_group(
+    writable: bool,
+    gid: Option<u32>,
+    subject: &str,
+    local_group_name: Option<&str>,
+) -> Option<String> {
+    if !writable {
+        return None;
+    }
+    let gid = gid?;
+    if gid == 0 || gid > DYNAMIC_SYSTEM_GID_UPPER_BOUND {
+        return None;
+    }
+    let group_hint = match local_group_name {
+        Some(name) => format!(" (local group '{name}')"),
+        None => String::new(),
+    };
+    Some(format!(
+        "Writable {subject} uses host-local system GID {gid}{group_hint}; align a shared group \
+         with identical GID >= 1000 (e.g. 2000) and mode 2775 on both peers for cross-host writes and hardlinks"
+    ))
+}
+
+fn inspect_mounted_path_gid(mount_path: &str) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(mount_path).ok().map(|meta| meta.gid())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mount_path;
+        None
+    }
+}
+
 fn build_mount_diagnostics(
     mounts: Vec<PeerMount>,
     transport: &dyn RunnerClientTransport,
@@ -546,6 +611,7 @@ fn build_mount_diagnostics(
                     probe_skipped_reason: Some(format!(
                         "non-media mount purpose '{safe_purpose}' is not managed by /v1/peer-storage live mount/sentinel probes"
                     )),
+                    gid_alignment_warning: None,
                 };
             }
 
@@ -589,6 +655,19 @@ fn build_mount_diagnostics(
                 },
             };
 
+            let gid_alignment_warning = if mount.writable && live_active == Some(true) && probe.ok {
+                let live_gid = inspect_mounted_path_gid(&mount.mount_path);
+                let local_group = live_gid.and_then(lookup_local_group_name);
+                detect_gid_alignment_warning_with_group(
+                    true,
+                    live_gid,
+                    "mount",
+                    local_group.as_deref(),
+                )
+            } else {
+                None
+            };
+
             MountDiagnosticEntry {
                 id: mount.id,
                 remote_path: mount.remote_path,
@@ -604,6 +683,7 @@ fn build_mount_diagnostics(
                 live_error,
                 probe: Some(probe),
                 probe_skipped_reason: None,
+                gid_alignment_warning,
             }
         })
         .collect()
@@ -857,13 +937,23 @@ pub(crate) fn build_cluster_diagnose_report(
         list_peer_exports_for_link(&conn, &link.id)
             .map_err(|err| CliError::Execution(format!("failed querying peer_exports: {err}")))?
             .into_iter()
-            .map(|e: PeerExport| ExportDiagnosticEntry {
-                id: e.id,
-                path: e.path,
-                writable: e.writable,
-                squash_uid: e.squash_uid,
-                squash_gid: e.squash_gid,
-                created_at: e.created_at,
+            .map(|e: PeerExport| {
+                let local_group = e.squash_gid.and_then(lookup_local_group_name);
+                let gid_alignment_warning = detect_gid_alignment_warning_with_group(
+                    e.writable,
+                    e.squash_gid,
+                    "export",
+                    local_group.as_deref(),
+                );
+                ExportDiagnosticEntry {
+                    id: e.id,
+                    path: e.path,
+                    writable: e.writable,
+                    squash_uid: e.squash_uid,
+                    squash_gid: e.squash_gid,
+                    created_at: e.created_at,
+                    gid_alignment_warning,
+                }
             })
             .collect()
     } else {
@@ -1149,6 +1239,9 @@ pub(crate) fn render_diagnose_report_human(report: &ClusterDiagnoseReport) -> St
                 "  - {} [{}] ({}{})",
                 export.path, export.id, mode, squash
             ));
+            if let Some(ref warn) = export.gid_alignment_warning {
+                lines.push(format!("    Warning: {warn}"));
+            }
         }
     }
     lines.push(String::new());
@@ -1197,6 +1290,9 @@ pub(crate) fn render_diagnose_report_human(report: &ClusterDiagnoseReport) -> St
                 "    Unit: {} | Live: {} | Sentinel: {}",
                 mount.unit_name, live_desc, probe_desc
             ));
+            if let Some(ref warn) = mount.gid_alignment_warning {
+                lines.push(format!("    Warning: {warn}"));
+            }
             if let Some(ref err) = mount.last_error {
                 lines.push(format!("    DB Last Error: {err}"));
             }
@@ -1280,4 +1376,44 @@ pub(crate) fn render_diagnose_report_human(report: &ClusterDiagnoseReport) -> St
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod gid_alignment_tests {
+    use super::*;
+
+    #[test]
+    fn parses_etc_group_and_warns_only_for_writable_system_gids() {
+        let etc_group = "root:x:0:\ninvidious:x:983:\nmcmedia:x:2000:sonarr,radarr\n";
+        assert_eq!(
+            lookup_group_name_in_etc_group(etc_group, 983).as_deref(),
+            Some("invidious")
+        );
+        assert_eq!(
+            lookup_group_name_in_etc_group(etc_group, 2000).as_deref(),
+            Some("mcmedia")
+        );
+        assert_eq!(lookup_group_name_in_etc_group(etc_group, 1234), None);
+
+        let warn =
+            detect_gid_alignment_warning_with_group(true, Some(983), "mount", Some("invidious"))
+                .expect("writable system GID 983 must trigger warning");
+        assert!(warn.contains("GID 983 (local group 'invidious')"), "{warn}");
+        assert!(warn.contains("GID >= 1000"), "{warn}");
+
+        assert!(detect_gid_alignment_warning_with_group(
+            true,
+            Some(2000),
+            "mount",
+            Some("mcmedia")
+        )
+        .is_none());
+        assert!(detect_gid_alignment_warning_with_group(
+            false,
+            Some(983),
+            "export",
+            Some("invidious")
+        )
+        .is_none());
+    }
 }

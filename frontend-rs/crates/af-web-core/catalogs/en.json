@@ -543,6 +543,7 @@
     "storageExportModeReadOnly": "Read-only",
     "storageExportModeReadWrite": "Read and write",
     "storageExportOwnerMapping": "Remote writes mapped to UID {uid}, GID {gid}",
+    "storageExportSystemGidWarning": "GID {gid} is in the host-local system range (1–999) and may map to a different group on peers. For cross-host writes or hardlinks, use a shared group with an identical GID >= 1000 (e.g. 2000) and mode 2775 on both servers.",
     "storageExportCreatedAt": "Exported {created_at}",
     "storageExportPathLabel": "Local folder to export",
     "storageExportPathPlaceholder": "/srv/media/movies",

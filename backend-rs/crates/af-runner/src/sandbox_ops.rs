@@ -120,6 +120,41 @@ fn read_unit_service_user(unit_path: &Path) -> Option<String> {
     found
 }
 
+pub(crate) fn is_shared_media_umask_unit(norm_unit: &str) -> bool {
+    norm_unit.starts_with("qbittorrent")
+        || norm_unit.starts_with("deluge")
+        || norm_unit.starts_with("rtorrent")
+        || norm_unit.starts_with("transmission")
+        || norm_unit.starts_with("sabnzbd")
+        || norm_unit.starts_with("nzbget")
+        || norm_unit.starts_with("pyload")
+        || norm_unit.starts_with("syncthing")
+        || norm_unit.starts_with("flood")
+        || norm_unit.starts_with("sonarr")
+        || norm_unit.starts_with("radarr")
+        || norm_unit.starts_with("lidarr")
+        || norm_unit.starts_with("readarr")
+        || norm_unit.starts_with("bazarr")
+        || norm_unit.starts_with("listenarr")
+        || norm_unit.starts_with("unpackerr")
+        || norm_unit.starts_with("filebot")
+        || norm_unit.starts_with("seedcross")
+        || norm_unit.starts_with("unmanic")
+        || norm_unit.starts_with("cloudplow")
+        || norm_unit.starts_with("qui")
+        || norm_unit.starts_with("autobrr")
+        || norm_unit.starts_with("autoscan")
+        || norm_unit.starts_with("recyclarr")
+        || norm_unit.starts_with("dispatcharr")
+        || norm_unit.starts_with("jellyfin")
+        || norm_unit.starts_with("plex")
+        || norm_unit.starts_with("emby")
+        || norm_unit.starts_with("audiobookshelf")
+        || norm_unit.starts_with("calibreweb")
+        || norm_unit.starts_with("kavita")
+        || norm_unit.starts_with("navidrome")
+}
+
 pub fn render_systemd_sandbox_dropin(profile: &str, unit: &str, rw_paths: &[String]) -> String {
     render_systemd_sandbox_dropin_in_root(profile, unit, rw_paths, None, None)
 }
@@ -160,6 +195,15 @@ pub(crate) fn render_systemd_sandbox_dropin_in_root(
         "read-only"
     };
 
+    // Shared media servers, downloaders, and *arr managers require group-writable files
+    // (0664/0775) so cross-service reads and Linux fs.protected_hardlinks=1 hardlinks work
+    // across local storage and peer NFSv4.2 mounts.
+    let umask = if is_shared_media_umask_unit(&norm_unit) {
+        "0002"
+    } else {
+        "0077"
+    };
+
     let mut lines = vec![
         "[Service]".to_string(),
         "NoNewPrivileges=yes".to_string(),
@@ -182,7 +226,7 @@ pub(crate) fn render_systemd_sandbox_dropin_in_root(
         "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string(),
         "CapabilityBoundingSet=".to_string(),
         "AmbientCapabilities=".to_string(),
-        "UMask=0077".to_string(),
+        format!("UMask={}", umask),
     ];
 
     if !matches!(profile, "node" | "mono" | "dotnet" | "java" | "python") {

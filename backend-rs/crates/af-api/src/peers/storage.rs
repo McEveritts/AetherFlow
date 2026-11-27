@@ -524,6 +524,30 @@ pub(crate) fn validate_local_export_path_with_roots(
     })
 }
 
+pub(crate) const DYNAMIC_SYSTEM_GID_UPPER_BOUND: u32 = 999;
+
+/// Returns an operator warning when a writable NFSv4 export squashes remote writes to a
+/// host-local dynamic system GID (`1..=999`), which commonly resolves to an unrelated group
+/// on peer servers and causes client-side `EACCES`/`EPERM` failures (including under
+/// `fs.protected_hardlinks=1`).
+pub(crate) fn dynamic_system_gid_warning(
+    writable: bool,
+    squash_gid: Option<u32>,
+) -> Option<String> {
+    if !writable {
+        return None;
+    }
+    let gid = squash_gid?;
+    if gid == 0 || gid > DYNAMIC_SYSTEM_GID_UPPER_BOUND {
+        return None;
+    }
+    Some(format!(
+        "Writable export uses host-local system GID {gid} (1-{DYNAMIC_SYSTEM_GID_UPPER_BOUND}); \
+         it may map to a different group on peer hosts and break cross-host writes or hardlinks. \
+         Align a shared group with identical GID >= 1000 (e.g. 2000) and mode 2775 on both peers."
+    ))
+}
+
 pub(crate) fn resolve_export_owner_mapping(
     writable: bool,
     owner_uid: u32,
@@ -1331,6 +1355,28 @@ async fn create_peer_export_inner(
     // Best-effort transcode mount resync when this link is an active enabled transcode worker.
     super::transcode::resync_worker_transcode_mounts_if_active_best_effort(runtime, &link.id).await;
 
+    let gid_warning = dynamic_system_gid_warning(saved.writable, saved.squash_gid);
+    if let Some(ref warning) = gid_warning {
+        tracing::warn!(
+            link_id = %link.id,
+            peer = %link.name,
+            path = %saved.path,
+            squash_gid = saved.squash_gid,
+            "{warning}"
+        );
+    }
+
+    let audit_detail = match gid_warning {
+        Some(ref warning) => format!(
+            "Exported '{}' to '{}' (writable={}, squash_uid={:?}, squash_gid={:?}; warning: {})",
+            saved.path, link.name, saved.writable, saved.squash_uid, saved.squash_gid, warning
+        ),
+        None => format!(
+            "Exported '{}' to '{}' (writable={}, squash_uid={:?}, squash_gid={:?})",
+            saved.path, link.name, saved.writable, saved.squash_uid, saved.squash_gid
+        ),
+    };
+
     let client_ip = extract_client_ip_for_peer(headers, peer_ip);
     runtime
         .db
@@ -1340,10 +1386,7 @@ async fn create_peer_export_inner(
             "peer_export_created".to_string(),
             "peer_export".to_string(),
             saved.id.clone(),
-            format!(
-                "Exported '{}' to '{}' (writable={}, squash_uid={:?}, squash_gid={:?})",
-                saved.path, link.name, saved.writable, saved.squash_uid, saved.squash_gid
-            ),
+            audit_detail,
             client_ip,
             String::new(),
         )

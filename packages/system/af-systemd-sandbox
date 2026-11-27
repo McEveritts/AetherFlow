@@ -134,6 +134,7 @@ profile_block() {
     local unit="${2:-}"
     local private_devices="yes"
     local restrict_namespaces="yes"
+    local umask="0077"
 
     case "${unit}" in
         jellyfin*|plex*|emby*|tdarr*|threadfin*|scrutiny*|dispatcharr*|unmanic*)
@@ -141,6 +142,12 @@ profile_block() {
             ;;
         flaresolverr*)
             restrict_namespaces="no"
+            ;;
+    esac
+
+    case "${unit}" in
+        qbittorrent*|deluge*|rtorrent*|transmission*|sabnzbd*|nzbget*|pyload*|syncthing*|flood*|sonarr*|radarr*|lidarr*|readarr*|bazarr*|listenarr*|unpackerr*|filebot*|seedcross*|unmanic*|cloudplow*|qui*|autobrr*|autoscan*|recyclarr*|dispatcharr*|jellyfin*|plex*|emby*|audiobookshelf*|calibreweb*|kavita*|navidrome*)
+            umask="0002"
             ;;
     esac
 
@@ -165,7 +172,7 @@ SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=
 AmbientCapabilities=
-UMask=0077
+UMask=${umask}
 EOF
 
     case "${profile}" in

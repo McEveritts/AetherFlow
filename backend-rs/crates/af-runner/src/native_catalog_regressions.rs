@@ -12,9 +12,15 @@ async fn exercise_catalog_recipe(
     environment.app_port = 19876;
     let runner = MockCommandRunner::default();
     let executor = DeclarativePackageExecutor::with_runner(environment.clone(), runner.clone());
-    let install = executor.execute_recipe(
-        &recipe, PackageAction::Install, CancellationToken::new(), |_| {},
-    ).await.unwrap();
+    let install = executor
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
     assert!(install.lock_present, "{package}");
     let expected_ver = if package == "rclone" {
         "0.14.2"
@@ -27,50 +33,108 @@ async fn exercise_catalog_recipe(
         "{package}"
     );
     let commands = runner.recorded_commands();
-    let dependency = if package == "rclone" { "fuse3" } else { apt_package };
-    assert!(commands.iter().any(|command| command.program == "apt-get"
-        && command.args.contains(&"install".into())
-        && command.args.contains(&dependency.into())), "{package}");
-    assert!(commands.iter().any(|command| command.program == "systemctl"
-        && command.args.contains(&unit.into())), "{package}");
+    let dependency = if package == "rclone" {
+        "fuse3"
+    } else {
+        apt_package
+    };
+    assert!(
+        commands.iter().any(|command| command.program == "apt-get"
+            && command.args.contains(&"install".into())
+            && command.args.contains(&dependency.into())),
+        "{package}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|command| command.program == "systemctl" && command.args.contains(&unit.into())),
+        "{package}"
+    );
     let retained = root.join(retained_path.trim_start_matches('/'));
     fs::create_dir_all(retained.parent().unwrap()).unwrap();
     fs::write(&retained, retained_contents).unwrap();
     let unrelated = root.join("mnt/local/unrelated-media");
     fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
     fs::write(&unrelated, "never purge media branches").unwrap();
-    executor.execute_recipe(
-        &recipe, PackageAction::Update, CancellationToken::new(), |_| {},
-    ).await.unwrap();
-    assert!(fs::read_to_string(&retained).unwrap().contains(retained_contents), "{package}");
+    executor
+        .execute_recipe(
+            &recipe,
+            PackageAction::Update,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(
+        fs::read_to_string(&retained)
+            .unwrap()
+            .contains(retained_contents),
+        "{package}"
+    );
     if package == "netdata" {
         let config = fs::read_to_string(&retained).unwrap();
         assert!(config.contains("bind to = 127.0.0.1"));
         assert!(config.contains("default port = 19876"));
     }
-    executor.execute_recipe(
-        &recipe, PackageAction::Remove, CancellationToken::new(), |_| {},
-    ).await.unwrap();
+    executor
+        .execute_recipe(
+            &recipe,
+            PackageAction::Remove,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
     assert!(retained.exists(), "default removal lost {package} state");
     assert!(!root.join(recipe.lock_file.trim_start_matches('/')).exists());
-    assert!(!runner.recorded_commands().iter().any(|command| command.program == "userdel"));
-    executor.execute_recipe(
-        &recipe, PackageAction::Install, CancellationToken::new(), |_| {},
-    ).await.unwrap();
-    assert!(fs::read_to_string(&retained).unwrap().contains(retained_contents), "{package}");
+    assert!(!runner
+        .recorded_commands()
+        .iter()
+        .any(|command| command.program == "userdel"));
+    executor
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(
+        fs::read_to_string(&retained)
+            .unwrap()
+            .contains(retained_contents),
+        "{package}"
+    );
     environment.delete_data = true;
     let purge = DeclarativePackageExecutor::with_runner(environment, runner.clone());
-    purge.execute_recipe(
-        &recipe, PackageAction::Remove, CancellationToken::new(), |_| {},
-    ).await.unwrap();
-    assert!(!retained.exists(), "explicit purge retained {package} state");
-    assert_eq!(fs::read_to_string(unrelated).unwrap(), "never purge media branches");
-    let apt_managed = runner.recorded_commands().iter().any(|command| command.program == "apt-get"
-        && command.args.contains(&apt_package.into()));
+    purge
+        .execute_recipe(
+            &recipe,
+            PackageAction::Remove,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(
+        !retained.exists(),
+        "explicit purge retained {package} state"
+    );
+    assert_eq!(
+        fs::read_to_string(unrelated).unwrap(),
+        "never purge media branches"
+    );
+    let apt_managed = runner
+        .recorded_commands()
+        .iter()
+        .any(|command| command.program == "apt-get" && command.args.contains(&apt_package.into()));
     assert_eq!(apt_managed, package != "rclone", "{package}");
-    let apt_purged = runner.recorded_commands().iter().any(|command| command.program == "apt-get"
-        && command.args.contains(&"purge".into())
-        && command.args.contains(&apt_package.into()));
+    let apt_purged = runner.recorded_commands().iter().any(|command| {
+        command.program == "apt-get"
+            && command.args.contains(&"purge".into())
+            && command.args.contains(&apt_package.into())
+    });
     assert_eq!(apt_purged, package != "rclone", "{package}");
     fs::remove_dir_all(root).unwrap();
 }
@@ -84,18 +148,54 @@ macro_rules! catalog_recipe_lifecycle_test {
     };
 }
 
-catalog_recipe_lifecycle_test!(catalog_znc_lifecycle, "znc", "znc", "znc.service",
-    "/var/lib/znc/configs/znc.conf", "fixture IRC credentials and custom modules\n");
-catalog_recipe_lifecycle_test!(catalog_xrdp_lifecycle, "xrdp", "xrdp", "xrdp.service",
-    "/etc/xrdp/startwm.sh", "#!/bin/sh\nexec operator-desktop\n");
-catalog_recipe_lifecycle_test!(catalog_x2go_lifecycle, "x2go", "x2goserver", "x2goserver.service",
-    "/etc/x2go/operator-session.conf", "fixture custom session settings\n");
-catalog_recipe_lifecycle_test!(catalog_netdata_lifecycle, "netdata", "netdata", "netdata.service",
-    "/etc/netdata/netdata.conf", "[global]\n    history = 86400\n[plugins]\n    fixture = retained\n");
-catalog_recipe_lifecycle_test!(catalog_mergerfs_lifecycle, "mergerfs", "mergerfs", "mergerfs.service",
-    "/etc/mergerfs/mergerfs.conf", "BRANCHES=\"/mnt/operator-source\"\n");
-catalog_recipe_lifecycle_test!(catalog_rclone_lifecycle, "rclone", "rclone", "rclone.service",
-    "/etc/rclone/rclone.conf", "[fixture]\ntype = drive\ntoken = retained-fixture-token\n");
+catalog_recipe_lifecycle_test!(
+    catalog_znc_lifecycle,
+    "znc",
+    "znc",
+    "znc.service",
+    "/var/lib/znc/configs/znc.conf",
+    "fixture IRC credentials and custom modules\n"
+);
+catalog_recipe_lifecycle_test!(
+    catalog_xrdp_lifecycle,
+    "xrdp",
+    "xrdp",
+    "xrdp.service",
+    "/etc/xrdp/startwm.sh",
+    "#!/bin/sh\nexec operator-desktop\n"
+);
+catalog_recipe_lifecycle_test!(
+    catalog_x2go_lifecycle,
+    "x2go",
+    "x2goserver",
+    "x2goserver.service",
+    "/etc/x2go/operator-session.conf",
+    "fixture custom session settings\n"
+);
+catalog_recipe_lifecycle_test!(
+    catalog_netdata_lifecycle,
+    "netdata",
+    "netdata",
+    "netdata.service",
+    "/etc/netdata/netdata.conf",
+    "[global]\n    history = 86400\n[plugins]\n    fixture = retained\n"
+);
+catalog_recipe_lifecycle_test!(
+    catalog_mergerfs_lifecycle,
+    "mergerfs",
+    "mergerfs",
+    "mergerfs.service",
+    "/etc/mergerfs/mergerfs.conf",
+    "BRANCHES=\"/mnt/operator-source\"\n"
+);
+catalog_recipe_lifecycle_test!(
+    catalog_rclone_lifecycle,
+    "rclone",
+    "rclone",
+    "rclone.service",
+    "/etc/rclone/rclone.conf",
+    "[fixture]\ntype = drive\ntoken = retained-fixture-token\n"
+);
 
 #[test]
 fn drifted_recipes_defer_cleanly_to_legacy_bash_fallback() {
@@ -124,13 +224,29 @@ async fn catalog_apt_failure_preserves_receipts_and_existing_configuration() {
         let configuration = root.join("etc/operator-retained.conf");
         fs::create_dir_all(configuration.parent().unwrap()).unwrap();
         fs::write(&configuration, "existing configuration and credentials").unwrap();
-        let runner = MockCommandRunner { fail_program: Some("apt-get".into()), ..Default::default() };
-        let executor = DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner);
-        assert!(executor.execute_recipe(
-            &recipe, PackageAction::Update, CancellationToken::new(), |_| {},
-        ).await.is_err(), "{package}");
+        let runner = MockCommandRunner {
+            fail_program: Some("apt-get".into()),
+            ..Default::default()
+        };
+        let executor =
+            DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner);
+        assert!(
+            executor
+                .execute_recipe(
+                    &recipe,
+                    PackageAction::Update,
+                    CancellationToken::new(),
+                    |_| {},
+                )
+                .await
+                .is_err(),
+            "{package}"
+        );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "existing receipt");
-        assert_eq!(fs::read_to_string(&configuration).unwrap(), "existing configuration and credentials");
+        assert_eq!(
+            fs::read_to_string(&configuration).unwrap(),
+            "existing configuration and credentials"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
@@ -138,7 +254,10 @@ async fn catalog_apt_failure_preserves_receipts_and_existing_configuration() {
 #[test]
 fn catalog_ini_merge_preserves_other_sections_and_is_idempotent() {
     let original = "[web]\n    default port = 19999\n    allow connections from = localhost\n[plugins]\n    custom = yes\n";
-    let settings = vec![("default port".into(), "19876".into()), ("bind to".into(), "127.0.0.1".into())];
+    let settings = vec![
+        ("default port".into(), "19876".into()),
+        ("bind to".into(), "127.0.0.1".into()),
+    ];
     let merged = merge_ini_settings(original, "web", &settings);
     assert!(merged.contains("allow connections from = localhost"));
     assert!(merged.contains("bind to = 127.0.0.1\n[plugins]"));
@@ -168,7 +287,12 @@ async fn catalog_znc_generates_unique_non_static_credentials_and_persists_receip
         MockCommandRunner::default(),
     );
     exec_a
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
 
@@ -178,7 +302,12 @@ async fn catalog_znc_generates_unique_non_static_credentials_and_persists_receip
         MockCommandRunner::default(),
     );
     exec_b
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
 
@@ -187,10 +316,15 @@ async fn catalog_znc_generates_unique_non_static_credentials_and_persists_receip
     assert!(!conf_a.contains("366c8101d4cb9e43447641a53ee50679428f58b9afb01f57eb50eec570eda0a2"));
     assert!(!conf_a.contains("aetherflow-bootstrap"));
     assert!(!conf_a.contains("aetherflowzncsalt123"));
-    assert_ne!(conf_a, conf_b, "each fresh ZNC install must generate unique salt and password hash");
+    assert_ne!(
+        conf_a, conf_b,
+        "each fresh ZNC install must generate unique salt and password hash"
+    );
 
     for root in [&root_a, &root_b] {
-        assert!(!root.join("opt/AetherFlow/logs/znc_credentials.txt").exists());
+        assert!(!root
+            .join("opt/AetherFlow/logs/znc_credentials.txt")
+            .exists());
     }
 
     match prev_user {
@@ -358,7 +492,12 @@ async fn catalog_all_retained_recipes_have_af_version_receipts_companion_units_a
         let exec_initial =
             DeclarativePackageExecutor::with_runner(env_cfg.clone(), MockCommandRunner::default());
         exec_initial
-            .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
             .await
             .unwrap();
 
@@ -374,7 +513,12 @@ async fn catalog_all_retained_recipes_have_af_version_receipts_companion_units_a
         let exec_update =
             DeclarativePackageExecutor::with_runner(env_cfg.clone(), MockCommandRunner::default());
         exec_update
-            .execute_recipe(&recipe, PackageAction::Update, CancellationToken::new(), |_| {})
+            .execute_recipe(
+                &recipe,
+                PackageAction::Update,
+                CancellationToken::new(),
+                |_| {},
+            )
             .await
             .unwrap();
 
@@ -391,7 +535,12 @@ async fn catalog_all_retained_recipes_have_af_version_receipts_companion_units_a
                 assert!(unit_cfg.contains("--port=14242"));
 
                 exec_update
-                    .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+                    .execute_recipe(
+                        &recipe,
+                        PackageAction::Remove,
+                        CancellationToken::new(),
+                        |_| {},
+                    )
                     .await
                     .unwrap();
                 assert!(root.join("etc/default/quasselcore").is_file());
@@ -402,7 +551,12 @@ async fn catalog_all_retained_recipes_have_af_version_receipts_companion_units_a
                 let exec_purge =
                     DeclarativePackageExecutor::with_runner(env_cfg, purge_runner.clone());
                 exec_purge
-                    .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+                    .execute_recipe(
+                        &recipe,
+                        PackageAction::Remove,
+                        CancellationToken::new(),
+                        |_| {},
+                    )
                     .await
                     .unwrap();
                 assert!(!root.join("etc/default/quasselcore").exists());
@@ -449,7 +603,10 @@ async fn canonical_master_credentials() {
     assert_eq!(p1, "canonical_var_lib_secret");
 
     // 2. Resolve from AETHERFLOW_MASTER_CREDS_FILE (overrides default file order)
-    env::set_var("AETHERFLOW_MASTER_CREDS_FILE", "/etc/aetherflow/custom_creds.json");
+    env::set_var(
+        "AETHERFLOW_MASTER_CREDS_FILE",
+        "/etc/aetherflow/custom_creds.json",
+    );
     let custom_creds = root_var.join("etc/aetherflow/custom_creds.json");
     fs::create_dir_all(custom_creds.parent().unwrap()).unwrap();
     fs::write(
@@ -467,7 +624,11 @@ async fn canonical_master_credentials() {
     let root_gen = create_isolated_test_dir("creds-persist");
     let bad_creds = root_gen.join("opt/AetherFlow/backend/data/.master.creds");
     fs::create_dir_all(bad_creds.parent().unwrap()).unwrap();
-    fs::write(&bad_creds, r#"{"username":"admin","password":"adminadmin"}"#).unwrap();
+    fs::write(
+        &bad_creds,
+        r#"{"username":"admin","password":"adminadmin"}"#,
+    )
+    .unwrap();
     let (u3, p3) = resolve_master_credentials(Some(&root_gen));
     assert_eq!(u3, "admin");
     assert_ne!(p3, "adminadmin");
@@ -526,7 +687,8 @@ async fn rclone_legacy_credentials_survive_retained_remove_and_are_erased_on_pur
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
     let root = create_isolated_test_dir("rclone-lifecycle");
     let fixture = |logical: &str| root.join(logical.trim_start_matches('/'));
-    let credentials = b"# operator settings\nRCLONE_RC_USER=operator\nRCLONE_RC_PASS='retain spaces'\n";
+    let credentials =
+        b"# operator settings\nRCLONE_RC_USER=operator\nRCLONE_RC_PASS='retain spaces'\n";
     let paths: [(&str, &[u8]); 9] = [
         ("/etc/aetherflow/rclone.env", credentials),
         ("/etc/aetherflow/aetherflow.env", b"unrelated"),
@@ -536,7 +698,10 @@ async fn rclone_legacy_credentials_survive_retained_remove_and_are_erased_on_pur
         ("/usr/bin/rclone", b"distro binary"),
         ("/usr/local/bin/rclone", b"operator binary"),
         ("/mnt/remote/sentinel", b"operator data"),
-        ("/usr/bin/rclone.af-backup.foreign/sentinel", b"unclaimed archive"),
+        (
+            "/usr/bin/rclone.af-backup.foreign/sentinel",
+            b"unclaimed archive",
+        ),
     ];
     for (logical, content) in paths {
         let path = fixture(logical);
@@ -554,9 +719,15 @@ async fn rclone_legacy_credentials_survive_retained_remove_and_are_erased_on_pur
     env_cfg.keep_existing_secrets = true;
     let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), runner.clone());
 
-    for action in [PackageAction::Install, PackageAction::Remove, PackageAction::Reinstall] {
-        executor.execute_recipe(&recipe, action, CancellationToken::new(), |_| {})
-            .await.unwrap();
+    for action in [
+        PackageAction::Install,
+        PackageAction::Remove,
+        PackageAction::Reinstall,
+    ] {
+        executor
+            .execute_recipe(&recipe, action, CancellationToken::new(), |_| {})
+            .await
+            .unwrap();
         let content = fs::read_to_string(&canonical).unwrap();
         assert!(content.starts_with(std::str::from_utf8(credentials).unwrap()));
         assert!(content.contains("RCLONE_USER=\"operator\"\nRCLONE_PASS=\"retain spaces\"\n"));
@@ -566,31 +737,59 @@ async fn rclone_legacy_credentials_survive_retained_remove_and_are_erased_on_pur
         assert_eq!(managed.is_file(), action != PackageAction::Remove);
     }
     let unit = fs::read_to_string(fixture("/etc/systemd/system/rclone.service")).unwrap();
-    assert!(unit.contains(&format!("ExecStart={} ", crate::package_executor::RCLONE_BIN)));
+    assert!(unit.contains(&format!(
+        "ExecStart={} ",
+        crate::package_executor::RCLONE_BIN
+    )));
     let vfs = fs::read_to_string(fixture("/etc/systemd/system/rclone-vfs.service")).unwrap();
-    assert!(vfs.contains(&format!("ExecStart={} mount ", crate::package_executor::RCLONE_BIN)));
+    assert!(vfs.contains(&format!(
+        "ExecStart={} mount ",
+        crate::package_executor::RCLONE_BIN
+    )));
 
     env_cfg.delete_data = true;
     DeclarativePackageExecutor::with_runner(env_cfg, runner)
-        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
-        .await.unwrap();
-    for path in [canonical.clone(), managed, old_archive, fixture("/etc/aetherflow/rclone.env"),
-                 fixture("/etc/rclone/rclone.conf"), fixture("/var/lib/rclone")] {
+        .execute_recipe(
+            &recipe,
+            PackageAction::Remove,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    for path in [
+        canonical.clone(),
+        managed,
+        old_archive,
+        fixture("/etc/aetherflow/rclone.env"),
+        fixture("/etc/rclone/rclone.conf"),
+        fixture("/var/lib/rclone"),
+    ] {
         assert!(!path.exists(), "{}", path.display());
     }
     for index in [1, 3, 5, 6, 7, 8] {
         let (logical, content) = paths[index];
         assert_eq!(fs::read(fixture(logical)).unwrap(), content, "{logical}");
     }
-    executor.execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
-        .await.unwrap();
-    assert!(!fs::read_to_string(canonical).unwrap().contains("retain spaces"));
+    executor
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    assert!(!fs::read_to_string(canonical)
+        .unwrap()
+        .contains("retain spaces"));
     assert!(!fixture("/etc/aetherflow/rclone.env").exists());
     fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
-async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_rollback_keeps_retained() {
+async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_rollback_keeps_retained(
+) {
     let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
     let root = create_isolated_test_dir("rclone-retained-then-purge");
     let fixture = |logical: &str| root.join(logical.trim_start_matches('/'));
@@ -601,7 +800,10 @@ async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_roll
         ("/etc/rclone/custom.conf", b"[operator-custom]\n"),
         ("/etc/aetherflow/aetherflow.env", b"GLOBAL_SECRET=keep\n"),
         ("/mnt/remote/sentinel", b"operator mount data"),
-        ("/usr/bin/rclone.af-backup.foreign/sentinel", b"unclaimed archive"),
+        (
+            "/usr/bin/rclone.af-backup.foreign/sentinel",
+            b"unclaimed archive",
+        ),
         (
             "/install/.sonarr.retained",
             b"package=sonarr\nstate=retained\nupdated_at=2026-11-22T00:00:00Z\n",
@@ -619,7 +821,12 @@ async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_roll
 
     // 1. Install rclone -> writes .rclone.lock, no .rclone.retained
     DeclarativePackageExecutor::with_runner(base_env.clone(), runner.clone())
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
     assert!(fixture("/install/.rclone.lock").is_file());
@@ -631,7 +838,12 @@ async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_roll
     // 2. Ordinary retained remove (delete_data=false) removes .rclone.lock, writes .rclone.retained,
     //    and preserves managed config/state.
     DeclarativePackageExecutor::with_runner(base_env.clone(), runner.clone())
-        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Remove,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
     assert!(!fixture("/install/.rclone.lock").exists());
@@ -651,10 +863,12 @@ async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_roll
 
     // 3. A failed purge preserves .rclone.retained so the operator can retry safely.
     let mut failing_recipe = recipe.clone();
-    failing_recipe.remove_steps.push(DeclarativeStep::AptUpdate {
-        progress_pct: 99,
-        description: "Inject purge failure before receipt commit".into(),
-    });
+    failing_recipe
+        .remove_steps
+        .push(DeclarativeStep::AptUpdate {
+            progress_pct: 99,
+            description: "Inject purge failure before receipt commit".into(),
+        });
     let mut purge_env = base_env.clone();
     purge_env.delete_data = true;
     let failing_runner = MockCommandRunner {
@@ -676,7 +890,12 @@ async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_roll
     // 4. Successful explicit purge removes .rclone.retained and managed data while preserving
     //    every unrelated file and other packages' retained receipts.
     DeclarativePackageExecutor::with_runner(purge_env, runner.clone())
-        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Remove,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
     for removed in [
@@ -710,16 +929,31 @@ async fn rclone_retained_remove_then_explicit_purge_preserves_unrelated_and_roll
 
     // 6. Reinstalling after retained removal clears .rclone.retained.
     DeclarativePackageExecutor::with_runner(base_env.clone(), runner.clone())
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
     DeclarativePackageExecutor::with_runner(base_env.clone(), runner.clone())
-        .execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Remove,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
     assert!(fixture("/install/.rclone.retained").is_file());
     DeclarativePackageExecutor::with_runner(base_env, runner)
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
     assert!(fixture("/install/.rclone.lock").is_file());
@@ -760,10 +994,17 @@ async fn rclone_failed_migration_restores_unit_and_credentials() {
         description: "Inject a failure after Rclone migration".into(),
     });
     let runner = MockCommandRunner::default();
-    let executor = DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner);
+    let executor =
+        DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner);
     let error = executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
-        .await.unwrap_err();
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("active mountpoint"), "{error}");
     for (path, content) in original {
         assert_eq!(fs::read(path).unwrap(), content, "{}", path.display());
@@ -791,7 +1032,12 @@ async fn rclone_password_escaping() {
     env_cfg.password = Some(r#"valid"quoted\pass$word`1"#.to_string());
     let executor = DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
     executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
 
@@ -821,7 +1067,12 @@ async fn failed_dpkg_query() {
     let executor =
         DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner);
     let err = executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap_err();
     assert!(
@@ -854,7 +1105,12 @@ async fn rollback_service_state() {
         runner.clone(),
     );
     let err = executor
-        .execute_recipe(&recipe, PackageAction::Update, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Update,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("systemctl"));
@@ -927,7 +1183,12 @@ async fn native_fail2ban_succeeds_when_prometheus_compatibility_symlink_exists()
         MockCommandRunner::default(),
     );
     let outcome = executor
-        .execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await;
     assert!(
         outcome.is_ok(),
@@ -1052,7 +1313,12 @@ async fn af_aud_003_and_004_rclone_password_and_znc_multi_listener_and_version()
     };
     let znc_exec = DeclarativePackageExecutor::with_runner(znc_env.clone(), znc_runner.clone());
     znc_exec
-        .execute_recipe(&znc_recipe, PackageAction::Install, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &znc_recipe,
+            PackageAction::Install,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
 
@@ -1073,7 +1339,12 @@ async fn af_aud_003_and_004_rclone_password_and_znc_multi_listener_and_version()
     znc_env.app_port = 16501;
     let znc_update = DeclarativePackageExecutor::with_runner(znc_env, znc_runner);
     znc_update
-        .execute_recipe(&znc_recipe, PackageAction::Update, CancellationToken::new(), |_| {})
+        .execute_recipe(
+            &znc_recipe,
+            PackageAction::Update,
+            CancellationToken::new(),
+            |_| {},
+        )
         .await
         .unwrap();
 
@@ -1150,8 +1421,14 @@ async fn f01_reinstall_action_preserves_existing_secrets_in_legacy_and_declarati
         delete_data: false,
         ..Default::default()
     };
-    assert_eq!(PackageAction::parse("reinstall"), Some(PackageAction::Reinstall));
-    assert_eq!(PackageOperation::parse("reinstall"), Some(PackageOperation::Reinstall));
+    assert_eq!(
+        PackageAction::parse("reinstall"),
+        Some(PackageAction::Reinstall)
+    );
+    assert_eq!(
+        PackageOperation::parse("reinstall"),
+        Some(PackageOperation::Reinstall)
+    );
     assert!(script_matches_package_identity(
         "reinstall",
         "sonarr",
@@ -1171,12 +1448,16 @@ async fn f01_reinstall_action_preserves_existing_secrets_in_legacy_and_declarati
         })
         .collect();
     assert_eq!(
-        env_map.get("AF_KEEP_EXISTING_SECRETS").and_then(|v| v.as_deref()),
+        env_map
+            .get("AF_KEEP_EXISTING_SECRETS")
+            .and_then(|v| v.as_deref()),
         Some("1"),
         "reinstall must set AF_KEEP_EXISTING_SECRETS=1"
     );
     assert_eq!(
-        env_map.get("AF_LIFECYCLE_ACTION").and_then(|v| v.as_deref()),
+        env_map
+            .get("AF_LIFECYCLE_ACTION")
+            .and_then(|v| v.as_deref()),
         Some("reinstall"),
         "reinstall must set AF_LIFECYCLE_ACTION=reinstall"
     );
@@ -1324,18 +1605,38 @@ async fn f03_default_bash_lifecycle_writes_and_removes_systemd_sandbox_dropin() 
     fs::create_dir_all(root.join("var/lib/sonarr")).unwrap();
     fs::write(root.join("var/lib/sonarr/.af-version"), "4.0.0\n").unwrap();
 
+    // Seed a legacy unnumbered drop-in to verify install cleans it up so numeric operator
+    // overrides (20-*.conf..99-*.conf) are never shadowed.
+    let dropin_dir = root.join("etc/systemd/system/sonarr.service.d");
+    fs::create_dir_all(&dropin_dir).unwrap();
+    let legacy_dropin = dropin_dir.join("aetherflow-sandbox.conf");
+    fs::write(&legacy_dropin, "[Service]\nUMask=0077\n").unwrap();
+
     ensure_package_sandbox_dropin_under_root(Some(&root), "sonarr", "install").unwrap();
-    let dropin = root.join("etc/systemd/system/sonarr.service.d/aetherflow-sandbox.conf");
+    let dropin = dropin_dir.join("10-aetherflow-sandbox.conf");
     assert!(
         dropin.is_file(),
-        "expected default Bash install path to write systemd sandbox drop-in at {}",
+        "expected default Bash install path to write canonical systemd sandbox drop-in at {}",
         dropin.display()
+    );
+    assert!(
+        !legacy_dropin.exists(),
+        "expected install path to remove legacy unnumbered aetherflow-sandbox.conf"
+    );
+    let dropin_content = fs::read_to_string(&dropin).unwrap();
+    assert!(
+        dropin_content.contains("UMask=0002"),
+        "expected shared-media sonarr drop-in to use UMask=0002, got:\n{dropin_content}"
     );
 
     ensure_package_sandbox_dropin_under_root(Some(&root), "sonarr", "reinstall").unwrap();
     assert!(
         dropin.is_file(),
         "expected default Bash reinstall path to preserve/write systemd sandbox drop-in"
+    );
+    assert!(
+        !legacy_dropin.exists(),
+        "expected reinstall path to keep legacy unnumbered aetherflow-sandbox.conf absent"
     );
 
     ensure_package_sandbox_dropin_under_root(Some(&root), "sonarr", "remove").unwrap();

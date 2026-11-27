@@ -140,27 +140,27 @@ async fn test_threadfin_execute_recipe_staging_preflight_allows_disk_var_tmp_and
                 0o600
             );
         }
-        for dropin_name in ["10-aetherflow-sandbox.conf", "aetherflow-sandbox.conf"] {
-            let dropin_text = fs::read_to_string(
-                root.join("etc/systemd/system/threadfin.service.d")
-                    .join(dropin_name),
-            )
-            .unwrap();
-            assert!(
-                dropin_text.contains("ReadWritePaths=/var/lib/threadfin ")
-                    || dropin_text.contains("ReadWritePaths=-/var/lib/threadfin "),
-                "{dropin_name} must refresh ReadWritePaths after WriteSystemdUnit, got:\n{dropin_text}"
-            );
-            assert!(
-                !dropin_text.contains("/var/lib/threadfin /var/lib/threadfin")
-                    && !dropin_text.contains("-/var/lib/threadfin -/var/lib/threadfin"),
-                "{dropin_name} must deduplicate {{SERVICE_HOME}} against /var/lib/threadfin, got:\n{dropin_text}"
-            );
-            assert!(
-                !dropin_text.contains("/root"),
-                "{dropin_name} must not leak /root into ReadWritePaths, got:\n{dropin_text}"
-            );
-        }
+        let dropin_dir = root.join("etc/systemd/system/threadfin.service.d");
+        assert!(
+            !dropin_dir.join("aetherflow-sandbox.conf").exists(),
+            "legacy unnumbered aetherflow-sandbox.conf must not be written"
+        );
+        let dropin_text =
+            fs::read_to_string(dropin_dir.join("10-aetherflow-sandbox.conf")).unwrap();
+        assert!(
+            dropin_text.contains("ReadWritePaths=/var/lib/threadfin ")
+                || dropin_text.contains("ReadWritePaths=-/var/lib/threadfin "),
+            "10-aetherflow-sandbox.conf must refresh ReadWritePaths after WriteSystemdUnit, got:\n{dropin_text}"
+        );
+        assert!(
+            !dropin_text.contains("/var/lib/threadfin /var/lib/threadfin")
+                && !dropin_text.contains("-/var/lib/threadfin -/var/lib/threadfin"),
+            "10-aetherflow-sandbox.conf must deduplicate {{SERVICE_HOME}} against /var/lib/threadfin, got:\n{dropin_text}"
+        );
+        assert!(
+            !dropin_text.contains("/root"),
+            "10-aetherflow-sandbox.conf must not leak /root into ReadWritePaths, got:\n{dropin_text}"
+        );
         let _ = fs::remove_dir_all(&root);
 
         // 2. Symlinked <root>/var/tmp must be rejected by validate_filesystem_path.

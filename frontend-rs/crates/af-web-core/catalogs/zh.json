@@ -543,6 +543,7 @@
     "storageExportModeReadOnly": "只读",
     "storageExportModeReadWrite": "读写",
     "storageExportOwnerMapping": "远程写入映射到 UID {uid}，GID {gid}",
+    "storageExportSystemGidWarning": "GID {gid} 位于主机本地系统范围（1–999），在对等节点上可能对应不同用户组。若需跨主机写入或硬链接，请在两台服务器上使用相同 GID >= 1000（如 2000）的共享组并设置目录权限 2775。",
     "storageExportCreatedAt": "导出时间：{created_at}",
     "storageExportPathLabel": "要导出的本地文件夹",
     "storageExportPathPlaceholder": "/srv/media/movies",

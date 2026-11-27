@@ -543,6 +543,7 @@
     "storageExportModeReadOnly": "Schreibgeschützt",
     "storageExportModeReadWrite": "Lesen und Schreiben",
     "storageExportOwnerMapping": "Entfernte Schreibvorgänge werden auf UID {uid}, GID {gid} abgebildet",
+    "storageExportSystemGidWarning": "GID {gid} liegt im hostlokalen Systembereich (1–999) und kann auf Peers einer anderen Gruppe entsprechen. Für serverübergreifende Schreibvorgänge oder Hardlinks verwenden Sie auf beiden Servern eine gemeinsame Gruppe mit identischer GID >= 1000 (z. B. 2000) und Modus 2775.",
     "storageExportCreatedAt": "Exportiert am {created_at}",
     "storageExportPathLabel": "Zu exportierender lokaler Ordner",
     "storageExportPathPlaceholder": "/srv/media/movies",

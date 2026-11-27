@@ -299,6 +299,24 @@ exit 0
                 self.assertNotEqual(res.returncode, 0, f"{cmd_args}: {res.stdout}{res.stderr}")
                 self.assertIn("Failed to reload systemd daemon", res.stderr)
 
+    def test_profile_block_uses_0002_for_shared_media_units_and_0077_for_isolated_units(self):
+        media_out = "\n".join(
+            self.run_functions("profile_block native qbittorrent.service")
+        )
+        self.assertIn("UMask=0002", media_out)
+        self.assertNotIn("UMask=0077", media_out)
+
+        arr_out = "\n".join(
+            self.run_functions("profile_block dotnet sonarr.service")
+        )
+        self.assertIn("UMask=0002", arr_out)
+
+        isolated_out = "\n".join(
+            self.run_functions("profile_block native librespeed.service")
+        )
+        self.assertIn("UMask=0077", isolated_out)
+        self.assertNotIn("UMask=0002", isolated_out)
+
 
 if __name__ == "__main__":
     unittest.main()

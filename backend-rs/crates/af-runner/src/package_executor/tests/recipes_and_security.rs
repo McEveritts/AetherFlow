@@ -909,9 +909,12 @@ async fn test_verified_elf_binary_recipe_and_pre_service_sandbox() {
     let unit = fs::read_to_string(root.join("etc/systemd/system/threadfin.service")).unwrap();
     assert!(unit.contains("-port=34400"));
 
-    // Verify systemd sandbox drop-in was generated for threadfin.service
-    let dropin = root.join("etc/systemd/system/threadfin.service.d/aetherflow-sandbox.conf");
+    // Verify canonical systemd sandbox drop-in was generated for threadfin.service
+    let dropin = root.join("etc/systemd/system/threadfin.service.d/10-aetherflow-sandbox.conf");
     assert!(dropin.is_file());
+    assert!(!root
+        .join("etc/systemd/system/threadfin.service.d/aetherflow-sandbox.conf")
+        .exists());
     let dropin_text = fs::read_to_string(dropin).unwrap();
     assert!(dropin_text.contains("NoNewPrivileges=yes"));
 

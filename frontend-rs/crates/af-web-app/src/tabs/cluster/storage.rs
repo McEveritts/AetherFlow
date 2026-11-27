@@ -1667,6 +1667,12 @@ pub fn StorageManagerModal(
                                                 (Some(uid), Some(gid)) => Some((uid.to_string(), gid.to_string())),
                                                 _ => None,
                                             };
+                                            let system_gid_warning = export
+                                                .writable
+                                                .then_some(export.squash_gid)
+                                                .flatten()
+                                                .filter(|&gid| gid > 0 && gid < 1000)
+                                                .map(|gid| gid.to_string());
                                             let created_at = export.created_at.trim().to_string();
 
                                             view! {
@@ -1686,6 +1692,17 @@ pub fn StorageManagerModal(
                                                                             context,
                                                                             "Cluster.storageExportOwnerMapping",
                                                                             &[("uid", &uid), ("gid", &gid)],
+                                                                        )}
+                                                                    </p>
+                                                                }
+                                                            })}
+                                                            {system_gid_warning.map(|gid| {
+                                                                view! {
+                                                                    <p class="text-xs text-amber-300">
+                                                                        {move || tt_with(
+                                                                            context,
+                                                                            "Cluster.storageExportSystemGidWarning",
+                                                                            &[("gid", &gid)],
                                                                         )}
                                                                     </p>
                                                                 }

@@ -3120,3 +3120,20 @@ async fn storage_mount_and_export_changes_auto_resync_active_transcode_worker_an
     rt_a.shutdown_all().await;
     rt_b.shutdown_all().await;
 }
+
+#[test]
+fn dynamic_system_gid_warning_flags_writable_system_gids_only() {
+    use super::storage::dynamic_system_gid_warning;
+
+    let warn = dynamic_system_gid_warning(true, Some(983))
+        .expect("writable system GID 983 must emit cross-host alignment warning");
+    assert!(warn.contains("GID 983"), "{warn}");
+    assert!(warn.contains("2775"), "{warn}");
+
+    assert!(dynamic_system_gid_warning(true, Some(1)).is_some());
+    assert!(dynamic_system_gid_warning(true, Some(999)).is_some());
+    assert!(dynamic_system_gid_warning(true, Some(1000)).is_none());
+    assert!(dynamic_system_gid_warning(true, Some(2000)).is_none());
+    assert!(dynamic_system_gid_warning(false, Some(983)).is_none());
+    assert!(dynamic_system_gid_warning(true, None).is_none());
+}
