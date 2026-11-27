@@ -2833,7 +2833,12 @@ fn default_transcode_env_file_is_secret_free_commented_out_and_documents_tuning_
         "# AF_TRANSCODE_WORKER_MAX_JOBS=8",
         "# AF_TRANSCODE_FFMPEG_THREADS=",
         "# AF_TRANSCODE_ADAPT_BACKEND=off",
-        "# AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=false",
+        "# Enable hardware Vulkan Compute for libplacebo HDR tone-mapping and *_vulkan filters (true/false):",
+        "# AF_TRANSCODE_VULKAN_COMPUTE=true",
+        "# Scale via scale_vaapi before Vulkan libplacebo HDR tone-mapping (default true; set false to disable):",
+        "# AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=true",
+        "# Enable experimental Vulkan Video hardware decode/encode (-hwaccel vulkan, *_vulkan codecs; off by default):",
+        "# AF_TRANSCODE_VULKAN_VIDEO=false",
         "# RUSTICL_ENABLE=radeonsi",
         "# MESA_SHADER_CACHE_DIR=/var/cache/aetherflow-transcode-worker/mesa-cache",
         "# MESA_SHADER_CACHE_MAX_SIZE=512M",
@@ -2846,4 +2851,9 @@ fn default_transcode_env_file_is_secret_free_commented_out_and_documents_tuning_
             "default transcode.env missing documented variable {documented:?}:\n{content}"
         );
     }
+
+    assert!(
+        !content.contains("# AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=false"),
+        "default transcode.env should document AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=true instead of false:\n{content}"
+    );
 }

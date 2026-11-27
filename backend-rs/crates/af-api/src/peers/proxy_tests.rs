@@ -2773,6 +2773,11 @@ async fn peer_tunnel_health_reports_inbound_grant_generation_transcode_and_reque
             hw_decoders: vec![],
             hw_encoders_verified: false,
             adapt_backend_mode: None,
+            vulkan_compute: None,
+            vulkan_device: None,
+            vulkan_video: None,
+            vulkan_video_decode_codecs: Vec::new(),
+            vulkan_video_encode_codecs: Vec::new(),
         },
     ));
 

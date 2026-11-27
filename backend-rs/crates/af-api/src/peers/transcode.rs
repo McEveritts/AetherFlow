@@ -4507,6 +4507,20 @@ fn parse_encoders_json(raw: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn worker_vulkan_capabilities(
+    caps: Option<&TranscodeCapabilities>,
+) -> af_transcode::WorkerVulkanCapabilities<'_> {
+    match caps {
+        Some(c) => af_transcode::WorkerVulkanCapabilities {
+            vulkan_compute: c.vulkan_compute,
+            vulkan_video: c.vulkan_video,
+            vulkan_video_decode_codecs: c.vulkan_video_decode_codecs.as_slice(),
+            vulkan_video_encode_codecs: c.vulkan_video_encode_codecs.as_slice(),
+        },
+        None => af_transcode::WorkerVulkanCapabilities::default(),
+    }
+}
+
 fn worker_supports_required_capability(
     args: &[String],
     cap: &argv::Capability,
@@ -4518,13 +4532,15 @@ fn worker_supports_required_capability(
         .map(TranscodeCapabilities::effective_adapt_backend_mode)
         .unwrap_or(af_transcode::BackendAdaptMode::Off);
     let hw_decoders: &[String] = remote_caps.map(|c| c.hw_decoders.as_slice()).unwrap_or(&[]);
-    af_transcode::argv::plan_backend_adaptation(
+    let vulkan = worker_vulkan_capabilities(remote_caps);
+    af_transcode::argv::plan_backend_adaptation_with_vulkan(
         args,
         cap,
         adapt_mode,
         encoders,
         hw_decoders,
         render_nodes,
+        &vulkan,
     )
     .is_some()
 }
@@ -4545,13 +4561,15 @@ fn local_supports_job(
             vendor_id: n.vendor_id.clone(),
         })
         .collect();
-    af_transcode::argv::plan_backend_adaptation(
+    let vulkan = worker_vulkan_capabilities(Some(&local_caps));
+    af_transcode::argv::plan_backend_adaptation_with_vulkan(
         args,
         required_cap,
         af_transcode::BackendAdaptMode::Off,
         &local_caps.encoders,
         &local_caps.hw_decoders,
         &local_render_nodes,
+        &vulkan,
     )
     .is_some()
 }
@@ -6230,6 +6248,16 @@ pub struct LocalTranscodeInfoView {
     pub cpu_usage_pct: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_usage_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulkan_compute: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulkan_device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulkan_video: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vulkan_video_decode_codecs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vulkan_video_encode_codecs: Vec<String>,
     pub render_nodes: Vec<RenderNodeInfo>,
     pub primary_render_node: Option<String>,
     pub transcoding_temp_path: String,
@@ -6271,6 +6299,16 @@ pub struct TranscodeWorkerView {
     pub gpu_usage_pct: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtt_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulkan_compute: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulkan_device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulkan_video: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vulkan_video_decode_codecs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vulkan_video_encode_codecs: Vec<String>,
     pub render_node: Option<String>,
     pub parity_ok: bool,
     pub parity_error: Option<String>,
@@ -6520,6 +6558,17 @@ async fn build_transcode_config_response(
             .as_ref()
             .and_then(|c| c.adapt_backend_mode)
             .map(|m| m.as_str().to_string());
+        let vulkan_compute = remote_caps.as_ref().and_then(|c| c.vulkan_compute);
+        let vulkan_device = remote_caps.as_ref().and_then(|c| c.vulkan_device.clone());
+        let vulkan_video = remote_caps.as_ref().and_then(|c| c.vulkan_video);
+        let vulkan_video_decode_codecs = remote_caps
+            .as_ref()
+            .map(|c| c.vulkan_video_decode_codecs.clone())
+            .unwrap_or_default();
+        let vulkan_video_encode_codecs = remote_caps
+            .as_ref()
+            .map(|c| c.vulkan_video_encode_codecs.clone())
+            .unwrap_or_default();
         let remote_load = runtime.transcode_state.remote_load_for(&link.id);
         let cpu_usage_pct = remote_load
             .as_ref()
@@ -6623,6 +6672,11 @@ async fn build_transcode_config_response(
             cpu_usage_pct,
             gpu_usage_pct,
             rtt_ms,
+            vulkan_compute,
+            vulkan_device,
+            vulkan_video,
+            vulkan_video_decode_codecs,
+            vulkan_video_encode_codecs,
             render_node,
             parity_ok,
             parity_error,
@@ -6690,6 +6744,17 @@ async fn build_transcode_config_response(
             .as_ref()
             .and_then(|l| l.gpu_usage_pct)
             .filter(|v| v.is_finite()),
+        vulkan_compute: local_caps.as_ref().and_then(|c| c.vulkan_compute),
+        vulkan_device: local_caps.as_ref().and_then(|c| c.vulkan_device.clone()),
+        vulkan_video: local_caps.as_ref().and_then(|c| c.vulkan_video),
+        vulkan_video_decode_codecs: local_caps
+            .as_ref()
+            .map(|c| c.vulkan_video_decode_codecs.clone())
+            .unwrap_or_default(),
+        vulkan_video_encode_codecs: local_caps
+            .as_ref()
+            .map(|c| c.vulkan_video_encode_codecs.clone())
+            .unwrap_or_default(),
         render_nodes: local_caps
             .as_ref()
             .map(|c| c.render_nodes.clone())

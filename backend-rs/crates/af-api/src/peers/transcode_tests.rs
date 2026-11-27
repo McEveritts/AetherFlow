@@ -448,6 +448,11 @@ fn sample_caps(
         hw_decoders: Vec::new(),
         hw_encoders_verified: false,
         adapt_backend_mode: None,
+        vulkan_compute: None,
+        vulkan_device: None,
+        vulkan_video: None,
+        vulkan_video_decode_codecs: Vec::new(),
+        vulkan_video_encode_codecs: Vec::new(),
     }
 }
 
@@ -5762,6 +5767,1199 @@ async fn admin_transcode_policy_roundtrip_validation_and_health_load_telemetry()
     // 5. clear_link_state removes cached remote_load as well.
     rt_a.transcode_state.clear_link_state(&a_link_id);
     assert_eq!(rt_a.transcode_state.remote_load_for(&a_link_id), None);
+
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 20. Separated Vulkan Compute vs. Vulkan Video Routing & Admin API Views
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_real_worker_with_vulkan_config(
+    worker_sock: PathBuf,
+    fake_ffmpeg: PathBuf,
+    max_jobs: usize,
+    adapt_mode: af_transcode::BackendAdaptMode,
+    render_nodes_override: Option<Vec<af_hardware::RenderNode>>,
+    vulkan_compute: bool,
+    vulkan_video: bool,
+    capabilities_override: Option<TranscodeCapabilities>,
+) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+    let mut cfg = WorkerConfig::for_paths(worker_sock, fake_ffmpeg.clone());
+    cfg.max_concurrent_jobs = max_jobs;
+    cfg.socket_mode = DEFAULT_WORKER_SOCKET_MODE;
+    cfg.adapt_backend_mode = adapt_mode;
+    cfg.render_nodes_override = render_nodes_override;
+    cfg.vulkan_compute = vulkan_compute;
+    cfg.vulkan_video = vulkan_video;
+    cfg.capabilities_override = capabilities_override;
+    let bound = bind_worker_socket(&cfg).expect("bind real worker socket");
+    let canonical_ffmpeg = fs::canonicalize(&fake_ffmpeg).expect("canonicalize fake ffmpeg");
+    let (tx, mut rx) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let _ = serve_worker_listener(bound, cfg, canonical_ffmpeg, async move {
+            let _ = rx.changed().await;
+        })
+        .await;
+    });
+    (tx, task)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn wire_extra_transcode_worker(
+    rt_ctrl: &Arc<PeerRuntime>,
+    db_ctrl: &Arc<StdMutex<Connection>>,
+    runner_ctrl: &Arc<FakePeerRunner>,
+    ip_ctrl: IpAddr,
+    ctrl_pubkey_seed: u8,
+    rt_w: &Arc<PeerRuntime>,
+    db_w: &Arc<StdMutex<Connection>>,
+    ip_w: IpAddr,
+    worker_pubkey_seed: u8,
+    worker_name: &str,
+    now_rfc3339: &str,
+) -> (String, String) {
+    let ctrl_lid = format!("link-{}", Uuid::new_v4().simple());
+    let w_lid = format!("link-{}", Uuid::new_v4().simple());
+    let ltok = format!("ltok-{}", Uuid::new_v4().simple());
+    let handle = spawn_tunnel_listener(Arc::clone(rt_w), ip_w, 0, None)
+        .await
+        .expect("spawn extra worker listener");
+    let port = handle.bound_addr.port();
+    *rt_w.listener_state.lock().await = Some(handle);
+    rt_ctrl
+        .tunnel_port_overrides
+        .write()
+        .unwrap()
+        .insert(ip_w, port);
+    {
+        let conn = db_w.lock().unwrap();
+        db_peers::upsert_peer_identity(
+            &conn,
+            &af_db::peers::PeerIdentity {
+                wg_pubkey: fixture_wg_pubkey(worker_pubkey_seed),
+                tunnel_ip: ip_w.to_string(),
+                wg_port: 51821,
+                created_at: now_rfc3339.to_string(),
+            },
+        )
+        .unwrap();
+        db_peers::insert_peer_link(
+            &conn,
+            &af_db::peers::PeerLink {
+                id: w_lid.clone(),
+                name: "jellyfin-main".to_string(),
+                wg_pubkey: fixture_wg_pubkey(ctrl_pubkey_seed),
+                tunnel_ip: ip_ctrl.to_string(),
+                endpoint: "10.90.0.1".to_string(),
+                wg_port: 51821,
+                state: "active".to_string(),
+                peer_version: Some("4.0.0-p9-test".to_string()),
+                peer_protocol: Some(1),
+                capabilities: Some(r#"["links","grants","storage","transcode"]"#.to_string()),
+                rtt_ms: Some(1.0),
+                last_ok_at: Some(now_rfc3339.to_string()),
+                last_error: None,
+                consecutive_failures: 0,
+                inbound_token_hash: Some(sha256_prefixed(&ltok)),
+                pending_attempt_id: None,
+                pending_expires_at: None,
+                created_at: now_rfc3339.to_string(),
+                updated_at: now_rfc3339.to_string(),
+            },
+        )
+        .unwrap();
+    }
+    {
+        let conn = db_ctrl.lock().unwrap();
+        db_peers::insert_peer_link(
+            &conn,
+            &af_db::peers::PeerLink {
+                id: ctrl_lid.clone(),
+                name: worker_name.to_string(),
+                wg_pubkey: fixture_wg_pubkey(worker_pubkey_seed),
+                tunnel_ip: ip_w.to_string(),
+                endpoint: "10.90.0.9".to_string(),
+                wg_port: 51821,
+                state: "active".to_string(),
+                peer_version: Some("4.0.0-p9-test".to_string()),
+                peer_protocol: Some(1),
+                capabilities: Some(r#"["links","grants","storage","transcode"]"#.to_string()),
+                rtt_ms: Some(1.0),
+                last_ok_at: Some(now_rfc3339.to_string()),
+                last_error: None,
+                consecutive_failures: 0,
+                inbound_token_hash: None,
+                pending_attempt_id: None,
+                pending_expires_at: None,
+                created_at: now_rfc3339.to_string(),
+                updated_at: now_rfc3339.to_string(),
+            },
+        )
+        .unwrap();
+    }
+    runner_ctrl
+        .state
+        .lock()
+        .unwrap()
+        .credentials
+        .insert((PeerCredentialSlot::LinkToken, ctrl_lid.clone()), ltok);
+    let mut write_access = AccessMap::none();
+    write_access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        db_ctrl,
+        runner_ctrl,
+        &ctrl_lid,
+        db_w,
+        &w_lid,
+        "jellyfin-main",
+        write_access,
+        now_rfc3339,
+    );
+    (ctrl_lid, w_lid)
+}
+
+#[tokio::test]
+async fn vulkan_compute_libplacebo_routing_skips_disabled_worker_and_preserves_non_video_worker() {
+    let ips = next_transcode_loopback_ips(3);
+    let (ip_ctrl, ip_no_vk, ip_vk_compute) = (ips[0], ips[1], ips[2]);
+    let clock = TestClock::new(1_801_080_000);
+    let tmp = ShortTempDir::new("vkc");
+    let fake_ffmpeg = write_fake_ffmpeg_script(&tmp.path, "ffmpeg", standard_fake_ffmpeg_body());
+
+    let runner_ctrl = FakePeerRunner::new(fixture_wg_pubkey(230), ip_ctrl, 51821);
+    let runner_no_vk = FakePeerRunner::new(fixture_wg_pubkey(231), ip_no_vk, 51821);
+    let runner_vk_compute = FakePeerRunner::new(fixture_wg_pubkey(232), ip_vk_compute, 51821);
+
+    let (rt_no_vk, db_no_vk) = build_transcode_runtime(
+        "worker-no-vk",
+        Arc::clone(&runner_no_vk) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_vk_compute, db_vk_compute) = build_transcode_runtime(
+        "worker-vk-compute",
+        Arc::clone(&runner_vk_compute) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_ctrl, db_ctrl) = build_transcode_runtime(
+        "jellyfin-main",
+        Arc::clone(&runner_ctrl) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_no_vk),
+            client_ip: SocketAddr::from(([198, 51, 100, 28], 45028)),
+        }),
+        &clock,
+    );
+
+    let (ctrl_no_vk_id, no_vk_ctrl_id, _) =
+        pair_two_test_runtimes(&rt_ctrl, &rt_no_vk, ip_ctrl, ip_no_vk, "worker-no-vk").await;
+    let now_str = clock.now().to_rfc3339();
+    let mut write_access = AccessMap::none();
+    write_access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_ctrl,
+        &runner_ctrl,
+        &ctrl_no_vk_id,
+        &db_no_vk,
+        &no_vk_ctrl_id,
+        "jellyfin-main",
+        write_access,
+        &now_str,
+    );
+    let (ctrl_vk_compute_id, _) = wire_extra_transcode_worker(
+        &rt_ctrl,
+        &db_ctrl,
+        &runner_ctrl,
+        ip_ctrl,
+        230,
+        &rt_vk_compute,
+        &db_vk_compute,
+        ip_vk_compute,
+        232,
+        "worker-vk-compute",
+        &now_str,
+    )
+    .await;
+
+    let local_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    let mut no_vk_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x1002", "amd")],
+    );
+    no_vk_caps.hw_decoders = vec!["h264".into(), "hevc".into()];
+    no_vk_caps.hw_encoders_verified = true;
+    no_vk_caps.vulkan_compute = Some(false);
+    no_vk_caps.vulkan_video = Some(false);
+
+    let mut vk_compute_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x1002", "amd")],
+    );
+    vk_compute_caps.hw_decoders = vec!["h264".into(), "hevc".into()];
+    vk_compute_caps.hw_encoders_verified = true;
+    vk_compute_caps.vulkan_compute = Some(true);
+    vk_compute_caps.vulkan_device = Some("AMD Radeon Graphics".to_string());
+    vk_compute_caps.vulkan_video = Some(false);
+
+    let no_vk_sock = make_socket_subdir(&tmp.path, "nv").join("w.sock");
+    let vk_compute_sock = make_socket_subdir(&tmp.path, "vc").join("w.sock");
+    let (nv_stop, nv_task) = spawn_real_worker_with_vulkan_config(
+        no_vk_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::Off,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x1002".to_string()),
+        }]),
+        false,
+        false,
+        Some(no_vk_caps.clone()),
+    );
+    let (vc_stop, vc_task) = spawn_real_worker_with_vulkan_config(
+        vk_compute_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::Off,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x1002".to_string()),
+        }]),
+        true,
+        false,
+        Some(vk_compute_caps.clone()),
+    );
+    rt_no_vk
+        .transcode_state
+        .set_worker_socket_override(no_vk_sock);
+    rt_vk_compute
+        .transcode_state
+        .set_worker_socket_override(vk_compute_sock);
+
+    rt_ctrl
+        .transcode_state
+        .set_local_capabilities_override(Some(local_caps));
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_no_vk_id, no_vk_caps);
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_vk_compute_id, vk_compute_caps);
+
+    {
+        let conn = db_ctrl.lock().unwrap();
+        for (lid, weight) in [(&ctrl_no_vk_id, 100i64), (&ctrl_vk_compute_id, 10i64)] {
+            db_peers::upsert_transcode_worker(
+                &conn,
+                &af_db::peers::TranscodeWorker {
+                    link_id: lid.clone(),
+                    enabled: true,
+                    weight,
+                    max_jobs: 4,
+                    ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+                    encoders: Some(r#"["libx264","h264_vaapi"]"#.to_string()),
+                    render_node: Some("/dev/dri/renderD128".to_string()),
+                    parity_ok: true,
+                    parity_error: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    let disp_sock = make_socket_subdir(&tmp.path, "dp").join("d.sock");
+    rt_ctrl
+        .transcode_state
+        .set_dispatcher_socket_override(disp_sock.clone());
+    ensure_dispatcher_started(&rt_ctrl).await.unwrap();
+
+    let shim_cfg = ShimConfig {
+        real_ffmpeg: fake_ffmpeg,
+        dispatcher_socket: disp_sock,
+        handshake_timeout: Duration::from_secs(2),
+        frame_write_timeout: Duration::from_secs(5),
+    };
+
+    let hdr_placebo_args: Vec<String> = vec![
+        "-init_hw_device".into(),
+        "vaapi=va:/dev/dri/renderD128".into(),
+        "-init_hw_device".into(),
+        "vulkan=vk@va".into(),
+        "-hwaccel".into(),
+        "vaapi".into(),
+        "-hwaccel_output_format".into(),
+        "vaapi".into(),
+        "-c:v".into(),
+        "hevc".into(),
+        "-i".into(),
+        "hdr_movie.mkv".into(),
+        "-vf".into(),
+        "hwmap=derive_device=vulkan,libplacebo=w=1920:h=1080:tonemapping=bt.2390:format=nv12,hwmap=derive_device=vaapi:reverse=1".into(),
+        "-c:v".into(),
+        "h264_vaapi".into(),
+        "out.mkv".into(),
+    ];
+
+    // Repeated dispatches must skip worker-no-vk (weight=100, vulkan_compute=false) and route
+    // exclusively to worker-vk-compute (vulkan_compute=true, vulkan_video=false).
+    for expected_jobs in 1..=3 {
+        clock.advance(1);
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &hdr_placebo_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(dec, ShimDecision::RemoteExited(0));
+        let jobs = wait_for_job_count(&db_ctrl, expected_jobs).await;
+        assert_eq!(
+            jobs[0].link_id.as_deref(),
+            Some(ctrl_vk_compute_id.as_str()),
+            "VA-API + libplacebo HDR job must skip vulkan_compute=false worker and pick vulkan_compute=true, vulkan_video=false worker"
+        );
+    }
+    assert!(
+        !audit_actions_list(&db_no_vk).contains(&"peer_transcode_job_started".to_string()),
+        "worker with vulkan_compute=false must never receive a libplacebo job"
+    );
+
+    // Disabling worker-vk-compute leaves only worker-no-vk -> must fall back locally.
+    db_ctrl
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE transcode_workers SET enabled = 0 WHERE link_id = ?1",
+            rusqlite::params![ctrl_vk_compute_id],
+        )
+        .unwrap();
+    clock.advance(1);
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &hdr_placebo_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(
+            dec,
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal
+            },
+            "HDR libplacebo job must fall back locally when only a vulkan_compute=false worker is enabled"
+        );
+    }
+    assert!(
+        !audit_actions_list(&db_no_vk).contains(&"peer_transcode_job_started".to_string()),
+        "worker-no-vk must still never be invoked"
+    );
+
+    stop_dispatcher(&rt_ctrl).await;
+    let _ = nv_stop.send(true);
+    let _ = vc_stop.send(true);
+    let _ = nv_task.await;
+    let _ = vc_task.await;
+    rt_ctrl.shutdown_all().await;
+    rt_no_vk.shutdown_all().await;
+    rt_vk_compute.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn vulkan_video_decode_and_encode_require_vulkan_video_and_matching_codecs() {
+    let ips = next_transcode_loopback_ips(3);
+    let (ip_ctrl, ip_compute_only, ip_vk_video) = (ips[0], ips[1], ips[2]);
+    let clock = TestClock::new(1_801_090_000);
+    let tmp = ShortTempDir::new("vkv");
+    let fake_ffmpeg = write_fake_ffmpeg_script(&tmp.path, "ffmpeg", standard_fake_ffmpeg_body());
+
+    let runner_ctrl = FakePeerRunner::new(fixture_wg_pubkey(233), ip_ctrl, 51821);
+    let runner_compute_only = FakePeerRunner::new(fixture_wg_pubkey(234), ip_compute_only, 51821);
+    let runner_vk_video = FakePeerRunner::new(fixture_wg_pubkey(235), ip_vk_video, 51821);
+
+    let (rt_compute_only, db_compute_only) = build_transcode_runtime(
+        "worker-compute-only",
+        Arc::clone(&runner_compute_only) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_vk_video, db_vk_video) = build_transcode_runtime(
+        "worker-vk-video",
+        Arc::clone(&runner_vk_video) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_ctrl, db_ctrl) = build_transcode_runtime(
+        "jellyfin-main",
+        Arc::clone(&runner_ctrl) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_compute_only),
+            client_ip: SocketAddr::from(([198, 51, 100, 29], 45029)),
+        }),
+        &clock,
+    );
+
+    let (ctrl_compute_only_id, compute_only_ctrl_id, _) = pair_two_test_runtimes(
+        &rt_ctrl,
+        &rt_compute_only,
+        ip_ctrl,
+        ip_compute_only,
+        "worker-compute-only",
+    )
+    .await;
+    let now_str = clock.now().to_rfc3339();
+    let mut write_access = AccessMap::none();
+    write_access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_ctrl,
+        &runner_ctrl,
+        &ctrl_compute_only_id,
+        &db_compute_only,
+        &compute_only_ctrl_id,
+        "jellyfin-main",
+        write_access,
+        &now_str,
+    );
+    let (ctrl_vk_video_id, _) = wire_extra_transcode_worker(
+        &rt_ctrl,
+        &db_ctrl,
+        &runner_ctrl,
+        ip_ctrl,
+        233,
+        &rt_vk_video,
+        &db_vk_video,
+        ip_vk_video,
+        235,
+        "worker-vk-video",
+        &now_str,
+    )
+    .await;
+
+    let local_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    let mut compute_only_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi", "h264_vulkan"],
+        &[("/dev/dri/renderD128", "0x1002", "amd")],
+    );
+    compute_only_caps.hw_decoders = vec!["h264".into(), "hevc".into(), "av1".into()];
+    compute_only_caps.hw_encoders_verified = true;
+    compute_only_caps.vulkan_compute = Some(true);
+    compute_only_caps.vulkan_device = Some("AMD Radeon Graphics".to_string());
+    compute_only_caps.vulkan_video = Some(false);
+
+    let mut vk_video_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi", "h264_vulkan", "hevc_vulkan"],
+        &[("/dev/dri/renderD128", "0x1002", "amd")],
+    );
+    vk_video_caps.hw_decoders = vec!["h264".into(), "hevc".into()];
+    vk_video_caps.hw_encoders_verified = true;
+    vk_video_caps.vulkan_compute = Some(true);
+    vk_video_caps.vulkan_device = Some("AMD Radeon RX Graphics".to_string());
+    vk_video_caps.vulkan_video = Some(true);
+    vk_video_caps.vulkan_video_decode_codecs = vec!["h264".into(), "av1".into()];
+    vk_video_caps.vulkan_video_encode_codecs = vec!["h264".into()];
+
+    let co_sock = make_socket_subdir(&tmp.path, "co").join("w.sock");
+    let vv_sock = make_socket_subdir(&tmp.path, "vv").join("w.sock");
+    let (co_stop, co_task) = spawn_real_worker_with_vulkan_config(
+        co_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::Off,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x1002".to_string()),
+        }]),
+        true,
+        false,
+        Some(compute_only_caps.clone()),
+    );
+    let (vv_stop, vv_task) = spawn_real_worker_with_vulkan_config(
+        vv_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::Off,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x1002".to_string()),
+        }]),
+        true,
+        true,
+        Some(vk_video_caps.clone()),
+    );
+    rt_compute_only
+        .transcode_state
+        .set_worker_socket_override(co_sock);
+    rt_vk_video
+        .transcode_state
+        .set_worker_socket_override(vv_sock);
+
+    rt_ctrl
+        .transcode_state
+        .set_local_capabilities_override(Some(local_caps));
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_compute_only_id, compute_only_caps);
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_vk_video_id, vk_video_caps.clone());
+
+    {
+        let conn = db_ctrl.lock().unwrap();
+        // Start with only worker-compute-only enabled (worker-vk-video disabled).
+        db_peers::upsert_transcode_worker(
+            &conn,
+            &af_db::peers::TranscodeWorker {
+                link_id: ctrl_compute_only_id.clone(),
+                enabled: true,
+                weight: 100,
+                max_jobs: 4,
+                ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+                encoders: Some(r#"["libx264","h264_vaapi","h264_vulkan"]"#.to_string()),
+                render_node: Some("/dev/dri/renderD128".to_string()),
+                parity_ok: true,
+                parity_error: None,
+            },
+        )
+        .unwrap();
+        db_peers::upsert_transcode_worker(
+            &conn,
+            &af_db::peers::TranscodeWorker {
+                link_id: ctrl_vk_video_id.clone(),
+                enabled: false,
+                weight: 10,
+                max_jobs: 4,
+                ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+                encoders: Some(
+                    r#"["libx264","h264_vaapi","h264_vulkan","hevc_vulkan"]"#.to_string(),
+                ),
+                render_node: Some("/dev/dri/renderD128".to_string()),
+                parity_ok: true,
+                parity_error: None,
+            },
+        )
+        .unwrap();
+    }
+
+    let disp_sock = make_socket_subdir(&tmp.path, "dp").join("d.sock");
+    rt_ctrl
+        .transcode_state
+        .set_dispatcher_socket_override(disp_sock.clone());
+    ensure_dispatcher_started(&rt_ctrl).await.unwrap();
+
+    let shim_cfg = ShimConfig {
+        real_ffmpeg: fake_ffmpeg,
+        dispatcher_socket: disp_sock,
+        handshake_timeout: Duration::from_secs(2),
+        frame_write_timeout: Duration::from_secs(5),
+    };
+
+    let vk_decode_args: Vec<String> = vec![
+        "-init_hw_device".into(),
+        "vulkan=vk".into(),
+        "-hwaccel".into(),
+        "vulkan".into(),
+        "-hwaccel_output_format".into(),
+        "vulkan".into(),
+        "-c:v".into(),
+        "av1".into(),
+        "-i".into(),
+        "av1.mkv".into(),
+        "-c:v".into(),
+        "libx264".into(),
+        "out.mkv".into(),
+    ];
+    let vk_encode_args: Vec<String> = vec![
+        "-init_hw_device".into(),
+        "vulkan=vk".into(),
+        "-i".into(),
+        "movie.mkv".into(),
+        "-c:v".into(),
+        "h264_vulkan".into(),
+        "out.mkv".into(),
+    ];
+    let vk_both_args: Vec<String> = vec![
+        "-init_hw_device".into(),
+        "vulkan=vk".into(),
+        "-hwaccel".into(),
+        "vulkan".into(),
+        "-hwaccel_output_format".into(),
+        "vulkan".into(),
+        "-c:v".into(),
+        "av1".into(),
+        "-i".into(),
+        "av1.mkv".into(),
+        "-c:v".into(),
+        "h264_vulkan".into(),
+        "out.mkv".into(),
+    ];
+
+    // 1. With only worker-compute-only (vulkan_compute=true, vulkan_video=false), both Vulkan
+    //    Video decode and encode jobs are rejected and fall back locally.
+    for args in [&vk_decode_args, &vk_encode_args, &vk_both_args] {
+        clock.advance(1);
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec =
+            run_shim_protocol(args, &shim_cfg, stdin_fd.as_raw_fd(), &mut out, &mut err).await;
+        assert_eq!(
+            dec,
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal
+            },
+            "vulkan_compute=true + vulkan_video=false worker must reject Vulkan Video job"
+        );
+    }
+    assert!(
+        !audit_actions_list(&db_compute_only).contains(&"peer_transcode_job_started".to_string()),
+        "worker-compute-only must never be dispatched Vulkan Video jobs"
+    );
+
+    // 2. Enable worker-vk-video (vulkan_video=true, decode=[h264, av1], encode=[h264], encoders has h264_vulkan).
+    //    All three matching Vulkan Video jobs must route to worker-vk-video, skipping worker-compute-only (weight=100).
+    db_ctrl
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE transcode_workers SET enabled = 1 WHERE link_id = ?1",
+            rusqlite::params![ctrl_vk_video_id],
+        )
+        .unwrap();
+    let mut job_total = 3usize;
+    for args in [&vk_decode_args, &vk_encode_args, &vk_both_args] {
+        clock.advance(1);
+        job_total += 1;
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec =
+            run_shim_protocol(args, &shim_cfg, stdin_fd.as_raw_fd(), &mut out, &mut err).await;
+        assert_eq!(dec, ShimDecision::RemoteExited(0));
+        let jobs = wait_for_job_count(&db_ctrl, job_total).await;
+        assert_eq!(
+            jobs[0].link_id.as_deref(),
+            Some(ctrl_vk_video_id.as_str()),
+            "matching Vulkan Video job must select worker-vk-video"
+        );
+    }
+    assert!(
+        !audit_actions_list(&db_compute_only).contains(&"peer_transcode_job_started".to_string()),
+        "worker-compute-only must remain untouched when worker-vk-video handles Vulkan Video jobs"
+    );
+
+    // 3. Unmatched Vulkan Video decode codec (hevc) or encode codec (hevc_vulkan) must be rejected.
+    let vk_unmatched_decode: Vec<String> = vec![
+        "-init_hw_device".into(),
+        "vulkan=vk".into(),
+        "-hwaccel".into(),
+        "vulkan".into(),
+        "-c:v".into(),
+        "hevc".into(),
+        "-i".into(),
+        "hevc.mkv".into(),
+        "-c:v".into(),
+        "libx264".into(),
+        "out.mkv".into(),
+    ];
+    let vk_unmatched_encode: Vec<String> = vec![
+        "-init_hw_device".into(),
+        "vulkan=vk".into(),
+        "-i".into(),
+        "movie.mkv".into(),
+        "-c:v".into(),
+        "hevc_vulkan".into(),
+        "out.mkv".into(),
+    ];
+    for args in [&vk_unmatched_decode, &vk_unmatched_encode] {
+        clock.advance(1);
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec =
+            run_shim_protocol(args, &shim_cfg, stdin_fd.as_raw_fd(), &mut out, &mut err).await;
+        assert_eq!(
+            dec,
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal
+            },
+            "unmatched Vulkan Video decode/encode codec must be rejected"
+        );
+    }
+
+    // 4. Removing h264_vulkan from worker-vk-video's encoders rejects -c:v h264_vulkan even when
+    //    vulkan_video=true and vulkan_video_encode_codecs=["h264"].
+    let mut missing_enc_caps = vk_video_caps;
+    missing_enc_caps.encoders = vec!["libx264".into(), "h264_vaapi".into()];
+    rt_ctrl
+        .transcode_state
+        .record_remote_capabilities(&ctrl_vk_video_id, missing_enc_caps);
+    clock.advance(1);
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &vk_encode_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(
+            dec,
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal
+            },
+            "h264_vulkan job must be rejected when worker encoders omit h264_vulkan"
+        );
+    }
+
+    stop_dispatcher(&rt_ctrl).await;
+    let _ = co_stop.send(true);
+    let _ = vv_stop.send(true);
+    let _ = co_task.await;
+    let _ = vv_task.await;
+    rt_ctrl.shutdown_all().await;
+    rt_compute_only.shutdown_all().await;
+    rt_vk_video.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn local_first_overflows_vaapi_libplacebo_hdr_job_when_local_lacks_vulkan_compute() {
+    let ips = next_transcode_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = TestClock::new(1_801_100_000);
+    let tmp = ShortTempDir::new("vkl");
+    let fake_ffmpeg = write_fake_ffmpeg_script(&tmp.path, "ffmpeg", standard_fake_ffmpeg_body());
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(236), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(237), ip_b, 51821);
+    let (rt_b, db_b) = build_transcode_runtime(
+        "gpu-worker",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_a, db_a) = build_transcode_runtime(
+        "jellyfin-main",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 30], 45030)),
+        }),
+        &clock,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+    let mut access = AccessMap::none();
+    access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_a,
+        &runner_a,
+        &a_link_id,
+        &db_b,
+        &b_link_id,
+        "jellyfin-main",
+        access,
+        &clock.now().to_rfc3339(),
+    );
+
+    let mut local_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    local_caps.hw_decoders = vec!["h264".into(), "hevc".into()];
+    local_caps.vulkan_compute = Some(false);
+    local_caps.vulkan_video = Some(false);
+
+    let mut remote_caps = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x1002", "amd")],
+    );
+    remote_caps.hw_decoders = vec!["h264".into(), "hevc".into()];
+    remote_caps.vulkan_compute = Some(true);
+    remote_caps.vulkan_device = Some("AMD Radeon Graphics".to_string());
+    remote_caps.vulkan_video = Some(false);
+
+    let worker_sock = make_socket_subdir(&tmp.path, "w").join("w.sock");
+    let (w_stop, w_task) = spawn_real_worker_with_vulkan_config(
+        worker_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::Off,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x1002".to_string()),
+        }]),
+        true,
+        false,
+        Some(remote_caps.clone()),
+    );
+    rt_b.transcode_state.set_worker_socket_override(worker_sock);
+
+    rt_a.transcode_state
+        .set_local_capabilities_override(Some(local_caps.clone()));
+    rt_a.transcode_state.set_local_active_jobs_override(Some(0));
+    rt_a.transcode_state
+        .record_remote_capabilities(&a_link_id, remote_caps);
+
+    db_peers::upsert_transcode_worker(
+        &db_a.lock().unwrap(),
+        &af_db::peers::TranscodeWorker {
+            link_id: a_link_id.clone(),
+            enabled: true,
+            weight: 50,
+            max_jobs: 4,
+            ffmpeg_version: Some("8.1.3-Jellyfin".to_string()),
+            encoders: Some(r#"["libx264","h264_vaapi"]"#.to_string()),
+            render_node: Some("/dev/dri/renderD128".to_string()),
+            parity_ok: true,
+            parity_error: None,
+        },
+    )
+    .unwrap();
+
+    let (st, body) = call_admin(
+        &rt_a,
+        Method::PUT,
+        "/transcode",
+        Some(json!({ "dispatch_policy": "local_first", "local_max_jobs": 2 })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "PUT local_first failed: {body}");
+
+    let disp_sock = make_socket_subdir(&tmp.path, "d").join("d.sock");
+    rt_a.transcode_state
+        .set_dispatcher_socket_override(disp_sock.clone());
+    ensure_dispatcher_started(&rt_a).await.unwrap();
+
+    let shim_cfg = ShimConfig {
+        real_ffmpeg: fake_ffmpeg,
+        dispatcher_socket: disp_sock,
+        handshake_timeout: Duration::from_secs(2),
+        frame_write_timeout: Duration::from_secs(5),
+    };
+
+    // Plain VA-API SDR job still runs locally under local_first when local_active=0.
+    let sdr_vaapi_args: Vec<String> = vec![
+        "-hwaccel".into(),
+        "vaapi".into(),
+        "-c:v".into(),
+        "hevc".into(),
+        "-i".into(),
+        "sdr.mkv".into(),
+        "-c:v".into(),
+        "h264_vaapi".into(),
+        "out.mkv".into(),
+    ];
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &sdr_vaapi_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(
+            dec,
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal
+            },
+            "plain VA-API job should remain local under local_first"
+        );
+    }
+
+    // VA-API + libplacebo HDR job must overflow to the remote vulkan_compute=true worker even at local_active=0!
+    let hdr_placebo_args: Vec<String> = vec![
+        "-init_hw_device".into(),
+        "vaapi=va:/dev/dri/renderD128".into(),
+        "-init_hw_device".into(),
+        "vulkan=vk@va".into(),
+        "-hwaccel".into(),
+        "vaapi".into(),
+        "-hwaccel_output_format".into(),
+        "vaapi".into(),
+        "-c:v".into(),
+        "hevc".into(),
+        "-i".into(),
+        "hdr.mkv".into(),
+        "-vf".into(),
+        "hwmap=derive_device=vulkan,libplacebo=w=1920:h=1080:tonemapping=bt.2390:format=nv12,hwmap=derive_device=vaapi:reverse=1".into(),
+        "-c:v".into(),
+        "h264_vaapi".into(),
+        "out.mkv".into(),
+    ];
+    clock.advance(1);
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &hdr_placebo_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(
+            dec,
+            ShimDecision::RemoteExited(0),
+            "local_first must overflow VA-API + libplacebo HDR job when local vulkan_compute=false"
+        );
+        let jobs = wait_for_job_count(&db_a, 2).await;
+        assert_eq!(jobs[0].link_id.as_deref(), Some(a_link_id.as_str()));
+    }
+
+    // Once local host reports vulkan_compute=true (with vulkan_video=false), HDR job runs locally under local_first.
+    local_caps.vulkan_compute = Some(true);
+    rt_a.transcode_state
+        .set_local_capabilities_override(Some(local_caps));
+    clock.advance(1);
+    {
+        let stdin_fd = make_stdin_pipe(b"");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let dec = run_shim_protocol(
+            &hdr_placebo_args,
+            &shim_cfg,
+            stdin_fd.as_raw_fd(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+        assert_eq!(
+            dec,
+            ShimDecision::ExecLocal {
+                reason: LocalFallbackReason::DispatcherRunLocal
+            },
+            "local_first should run VA-API + libplacebo HDR job locally when local vulkan_compute=true"
+        );
+    }
+
+    stop_dispatcher(&rt_a).await;
+    let _ = w_stop.send(true);
+    let _ = w_task.await;
+    rt_a.shutdown_all().await;
+    rt_b.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn admin_transcode_get_exposes_and_omits_vulkan_capabilities() {
+    let ips = next_transcode_loopback_ips(2);
+    let (ip_a, ip_b) = (ips[0], ips[1]);
+    let clock = TestClock::new(1_801_110_000);
+
+    let runner_a = FakePeerRunner::new(fixture_wg_pubkey(238), ip_a, 51821);
+    let runner_b = FakePeerRunner::new(fixture_wg_pubkey(239), ip_b, 51821);
+    let (rt_b, db_b) = build_transcode_runtime(
+        "gpu-worker",
+        Arc::clone(&runner_b) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(UnreachablePublicTransport),
+        &clock,
+    );
+    let (rt_a, db_a) = build_transcode_runtime(
+        "seedbox-1",
+        Arc::clone(&runner_a) as Arc<dyn PeerRunner>,
+        FakePeerTranscodeRunner::new_arc(),
+        Arc::new(RouterPublicTransport {
+            target_runtime: Arc::clone(&rt_b),
+            client_ip: SocketAddr::from(([198, 51, 100, 31], 45031)),
+        }),
+        &clock,
+    );
+
+    let (a_link_id, b_link_id, _) =
+        pair_two_test_runtimes(&rt_a, &rt_b, ip_a, ip_b, "gpu-worker").await;
+    let mut access = AccessMap::none();
+    access.transcoding = af_db::peers::AccessLevel::Write;
+    install_transcode_grant_pair(
+        &db_a,
+        &runner_a,
+        &a_link_id,
+        &db_b,
+        &b_link_id,
+        "seedbox-1",
+        access,
+        &clock.now().to_rfc3339(),
+    );
+
+    let unprobed_local = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x8086", "intel")],
+    );
+    let unprobed_worker = sample_caps(
+        Some("8.1.3-2-trixie"),
+        Some("8.1.3-Jellyfin"),
+        &["libx264", "h264_vaapi"],
+        &[("/dev/dri/renderD128", "0x1002", "amd")],
+    );
+    rt_a.transcode_state
+        .set_local_capabilities_override(Some(unprobed_local.clone()));
+    rt_b.transcode_state
+        .set_local_capabilities_override(Some(unprobed_worker.clone()));
+
+    // 1. Unprobed (None / empty): all 5 Vulkan fields are cleanly omitted on both local and workers.
+    run_health_tick(&rt_a).await;
+    let (st, unprobed_body) = call_admin(&rt_a, Method::GET, "/transcode", None).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "GET /transcode (unprobed) failed: {unprobed_body}"
+    );
+    let local_unprobed_obj = unprobed_body["local"].as_object().expect("local object");
+    let worker_unprobed_obj = unprobed_body["workers"][0]
+        .as_object()
+        .expect("worker object");
+    for key in [
+        "vulkan_compute",
+        "vulkan_device",
+        "vulkan_video",
+        "vulkan_video_decode_codecs",
+        "vulkan_video_encode_codecs",
+    ] {
+        assert!(
+            !local_unprobed_obj.contains_key(key),
+            "unprobed local should omit '{key}': {unprobed_body}"
+        );
+        assert!(
+            !worker_unprobed_obj.contains_key(key),
+            "unprobed worker should omit '{key}': {unprobed_body}"
+        );
+    }
+
+    // 2. Populated Vulkan fields propagate from local_caps and remote /health into GET /transcode.
+    let mut probed_local = unprobed_local;
+    probed_local.vulkan_compute = Some(true);
+    probed_local.vulkan_device = Some("Intel UHD Graphics 630".to_string());
+    probed_local.vulkan_video = Some(true);
+    probed_local.vulkan_video_decode_codecs = vec!["h264".into(), "hevc".into()];
+    probed_local.vulkan_video_encode_codecs = vec!["h264".into()];
+
+    let mut probed_worker = unprobed_worker;
+    probed_worker.vulkan_compute = Some(true);
+    probed_worker.vulkan_device = Some("AMD Radeon Graphics".to_string());
+    probed_worker.vulkan_video = Some(true);
+    probed_worker.vulkan_video_decode_codecs = vec!["h264".into(), "hevc".into(), "av1".into()];
+    probed_worker.vulkan_video_encode_codecs = vec!["h264".into()];
+
+    rt_a.transcode_state
+        .set_local_capabilities_override(Some(probed_local));
+    rt_b.transcode_state
+        .set_local_capabilities_override(Some(probed_worker.clone()));
+
+    clock.advance(20);
+    run_health_tick(&rt_a).await;
+    let (st, probed_body) = call_admin(&rt_a, Method::GET, "/transcode", None).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "GET /transcode (probed) failed: {probed_body}"
+    );
+
+    assert_eq!(probed_body["local"]["vulkan_compute"], true);
+    assert_eq!(
+        probed_body["local"]["vulkan_device"],
+        "Intel UHD Graphics 630"
+    );
+    assert_eq!(probed_body["local"]["vulkan_video"], true);
+    assert_eq!(
+        probed_body["local"]["vulkan_video_decode_codecs"],
+        json!(["h264", "hevc"])
+    );
+    assert_eq!(
+        probed_body["local"]["vulkan_video_encode_codecs"],
+        json!(["h264"])
+    );
+
+    let worker = &probed_body["workers"][0];
+    assert_eq!(worker["vulkan_compute"], true);
+    assert_eq!(worker["vulkan_device"], "AMD Radeon Graphics");
+    assert_eq!(worker["vulkan_video"], true);
+    assert_eq!(
+        worker["vulkan_video_decode_codecs"],
+        json!(["h264", "hevc", "av1"])
+    );
+    assert_eq!(worker["vulkan_video_encode_codecs"], json!(["h264"]));
+
+    // 3. When vulkan_video=false with empty codec lists, booleans/device appear while empty vecs stay omitted.
+    let mut compute_only_worker = probed_worker;
+    compute_only_worker.vulkan_video = Some(false);
+    compute_only_worker.vulkan_video_decode_codecs.clear();
+    compute_only_worker.vulkan_video_encode_codecs.clear();
+    rt_b.transcode_state
+        .set_local_capabilities_override(Some(compute_only_worker));
+    clock.advance(20);
+    run_health_tick(&rt_a).await;
+
+    let (st, partial_body) = call_admin(&rt_a, Method::GET, "/transcode", None).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "GET /transcode (partial) failed: {partial_body}"
+    );
+    let partial_worker = partial_body["workers"][0]
+        .as_object()
+        .expect("partial worker object");
+    assert_eq!(partial_worker.get("vulkan_compute"), Some(&json!(true)));
+    assert_eq!(
+        partial_worker.get("vulkan_device"),
+        Some(&json!("AMD Radeon Graphics"))
+    );
+    assert_eq!(partial_worker.get("vulkan_video"), Some(&json!(false)));
+    assert!(!partial_worker.contains_key("vulkan_video_decode_codecs"));
+    assert!(!partial_worker.contains_key("vulkan_video_encode_codecs"));
 
     rt_a.shutdown_all().await;
     rt_b.shutdown_all().await;

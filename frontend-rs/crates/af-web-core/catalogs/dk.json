@@ -754,6 +754,8 @@
     "transcodeAdaptBadgeGpu": "Tilpasning: GPU",
     "transcodeAdaptBadgePreferQsv": "Tilpasning: Foretræk QSV",
     "transcodeAdaptBadgeAll": "Tilpasning: GPU + CPU",
+    "transcodeVulkanComputeBadge": "Vulkan-beregning (HDR)",
+    "transcodeVulkanVideoBadge": "Vulkan-video",
     "transcodeTelemetryCpuLabel": "CPU",
     "transcodeTelemetryGpuLabel": "GPU"
   },

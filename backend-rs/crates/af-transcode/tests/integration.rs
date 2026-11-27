@@ -431,7 +431,8 @@ exit 42
 "#,
     );
 
-    let cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg.clone());
+    let mut cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg.clone());
+    cfg.capabilities_override = Some(TranscodeCapabilities::default());
     let (shutdown_tx, worker_handle) = start_fixture_worker(cfg).await;
 
     let tmp_val = dir.path().to_string_lossy().into_owned();
@@ -613,7 +614,8 @@ done
 "#,
     );
 
-    let cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg.clone());
+    let mut cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg.clone());
+    cfg.capabilities_override = Some(TranscodeCapabilities::default());
     let (shutdown_tx, worker_handle) = start_fixture_worker(cfg).await;
 
     for (sig, expected_line, expected_code) in [
@@ -713,8 +715,9 @@ async fn worker_reaps_disconnected_job_with_eof_queued_behind_full_stdin() {
         "real-ffmpeg",
         "#!/bin/sh\nprintf '%s' \"$$\"\nexec /bin/sleep 20\n",
     );
-    let (shutdown, worker) =
-        start_fixture_worker(WorkerConfig::for_paths(socket_path.clone(), ffmpeg)).await;
+    let mut cfg = WorkerConfig::for_paths(socket_path.clone(), ffmpeg);
+    cfg.capabilities_override = Some(TranscodeCapabilities::default());
+    let (shutdown, worker) = start_fixture_worker(cfg).await;
     let mut client = UnixStream::connect(&socket_path).await.unwrap();
     write_frame(
         &mut client,
@@ -783,7 +786,8 @@ wait
         ),
     );
 
-    let cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    let mut cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    cfg.capabilities_override = Some(TranscodeCapabilities::default());
     let (shutdown_tx, worker_handle) = start_fixture_worker(cfg).await;
 
     let mut stream = UnixStream::connect(&worker_sock)
@@ -1018,6 +1022,7 @@ async fn worker_validates_start_env_cwd_concurrency_and_vendor_render_node_rewri
         path: PathBuf::from("/dev/dri/renderD128"),
         vendor_id: Some("0x1002".to_string()), // AMD only
     }]);
+    cfg2.capabilities_override = Some(TranscodeCapabilities::default());
     let (shutdown_tx2, worker_handle2) = start_fixture_worker(cfg2).await;
 
     // QSV fails with DeviceUnavailable on AMD-only worker.
@@ -1226,6 +1231,8 @@ exit 1
             vendor_id: Some("0x8086".to_string()),
         }]),
         probe_timeout: Duration::from_secs(5),
+        vulkan_compute_override: None,
+        vulkan_video_override: None,
     };
 
     let report = probe_capabilities(&cfg).await.expect("probe capabilities");
@@ -1342,7 +1349,8 @@ async fn worker_streams_high_volume_output_across_64_frame_backpressure_boundary
         "#!/bin/sh\ndd if=/dev/zero bs=65536 count=96 status=none\nprintf 'DONE_ERR\\n' >&2\nexit 0\n",
     );
 
-    let cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    let mut cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    cfg.capabilities_override = Some(TranscodeCapabilities::default());
     let (shutdown_tx, worker_handle) = start_fixture_worker(cfg).await;
 
     let mut stream = UnixStream::connect(&worker_sock).await.unwrap();
@@ -1446,8 +1454,9 @@ async fn worker_backpressures_high_volume_stdin_and_reaps_overflowing_disconnect
         "paused-ffmpeg",
         "#!/bin/sh\nprintf '%s' \"$$\"\nexec /bin/sleep 20\n",
     );
-    let (shutdown2, worker2) =
-        start_fixture_worker(WorkerConfig::for_paths(paused_sock.clone(), paused_ffmpeg)).await;
+    let mut paused_cfg = WorkerConfig::for_paths(paused_sock.clone(), paused_ffmpeg);
+    paused_cfg.capabilities_override = Some(TranscodeCapabilities::default());
+    let (shutdown2, worker2) = start_fixture_worker(paused_cfg).await;
 
     let mut client = UnixStream::connect(&paused_sock).await.unwrap();
     write_frame(
@@ -1500,7 +1509,8 @@ async fn worker_rejects_network_protocols_and_widened_whitelist_without_spawning
         &format!("#!/bin/sh\ntouch '{}'\nexit 0\n", sentinel.display()),
     );
 
-    let cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    let mut cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    cfg.capabilities_override = Some(TranscodeCapabilities::default());
     let (shutdown_tx, worker_handle) = start_fixture_worker(cfg).await;
 
     let rejected_cases: &[(&str, &[&str])] = &[
@@ -1647,7 +1657,8 @@ async fn worker_injects_local_whitelist_per_input_and_clamps_untrusted_and_symli
         "#!/bin/sh\nprintf 'PWD:%s\\n' \"$(pwd -P)\"\nprintf 'ARG:%s\\n' \"$@\"\n",
     );
 
-    let cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    let mut cfg = WorkerConfig::for_paths(worker_sock.clone(), fake_ffmpeg);
+    cfg.capabilities_override = Some(TranscodeCapabilities::default());
     let (shutdown_tx, worker_handle) = start_fixture_worker(cfg).await;
 
     let run_job = |args: Vec<String>, cwd: String| {
@@ -1805,6 +1816,8 @@ EOF
             vendor_id: Some("0x8086".to_string()),
         }]),
         probe_timeout: Duration::from_secs(5),
+        vulkan_compute_override: None,
+        vulkan_video_override: None,
     };
     let intel_report = probe_capabilities(&intel_cfg).await.expect("probe intel");
     assert!(intel_report.hw_encoders_verified);
@@ -1838,6 +1851,8 @@ EOF
             vendor_id: Some("0x1002".to_string()),
         }]),
         probe_timeout: Duration::from_secs(5),
+        vulkan_compute_override: None,
+        vulkan_video_override: None,
     };
     let amd_report = probe_capabilities(&amd_cfg).await.expect("probe amd");
     assert!(amd_report.hw_encoders_verified);
@@ -2487,4 +2502,749 @@ async fn worker_unifies_plan_backend_adaptation_with_probed_encoders_and_hw_deco
 
     let _ = qsv_fb_shutdown.send(());
     let _ = qsv_fb_worker.await;
+}
+
+#[tokio::test]
+async fn capabilities_probe_separates_vulkan_compute_from_vulkan_video() {
+    let dir = TempDir::new("vk-caps");
+    let fake_ffmpeg = write_executable_script(
+        dir.path(),
+        "real-ffmpeg",
+        r#"#!/bin/sh
+if [ "$1" = "-version" ]; then
+    echo "ffmpeg version 8.1.3-Jellyfin"
+    exit 0
+fi
+if [ "$1" = "-hide_banner" ] && [ "$2" = "-encoders" ]; then
+    cat <<'EOF'
+Encoders:
+ V..... = Video
+ ------
+ V....D av1_vulkan           AV1 (Vulkan)
+ V....D ffv1_vulkan          FFV1 (Vulkan)
+ V....D h264_vaapi           H.264/AVC (VAAPI)
+ V....D h264_vulkan          H.264/AVC (Vulkan)
+ V....D hevc_vulkan          H.265/HEVC (Vulkan)
+ V....D libx264              libx264 H.264
+EOF
+    exit 0
+fi
+if [ "$4" = "-init_hw_device" ] && [ "$5" = "vulkan=vk" ]; then
+    cat >&2 <<'EOF'
+[Vulkan @ 0x55a100001000] Device 0 selected: AMD Radeon Graphics (RADV REMBRANDT) (integrated) (0x1681)
+[Vulkan @ 0x55a100001000] Queue families:
+[Vulkan @ 0x55a100001000]     0: graphics compute transfer sparse (queues: 1)
+[Vulkan @ 0x55a100001000]     1: transfer decode (queues: 1)
+[Vulkan @ 0x55a100001000]     2: transfer encode (queues: 1)
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_decode_queue
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_encode_queue
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_decode_h264
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_decode_h265
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_encode_h264
+EOF
+    exit 0
+fi
+exit 1
+"#,
+    );
+
+    let amd_node = vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }];
+
+    // 1. Compute enabled, Video disabled (default policy): advertises vulkan_compute=true & device,
+    //    vulkan_video=false, strips all *_vulkan encoders.
+    let compute_only_cfg = CapabilitiesConfig {
+        real_ffmpeg: fake_ffmpeg.clone(),
+        dpkg_query_path: None,
+        vainfo_path: None,
+        render_nodes_override: Some(amd_node.clone()),
+        probe_timeout: Duration::from_secs(5),
+        vulkan_compute_override: Some(true),
+        vulkan_video_override: Some(false),
+    };
+    let r1 = probe_capabilities(&compute_only_cfg)
+        .await
+        .expect("probe compute only");
+    assert_eq!(r1.vulkan_compute, Some(true));
+    assert_eq!(
+        r1.vulkan_device.as_deref(),
+        Some("AMD Radeon Graphics (RADV REMBRANDT)")
+    );
+    assert_eq!(r1.vulkan_video, Some(false));
+    assert!(r1.vulkan_video_decode_codecs.is_empty());
+    assert!(r1.vulkan_video_encode_codecs.is_empty());
+    assert_eq!(r1.encoders, vec!["h264_vaapi", "libx264"]);
+
+    // 2. Both Compute and Video enabled: advertises probed codecs and keeps only supported h264_vulkan.
+    let both_cfg = CapabilitiesConfig {
+        real_ffmpeg: fake_ffmpeg.clone(),
+        dpkg_query_path: None,
+        vainfo_path: None,
+        render_nodes_override: Some(amd_node.clone()),
+        probe_timeout: Duration::from_secs(5),
+        vulkan_compute_override: Some(true),
+        vulkan_video_override: Some(true),
+    };
+    let r2 = probe_capabilities(&both_cfg).await.expect("probe both");
+    assert_eq!(r2.vulkan_compute, Some(true));
+    assert_eq!(r2.vulkan_video, Some(true));
+    assert_eq!(r2.vulkan_video_decode_codecs, vec!["h264", "hevc"]);
+    assert_eq!(r2.vulkan_video_encode_codecs, vec!["h264"]);
+    assert_eq!(r2.encoders, vec!["h264_vaapi", "h264_vulkan", "libx264"]);
+
+    // 3. Both Compute and Video disabled: short-circuits without spawning the Vulkan probe subprocess,
+    //    clears vulkan_device, and strips all *_vulkan encoders.
+    let vk_probe_sentinel = dir.path().join("vk-probe-ran");
+    let sentinel_ffmpeg = write_executable_script(
+        dir.path(),
+        "sentinel-ffmpeg",
+        &format!(
+            r#"#!/bin/sh
+if [ "$1" = "-version" ]; then
+    echo "ffmpeg version 8.1.3-Jellyfin"
+    exit 0
+fi
+if [ "$1" = "-hide_banner" ] && [ "$2" = "-encoders" ]; then
+    cat <<'EOF'
+Encoders:
+ V..... = Video
+ ------
+ V....D av1_vulkan           AV1 (Vulkan)
+ V....D h264_vaapi           H.264/AVC (VAAPI)
+ V....D h264_vulkan          H.264/AVC (Vulkan)
+ V....D libx264              libx264 H.264
+EOF
+    exit 0
+fi
+touch '{}'
+exit 1
+"#,
+            vk_probe_sentinel.display()
+        ),
+    );
+    let disabled_cfg = CapabilitiesConfig {
+        real_ffmpeg: sentinel_ffmpeg,
+        dpkg_query_path: None,
+        vainfo_path: None,
+        render_nodes_override: Some(amd_node),
+        probe_timeout: Duration::from_secs(5),
+        vulkan_compute_override: Some(false),
+        vulkan_video_override: Some(false),
+    };
+    let r3 = probe_capabilities(&disabled_cfg)
+        .await
+        .expect("probe disabled");
+    assert_eq!(r3.vulkan_compute, Some(false));
+    assert_eq!(r3.vulkan_video, Some(false));
+    assert_eq!(r3.vulkan_device, None);
+    assert!(r3.vulkan_video_decode_codecs.is_empty());
+    assert!(r3.vulkan_video_encode_codecs.is_empty());
+    assert_eq!(r3.encoders, vec!["h264_vaapi", "libx264"]);
+    assert!(
+        !vk_probe_sentinel.exists(),
+        "Vulkan probe subprocess must not spawn when both vulkan_compute and vulkan_video are disabled"
+    );
+
+    // 4. Empty render_nodes_override (CPU-only fixture) synthesizes probed=true, compute=false
+    //    without touching host GPU.
+    let cpu_cfg = CapabilitiesConfig {
+        real_ffmpeg: fake_ffmpeg,
+        dpkg_query_path: None,
+        vainfo_path: None,
+        render_nodes_override: Some(vec![]),
+        probe_timeout: Duration::from_secs(5),
+        vulkan_compute_override: Some(true),
+        vulkan_video_override: Some(true),
+    };
+    let r4 = probe_capabilities(&cpu_cfg).await.expect("probe cpu-only");
+    assert_eq!(r4.vulkan_compute, Some(false));
+    assert_eq!(r4.vulkan_video, Some(false));
+    assert_eq!(r4.vulkan_device, None);
+    assert_eq!(r4.encoders, vec!["h264_vaapi", "libx264"]);
+}
+
+#[tokio::test]
+async fn worker_and_shim_enforce_vulkan_compute_vs_video_separation_and_local_tonemap_opt() {
+    use af_transcode::config::{
+        BackendAdaptMode, ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP, ENV_WORKER_VULKAN_COMPUTE,
+    };
+
+    let dir = TempDir::new("vk-sep");
+    let fake_ffmpeg = write_executable_script(
+        dir.path(),
+        "real-ffmpeg",
+        "#!/bin/sh\nprintf 'ARG:%s\\n' \"$@\"\n",
+    );
+    let cwd = dir.path().to_string_lossy().into_owned();
+
+    let run_worker_args = |sock: PathBuf, args: Vec<String>, cwd: String| async move {
+        let mut s = UnixStream::connect(&sock).await.unwrap();
+        write_frame(
+            &mut s,
+            &Frame::Start(StartRequest {
+                args,
+                cwd,
+                env_subset: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+        let first = read_frame(&mut s).await.unwrap().expect("first frame");
+        match first {
+            Frame::Started => {
+                let mut out = Vec::new();
+                while let Some(frame) = read_frame(&mut s).await.unwrap() {
+                    match frame {
+                        Frame::Stdout(b) => out.extend_from_slice(&b),
+                        Frame::Exit(code) => {
+                            assert_eq!(code, 0);
+                            break;
+                        }
+                        other => panic!("unexpected frame: {other:?}"),
+                    }
+                }
+                Ok(String::from_utf8_lossy(&out)
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("ARG:"))
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>())
+            }
+            Frame::Error { kind, message } => Err((kind, message)),
+            other => panic!("unexpected initial reply: {other:?}"),
+        }
+    };
+
+    let hdr_tonemap_args = vec![
+        "-init_hw_device".to_string(),
+        "vaapi=va:/dev/dri/renderD128".to_string(),
+        "-init_hw_device".to_string(),
+        "vulkan=vk@va".to_string(),
+        "-filter_hw_device".to_string(),
+        "va".to_string(),
+        "-hwaccel".to_string(),
+        "vaapi".to_string(),
+        "-hwaccel_output_format".to_string(),
+        "vaapi".to_string(),
+        "-c:v".to_string(),
+        "hevc".to_string(),
+        "-i".to_string(),
+        "/srv/media/hdr.mkv".to_string(),
+        "-vf".to_string(),
+        "hwmap=derive_device=vulkan,libplacebo=w=1920:h=1080:tonemapping=bt.2390:format=nv12,hwmap=derive_device=vaapi:reverse=1".to_string(),
+        "-c:v".to_string(),
+        "h264_vaapi".to_string(),
+        "out.m3u8".to_string(),
+    ];
+
+    let vk_video_args = vec![
+        "-init_hw_device".to_string(),
+        "vulkan=vk".to_string(),
+        "-hwaccel".to_string(),
+        "vulkan".to_string(),
+        "-hwaccel_output_format".to_string(),
+        "vulkan".to_string(),
+        "-c:v".to_string(),
+        "hevc".to_string(),
+        "-i".to_string(),
+        "/srv/media/clip.mkv".to_string(),
+        "-c:v".to_string(),
+        "h264_vulkan".to_string(),
+        "out.m3u8".to_string(),
+    ];
+
+    // 1. Off-mode worker with default vulkan_compute=true, vulkan_video=false:
+    //    HDR Vulkan Compute succeeds; Vulkan Video fails closed with DeviceUnavailable.
+    let off_sock = dir.path().join("off.sock");
+    let mut off_cfg = WorkerConfig::for_paths(off_sock.clone(), fake_ffmpeg.clone());
+    off_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }]);
+    off_cfg.optimize_vulkan_tonemap = true;
+    let (off_shutdown, off_worker) = start_fixture_worker(off_cfg).await;
+
+    let ok_compute = run_worker_args(off_sock.clone(), hdr_tonemap_args.clone(), cwd.clone())
+        .await
+        .expect("Vulkan Compute HDR tonemap must succeed with vulkan_video=false");
+    assert!(ok_compute.iter().any(|a| a.starts_with(
+        "scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=vulkan,libplacebo="
+    )));
+
+    let err_video = run_worker_args(off_sock, vk_video_args.clone(), cwd.clone()).await;
+    assert!(matches!(err_video, Err((ErrorKind::DeviceUnavailable, _))));
+
+    let _ = off_shutdown.send(());
+    let _ = off_worker.await;
+
+    // 2. Off-mode worker with vulkan_compute=false fails closed on Vulkan Compute jobs.
+    let no_compute_sock = dir.path().join("nocompute.sock");
+    let mut no_compute_cfg = WorkerConfig::for_paths(no_compute_sock.clone(), fake_ffmpeg.clone());
+    no_compute_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }]);
+    no_compute_cfg.vulkan_compute = false;
+    no_compute_cfg.optimize_vulkan_tonemap = true;
+    let (nc_shutdown, nc_worker) = start_fixture_worker(no_compute_cfg).await;
+
+    let err_compute = run_worker_args(no_compute_sock, hdr_tonemap_args.clone(), cwd.clone()).await;
+    assert!(matches!(
+        err_compute,
+        Err((ErrorKind::DeviceUnavailable, _))
+    ));
+
+    let _ = nc_shutdown.send(());
+    let _ = nc_worker.await;
+
+    // 2b. Off-mode worker with vulkan_compute=true but capabilities_override reporting
+    //     vulkan_compute=Some(false) fails closed on Vulkan Compute jobs.
+    let unavail_compute_sock = dir.path().join("unavailcompute.sock");
+    let mut unavail_cfg =
+        WorkerConfig::for_paths(unavail_compute_sock.clone(), fake_ffmpeg.clone());
+    unavail_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }]);
+    unavail_cfg.capabilities_override = Some(TranscodeCapabilities {
+        ffmpeg_path: fake_ffmpeg.to_string_lossy().into_owned(),
+        encoders: vec!["h264_vaapi".into(), "libx264".into()],
+        vulkan_compute: Some(false),
+        vulkan_video: Some(false),
+        ..Default::default()
+    });
+    let (uc_shutdown, uc_worker) = start_fixture_worker(unavail_cfg).await;
+    let err_unavail =
+        run_worker_args(unavail_compute_sock, hdr_tonemap_args.clone(), cwd.clone()).await;
+    assert!(matches!(
+        err_unavail,
+        Err((ErrorKind::DeviceUnavailable, _))
+    ));
+    let _ = uc_shutdown.send(());
+    let _ = uc_worker.await;
+
+    // 2c. Off-mode worker with vulkan_video=true and codec-specific capabilities_override allows
+    //     supported Vulkan Video decode/encode codecs and rejects unsupported codecs.
+    let vkv_sock = dir.path().join("vkvideo.sock");
+    let mut vkv_cfg = WorkerConfig::for_paths(vkv_sock.clone(), fake_ffmpeg.clone());
+    vkv_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }]);
+    vkv_cfg.vulkan_video = true;
+    vkv_cfg.capabilities_override = Some(TranscodeCapabilities {
+        ffmpeg_path: fake_ffmpeg.to_string_lossy().into_owned(),
+        encoders: vec!["h264_vulkan".into(), "libx264".into()],
+        vulkan_compute: Some(true),
+        vulkan_video: Some(true),
+        vulkan_video_decode_codecs: vec!["h264".into(), "hevc".into()],
+        vulkan_video_encode_codecs: vec!["h264".into()],
+        ..Default::default()
+    });
+    let (vkv_shutdown, vkv_worker) = start_fixture_worker(vkv_cfg).await;
+
+    let ok_vkv = run_worker_args(vkv_sock.clone(), vk_video_args.clone(), cwd.clone())
+        .await
+        .expect("supported Vulkan Video decode(hevc)+encode(h264) should succeed");
+    assert!(ok_vkv.contains(&"h264_vulkan".to_string()));
+
+    let mut unsupported_dec = vk_video_args.clone();
+    unsupported_dec[7] = "av1".to_string();
+    let err_vkv_dec = run_worker_args(vkv_sock.clone(), unsupported_dec, cwd.clone()).await;
+    assert!(matches!(
+        err_vkv_dec,
+        Err((ErrorKind::DeviceUnavailable, _))
+    ));
+
+    let mut unsupported_enc = vk_video_args.clone();
+    unsupported_enc[11] = "hevc_vulkan".to_string();
+    let err_vkv_enc = run_worker_args(vkv_sock, unsupported_enc, cwd.clone()).await;
+    assert!(matches!(
+        err_vkv_enc,
+        Err((ErrorKind::DeviceUnavailable, _))
+    ));
+    let _ = vkv_shutdown.send(());
+    let _ = vkv_worker.await;
+
+    // 3. Adapt mode All with vulkan_video=false adapts pure Vulkan Video job to CPU (libx264),
+    //    while Gpu mode rejects it (fallback encoders must NOT synthesize *_vulkan when disabled).
+    let gpu_sock = dir.path().join("gpu.sock");
+    let mut gpu_cfg = WorkerConfig::for_paths(gpu_sock.clone(), fake_ffmpeg.clone());
+    gpu_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }]);
+    gpu_cfg.adapt_backend_mode = BackendAdaptMode::Gpu;
+    let (gpu_shutdown, gpu_worker) = start_fixture_worker(gpu_cfg).await;
+
+    let gpu_vk_err = run_worker_args(gpu_sock, vk_video_args.clone(), cwd.clone()).await;
+    assert!(matches!(gpu_vk_err, Err((ErrorKind::DeviceUnavailable, _))));
+
+    let _ = gpu_shutdown.send(());
+    let _ = gpu_worker.await;
+
+    let all_sock = dir.path().join("all.sock");
+    let mut all_cfg = WorkerConfig::for_paths(all_sock.clone(), fake_ffmpeg.clone());
+    all_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }]);
+    all_cfg.adapt_backend_mode = BackendAdaptMode::All;
+    let (all_shutdown, all_worker) = start_fixture_worker(all_cfg).await;
+
+    let cpu_from_vk = run_worker_args(all_sock, vk_video_args.clone(), cwd.clone())
+        .await
+        .expect("All mode should adapt pure Vulkan Video job to CPU libx264");
+    assert!(cpu_from_vk.contains(&"libx264".to_string()));
+    assert!(!cpu_from_vk.contains(&"h264_vulkan".to_string()));
+
+    let _ = all_shutdown.send(());
+    let _ = all_worker.await;
+
+    // 4. Local shim fallback applies scale_vaapi pre-scale by default, and respects opt-out env vars.
+    let shim = symlink_ffmpeg_shim(dir.path());
+    let missing_sock = dir.path().join("absent.sock");
+
+    let local_opt = StdCommand::new(&shim)
+        .args(&hdr_tonemap_args)
+        .env(ENV_REAL_FFMPEG, &fake_ffmpeg)
+        .env(ENV_DISPATCHER_SOCKET, &missing_sock)
+        .env(ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP, "1")
+        .env(ENV_WORKER_VULKAN_COMPUTE, "1")
+        .env_remove(ENV_SHIM_RECURSION_GUARD)
+        .output()
+        .expect("run local shim with HDR tonemap");
+    assert!(local_opt.status.success());
+    let local_opt_stdout = String::from_utf8_lossy(&local_opt.stdout);
+    assert!(
+        local_opt_stdout.contains(
+            "ARG:scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=vulkan,libplacebo="
+        ),
+        "expected local shim pre-scale optimization, got: {local_opt_stdout}"
+    );
+
+    let local_opt_out = StdCommand::new(&shim)
+        .args(&hdr_tonemap_args)
+        .env(ENV_REAL_FFMPEG, &fake_ffmpeg)
+        .env(ENV_DISPATCHER_SOCKET, &missing_sock)
+        .env(ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP, "0")
+        .env(ENV_WORKER_VULKAN_COMPUTE, "1")
+        .env_remove(ENV_SHIM_RECURSION_GUARD)
+        .output()
+        .expect("run local shim with tonemap opt disabled");
+    assert!(local_opt_out.status.success());
+    let local_opt_out_stdout = String::from_utf8_lossy(&local_opt_out.stdout);
+    assert!(
+        !local_opt_out_stdout.contains("scale_vaapi="),
+        "opt-out must skip pre-scale rewrite, got: {local_opt_out_stdout}"
+    );
+}
+
+#[tokio::test]
+async fn worker_off_mode_startup_probes_vulkan_and_enforces_hardware_render_nodes() {
+    let dir = TempDir::new("off-vk-probe");
+    let cwd = dir.path().to_string_lossy().into_owned();
+
+    let run_worker_args = |sock: PathBuf, args: Vec<String>, cwd: String| async move {
+        let mut s = UnixStream::connect(&sock).await.unwrap();
+        write_frame(
+            &mut s,
+            &Frame::Start(StartRequest {
+                args,
+                cwd,
+                env_subset: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+        let first = read_frame(&mut s).await.unwrap().expect("first frame");
+        match first {
+            Frame::Started => {
+                let mut out = Vec::new();
+                while let Some(frame) = read_frame(&mut s).await.unwrap() {
+                    match frame {
+                        Frame::Stdout(b) => out.extend_from_slice(&b),
+                        Frame::Exit(code) => {
+                            assert_eq!(code, 0);
+                            break;
+                        }
+                        other => panic!("unexpected frame: {other:?}"),
+                    }
+                }
+                Ok(String::from_utf8_lossy(&out)
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("ARG:"))
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>())
+            }
+            Frame::Error { kind, message } => Err((kind, message)),
+            other => panic!("unexpected initial reply: {other:?}"),
+        }
+    };
+
+    let pure_vk_compute_args = vec![
+        "-init_hw_device".to_string(),
+        "vulkan=vk".to_string(),
+        "-c:v".to_string(),
+        "hevc".to_string(),
+        "-i".to_string(),
+        "/srv/media/hdr.mkv".to_string(),
+        "-vf".to_string(),
+        "format=p010,hwupload,libplacebo=tonemapping=bt.2390:format=nv12,hwdownload,format=nv12"
+            .to_string(),
+        "-c:v".to_string(),
+        "libx264".to_string(),
+        "out.m3u8".to_string(),
+    ];
+
+    let vk_video_args = |dec: &str, enc: &str| {
+        vec![
+            "-init_hw_device".to_string(),
+            "vulkan=vk".to_string(),
+            "-hwaccel".to_string(),
+            "vulkan".to_string(),
+            "-hwaccel_output_format".to_string(),
+            "vulkan".to_string(),
+            "-c:v".to_string(),
+            dec.to_string(),
+            "-i".to_string(),
+            "/srv/media/clip.mkv".to_string(),
+            "-c:v".to_string(),
+            enc.to_string(),
+            "out.m3u8".to_string(),
+        ]
+    };
+
+    // 1. Off-mode worker WITHOUT capabilities_override probing a real `[Vulkan @ ...]` GPU
+    //    (compute + h264/hevc decode + h264 encode) enforces per-codec Vulkan Video checks.
+    let hw_vk_ffmpeg = write_executable_script(
+        dir.path(),
+        "hw-vk-ffmpeg",
+        r#"#!/bin/sh
+if [ "$1" = "-version" ]; then
+    echo "ffmpeg version 8.1.3-Jellyfin"
+    exit 0
+fi
+if [ "$1" = "-hide_banner" ] && [ "$2" = "-encoders" ]; then
+    cat <<'EOF'
+Encoders:
+ V..... = Video
+ ------
+ V....D h264_vulkan          H.264/AVC (Vulkan)
+ V....D hevc_vulkan          H.265/HEVC (Vulkan)
+ V....D libx264              libx264 H.264
+EOF
+    exit 0
+fi
+if [ "$4" = "-init_hw_device" ] && [ "$5" = "vulkan=vk" ]; then
+    cat >&2 <<'EOF'
+[Vulkan @ 0x55a100001000] Device 0 selected: AMD Radeon Graphics (RADV REMBRANDT) (integrated) (0x1681)
+[Vulkan @ 0x55a100001000] Queue families:
+[Vulkan @ 0x55a100001000]     0: graphics compute transfer sparse (queues: 1)
+[Vulkan @ 0x55a100001000]     1: transfer decode (queues: 1)
+[Vulkan @ 0x55a100001000]     2: transfer encode (queues: 1)
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_decode_queue
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_encode_queue
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_decode_h264
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_decode_h265
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_video_encode_h264
+EOF
+    exit 0
+fi
+printf 'ARG:%s\n' "$@"
+"#,
+    );
+
+    let hw_sock = dir.path().join("off-hw-vk.sock");
+    let mut hw_cfg = WorkerConfig::for_paths(hw_sock.clone(), hw_vk_ffmpeg);
+    hw_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }]);
+    hw_cfg.vulkan_compute = true;
+    hw_cfg.vulkan_video = true;
+    assert!(hw_cfg.capabilities_override.is_none());
+    let (hw_shutdown, hw_worker) = start_fixture_worker(hw_cfg).await;
+
+    let ok_compute = run_worker_args(hw_sock.clone(), pure_vk_compute_args.clone(), cwd.clone())
+        .await
+        .expect("probed hardware Vulkan Compute job must succeed in Off mode");
+    assert!(ok_compute.contains(&"libx264".to_string()));
+
+    let ok_vkv = run_worker_args(
+        hw_sock.clone(),
+        vk_video_args("hevc", "h264_vulkan"),
+        cwd.clone(),
+    )
+    .await
+    .expect("probed hevc decode + h264_vulkan encode must succeed in Off mode");
+    assert!(ok_vkv.contains(&"h264_vulkan".to_string()));
+
+    let err_vkv_dec = run_worker_args(
+        hw_sock.clone(),
+        vk_video_args("av1", "h264_vulkan"),
+        cwd.clone(),
+    )
+    .await;
+    assert!(
+        matches!(err_vkv_dec, Err((ErrorKind::DeviceUnavailable, _))),
+        "unsupported AV1 Vulkan Video decode must fail pre-Started: {err_vkv_dec:?}"
+    );
+
+    let err_vkv_enc = run_worker_args(
+        hw_sock.clone(),
+        vk_video_args("hevc", "hevc_vulkan"),
+        cwd.clone(),
+    )
+    .await;
+    assert!(
+        matches!(err_vkv_enc, Err((ErrorKind::DeviceUnavailable, _))),
+        "unsupported hevc_vulkan encode must fail pre-Started: {err_vkv_enc:?}"
+    );
+
+    let err_vkv_unknown_dec = run_worker_args(
+        hw_sock.clone(),
+        vk_video_args("ffv1_vulkan", "h264_vulkan"),
+        cwd.clone(),
+    )
+    .await;
+    assert!(
+        matches!(err_vkv_unknown_dec, Err((ErrorKind::DeviceUnavailable, _))),
+        "unrecognized ffv1_vulkan decoder must fail closed pre-Started: {err_vkv_unknown_dec:?}"
+    );
+
+    let _ = hw_shutdown.send(());
+    let _ = hw_worker.await;
+
+    // 2. Off-mode worker WITHOUT capabilities_override probing FFmpeg 7.x `llvmpipe (cpu)`
+    //    must reject Vulkan Compute jobs pre-Started even when a render node exists.
+    let llvmpipe_ffmpeg = write_executable_script(
+        dir.path(),
+        "llvmpipe-ffmpeg",
+        r#"#!/bin/sh
+if [ "$1" = "-version" ]; then
+    echo "ffmpeg version 7.1.5-Jellyfin"
+    exit 0
+fi
+if [ "$1" = "-hide_banner" ] && [ "$2" = "-encoders" ]; then
+    cat <<'EOF'
+Encoders:
+ V..... = Video
+ ------
+ V....D libx264              libx264 H.264
+EOF
+    exit 0
+fi
+if [ "$4" = "-init_hw_device" ] && [ "$5" = "vulkan=vk" ]; then
+    cat >&2 <<'EOF'
+[AVHWDeviceContext @ 0x55d8f0002400] Device 0 selected: llvmpipe (LLVM 19.1.7, 256 bits) (cpu) (0x0)
+[AVHWDeviceContext @ 0x55d8f0002400] Queue families:
+[AVHWDeviceContext @ 0x55d8f0002400]     0: graphics compute transfer (queues: 1)
+EOF
+    exit 0
+fi
+printf 'ARG:%s\n' "$@"
+"#,
+    );
+
+    let sw_vk_sock = dir.path().join("off-llvmpipe.sock");
+    let mut sw_vk_cfg = WorkerConfig::for_paths(sw_vk_sock.clone(), llvmpipe_ffmpeg);
+    sw_vk_cfg.render_nodes_override = Some(vec![RenderNode {
+        path: PathBuf::from("/dev/dri/renderD128"),
+        vendor_id: Some("0x1002".to_string()),
+    }]);
+    sw_vk_cfg.vulkan_compute = true;
+    sw_vk_cfg.vulkan_video = false;
+    assert!(sw_vk_cfg.capabilities_override.is_none());
+    let (sw_vk_shutdown, sw_vk_worker) = start_fixture_worker(sw_vk_cfg).await;
+
+    let err_llvmpipe = run_worker_args(
+        sw_vk_sock.clone(),
+        pure_vk_compute_args.clone(),
+        cwd.clone(),
+    )
+    .await;
+    assert!(
+        matches!(err_llvmpipe, Err((ErrorKind::DeviceUnavailable, _))),
+        "llvmpipe (cpu) Off-mode worker must reject Vulkan Compute pre-Started: {err_llvmpipe:?}"
+    );
+
+    let ok_cpu_on_llvmpipe = run_worker_args(
+        sw_vk_sock,
+        vec![
+            "-i".into(),
+            "/srv/media/in.mkv".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await
+    .expect("software-only job must still succeed on llvmpipe worker");
+    assert!(ok_cpu_on_llvmpipe.contains(&"libx264".to_string()));
+
+    let _ = sw_vk_shutdown.send(());
+    let _ = sw_vk_worker.await;
+
+    // 3. GPU-less Off-mode worker WITHOUT capabilities_override (`render_nodes_override = Some([])`)
+    //    must reject pure Vulkan Compute jobs (no explicit `/dev/dri/renderD*` arg) AND implicit
+    //    VA-API jobs pre-Started with `ErrorKind::DeviceUnavailable`, while allowing pure CPU jobs.
+    let generic_ffmpeg = write_executable_script(
+        dir.path(),
+        "generic-ffmpeg",
+        "#!/bin/sh\nprintf 'ARG:%s\\n' \"$@\"\n",
+    );
+    let gpuless_sock = dir.path().join("off-gpuless.sock");
+    let mut gpuless_cfg = WorkerConfig::for_paths(gpuless_sock.clone(), generic_ffmpeg);
+    gpuless_cfg.render_nodes_override = Some(vec![]);
+    gpuless_cfg.vulkan_compute = true;
+    gpuless_cfg.vulkan_video = false;
+    assert!(gpuless_cfg.capabilities_override.is_none());
+    let (gpuless_shutdown, gpuless_worker) = start_fixture_worker(gpuless_cfg).await;
+
+    let err_gpuless_vk =
+        run_worker_args(gpuless_sock.clone(), pure_vk_compute_args, cwd.clone()).await;
+    assert!(
+        matches!(err_gpuless_vk, Err((ErrorKind::DeviceUnavailable, _))),
+        "GPU-less Off-mode worker must reject pure Vulkan Compute pre-Started: {err_gpuless_vk:?}"
+    );
+
+    let err_gpuless_vaapi = run_worker_args(
+        gpuless_sock.clone(),
+        vec![
+            "-hwaccel".into(),
+            "vaapi".into(),
+            "-i".into(),
+            "/srv/media/in.mkv".into(),
+            "-c:v".into(),
+            "h264_vaapi".into(),
+            "out.m3u8".into(),
+        ],
+        cwd.clone(),
+    )
+    .await;
+    assert!(
+        matches!(err_gpuless_vaapi, Err((ErrorKind::DeviceUnavailable, _))),
+        "GPU-less Off-mode worker must reject implicit VA-API hardware job pre-Started: {err_gpuless_vaapi:?}"
+    );
+
+    let ok_gpuless_cpu = run_worker_args(
+        gpuless_sock,
+        vec![
+            "-i".into(),
+            "/srv/media/in.mkv".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "out.m3u8".into(),
+        ],
+        cwd,
+    )
+    .await
+    .expect("GPU-less Off-mode worker must still accept pure CPU jobs");
+    assert!(ok_gpuless_cpu.contains(&"libx264".to_string()));
+
+    let _ = gpuless_shutdown.send(());
+    let _ = gpuless_worker.await;
 }

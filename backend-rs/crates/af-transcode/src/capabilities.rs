@@ -3,7 +3,8 @@
 use crate::argv::{Capability, HwAccel};
 use crate::config::{
     configured_real_ffmpeg_path, configured_worker_adapt_backend, configured_worker_max_jobs,
-    validate_real_ffmpeg_path, BackendAdaptMode, DEFAULT_PROBE_TIMEOUT,
+    configured_worker_vulkan_compute, configured_worker_vulkan_video, validate_real_ffmpeg_path,
+    BackendAdaptMode, DEFAULT_PROBE_TIMEOUT,
 };
 use af_hardware::RenderNode;
 use anyhow::Context;
@@ -28,6 +29,18 @@ pub struct VaInfoProfileSummary {
     pub decode_codecs: Vec<String>,
     pub encode_codecs: Vec<String>,
     pub supports_vpp: bool,
+}
+
+/// Parsed Vulkan Compute vs Vulkan Video summary from
+/// `ffmpeg -hide_banner -v verbose -init_hw_device vulkan=vk -version`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VulkanProbeSummary {
+    pub probed: bool,
+    pub device_name: Option<String>,
+    pub device_type: Option<String>,
+    pub compute_supported: bool,
+    pub video_decode_codecs: Vec<String>,
+    pub video_encode_codecs: Vec<String>,
 }
 
 /// Serializable render-node entry for `af-transcode capabilities` and P9 `/health` JSON.
@@ -91,6 +104,16 @@ pub struct TranscodeCapabilities {
     pub hw_encoders_verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapt_backend_mode: Option<BackendAdaptMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulkan_compute: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulkan_device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vulkan_video: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vulkan_video_decode_codecs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vulkan_video_encode_codecs: Vec<String>,
 }
 
 impl TranscodeCapabilities {
@@ -108,6 +131,8 @@ pub struct CapabilitiesConfig {
     pub vainfo_path: Option<PathBuf>,
     pub render_nodes_override: Option<Vec<RenderNode>>,
     pub probe_timeout: Duration,
+    pub vulkan_compute_override: Option<bool>,
+    pub vulkan_video_override: Option<bool>,
 }
 
 impl CapabilitiesConfig {
@@ -118,6 +143,8 @@ impl CapabilitiesConfig {
             vainfo_path: Some(PathBuf::from("/usr/bin/vainfo")),
             render_nodes_override: None,
             probe_timeout: DEFAULT_PROBE_TIMEOUT,
+            vulkan_compute_override: None,
+            vulkan_video_override: None,
         }
     }
 }
@@ -459,6 +486,250 @@ pub fn filter_encoders_with_vainfo(
     (filtered, true)
 }
 
+fn strip_ffmpeg_log_prefix(line: &str) -> &str {
+    let trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some(close_idx) = rest.find(']') {
+            return rest[close_idx + 1..].trim();
+        }
+    }
+    trimmed
+}
+
+fn split_trailing_paren(s: &str) -> Option<(&str, &str)> {
+    let trimmed = s.trim_end();
+    let without_close = trimmed.strip_suffix(')')?;
+    let open_idx = without_close.rfind('(')?;
+    Some((
+        without_close[..open_idx].trim_end(),
+        without_close[open_idx + 1..].trim(),
+    ))
+}
+
+fn is_hex_device_id(token: &str) -> bool {
+    token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+fn parse_selected_vulkan_device(body: &str) -> Option<(String, String)> {
+    let after_device = body.strip_prefix("Device ")?;
+    let (idx_part, rest) = after_device.split_once(" selected:")?;
+    let idx_trimmed = idx_part.trim();
+    if idx_trimmed.is_empty() || !idx_trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+
+    let mut tail = rest.trim();
+    if let Some((before_hex, hex_inner)) = split_trailing_paren(tail) {
+        if is_hex_device_id(hex_inner) {
+            tail = before_hex;
+        }
+    }
+
+    let (name_raw, type_raw) = split_trailing_paren(tail)?;
+    let name = name_raw.trim();
+    let dev_type = type_raw.trim();
+    if name.is_empty() || dev_type.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), dev_type.to_string()))
+}
+
+fn parse_queue_family_line(body: &str) -> Option<(&str, &str)> {
+    let (idx_part, rest) = body.split_once(':')?;
+    let idx_trimmed = idx_part.trim();
+    if idx_trimmed.is_empty() || !idx_trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.split_once("(queues:")
+}
+
+fn is_software_vulkan_renderer_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("llvmpipe")
+        || lower.contains("lavapipe")
+        || lower.contains("swiftshader")
+        || lower.contains("software")
+}
+
+/// Parses combined stderr + stdout of
+/// `ffmpeg -hide_banner -v verbose -init_hw_device vulkan=vk -version` to separate hardware
+/// Vulkan Compute support from Vulkan Video hardware decode/encode codec support.
+pub fn parse_ffmpeg_vulkan_probe_output(output: &str) -> VulkanProbeSummary {
+    let probed = output.contains("[Vulkan @")
+        || output.contains("[AVHWDeviceContext @")
+        || output.contains("Instance creation failure:")
+        || output.contains("Device creation failed")
+        || output.contains("Failed to set value 'vulkan=vk'");
+    if !probed {
+        return VulkanProbeSummary::default();
+    }
+
+    let mut device_name: Option<String> = None;
+    let mut device_type: Option<String> = None;
+    let mut in_queue_families = false;
+    let mut has_compute_queue = false;
+    let mut has_decode_queue = false;
+    let mut has_encode_queue = false;
+    let mut has_decode_queue_ext = false;
+    let mut has_encode_queue_ext = false;
+    let mut decode_codecs = BTreeSet::new();
+    let mut encode_codecs = BTreeSet::new();
+
+    for raw_line in output.lines() {
+        let body = strip_ffmpeg_log_prefix(raw_line);
+        if body.is_empty() {
+            continue;
+        }
+
+        if in_queue_families {
+            if let Some((flags_part, queues_rest)) = parse_queue_family_line(body) {
+                let count_is_zero = queues_rest
+                    .split(')')
+                    .next()
+                    .map(str::trim)
+                    .and_then(|count| count.parse::<u32>().ok())
+                    == Some(0);
+                if !count_is_zero {
+                    for tok in flags_part.split(|c: char| c.is_whitespace() || c == ',') {
+                        if tok.eq_ignore_ascii_case("compute") {
+                            has_compute_queue = true;
+                        } else if tok.eq_ignore_ascii_case("decode") {
+                            has_decode_queue = true;
+                        } else if tok.eq_ignore_ascii_case("encode") {
+                            has_encode_queue = true;
+                        }
+                    }
+                }
+                continue;
+            }
+            in_queue_families = false;
+        }
+
+        if body == "Queue families:" || body.starts_with("Queue families:") {
+            in_queue_families = true;
+            continue;
+        }
+
+        if let Some((name, dev_type)) = parse_selected_vulkan_device(body) {
+            device_name = Some(name);
+            device_type = Some(dev_type);
+            continue;
+        }
+
+        if let Some(rest) = body
+            .strip_prefix("Using device extension")
+            .filter(|r| r.starts_with(char::is_whitespace))
+        {
+            let ext = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c| matches!(c, ',' | ';' | '\'' | '"'));
+            match ext {
+                "VK_KHR_video_decode_queue" => has_decode_queue_ext = true,
+                "VK_KHR_video_encode_queue" => has_encode_queue_ext = true,
+                "VK_KHR_video_decode_h264" => {
+                    decode_codecs.insert("h264".to_string());
+                }
+                "VK_KHR_video_decode_h265" => {
+                    decode_codecs.insert("hevc".to_string());
+                }
+                "VK_KHR_video_decode_av1" => {
+                    decode_codecs.insert("av1".to_string());
+                }
+                "VK_KHR_video_decode_vp9" => {
+                    decode_codecs.insert("vp9".to_string());
+                }
+                "VK_KHR_video_encode_h264" => {
+                    encode_codecs.insert("h264".to_string());
+                }
+                "VK_KHR_video_encode_h265" => {
+                    encode_codecs.insert("hevc".to_string());
+                }
+                "VK_KHR_video_encode_av1" => {
+                    encode_codecs.insert("av1".to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let is_hardware_gpu = device_type.as_deref().is_some_and(|dt| {
+        dt.eq_ignore_ascii_case("integrated") || dt.eq_ignore_ascii_case("discrete")
+    }) && device_name
+        .as_deref()
+        .is_some_and(|name| !is_software_vulkan_renderer_name(name));
+
+    let compute_supported = is_hardware_gpu && has_compute_queue;
+    let video_decode_codecs = if is_hardware_gpu && (has_decode_queue || has_decode_queue_ext) {
+        decode_codecs.into_iter().collect()
+    } else {
+        Vec::new()
+    };
+    let video_encode_codecs = if is_hardware_gpu && (has_encode_queue || has_encode_queue_ext) {
+        encode_codecs.into_iter().collect()
+    } else {
+        Vec::new()
+    };
+
+    VulkanProbeSummary {
+        probed: true,
+        device_name,
+        device_type,
+        compute_supported,
+        video_decode_codecs,
+        video_encode_codecs,
+    }
+}
+
+fn vulkan_video_codec_for_encoder_prefix(prefix: &str) -> Option<&'static str> {
+    match prefix {
+        "h264" => Some("h264"),
+        "hevc" => Some("hevc"),
+        "av1" => Some("av1"),
+        _ => None,
+    }
+}
+
+/// Filters `*_vulkan` video encoders according to Vulkan Video policy and probed hardware
+/// Vulkan Video encode extensions.
+pub fn filter_encoders_with_vulkan(
+    encoders: Vec<String>,
+    vulkan_video_enabled: bool,
+    vulkan_video_encode_codecs: &[String],
+    vulkan_probed: bool,
+) -> Vec<String> {
+    if !vulkan_video_enabled {
+        return encoders
+            .into_iter()
+            .filter(|enc| !enc.to_ascii_lowercase().ends_with("_vulkan"))
+            .collect();
+    }
+
+    if !vulkan_probed {
+        return encoders;
+    }
+
+    encoders
+        .into_iter()
+        .filter(|enc| {
+            let lower = enc.to_ascii_lowercase();
+            if let Some(prefix) = lower.strip_suffix("_vulkan") {
+                vulkan_video_codec_for_encoder_prefix(prefix).is_some_and(|codec| {
+                    vulkan_video_encode_codecs
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(codec))
+                })
+            } else {
+                true
+            }
+        })
+        .collect()
+}
+
 /// Runs a probe command in its own process group with a strict wall-clock deadline.
 async fn run_bounded_output(
     program: &Path,
@@ -575,6 +846,79 @@ pub async fn probe_capabilities(
         }
     }
 
+    let allow_vulkan_compute = config
+        .vulkan_compute_override
+        .unwrap_or_else(configured_worker_vulkan_compute);
+    let allow_vulkan_video = config
+        .vulkan_video_override
+        .unwrap_or_else(configured_worker_vulkan_video);
+
+    let vk = if (!allow_vulkan_compute && !allow_vulkan_video)
+        || config
+            .render_nodes_override
+            .as_ref()
+            .is_some_and(|nodes| nodes.is_empty())
+    {
+        VulkanProbeSummary {
+            probed: true,
+            compute_supported: false,
+            ..Default::default()
+        }
+    } else {
+        match run_bounded_output(
+            &real_ffmpeg,
+            &[
+                "-hide_banner",
+                "-v",
+                "verbose",
+                "-init_hw_device",
+                "vulkan=vk",
+                "-version",
+            ],
+            config.probe_timeout,
+        )
+        .await
+        {
+            Ok(out) => {
+                let mut combined = String::from_utf8_lossy(&out.stderr).into_owned();
+                if !out.stdout.is_empty() {
+                    if !combined.is_empty() && !combined.ends_with('\n') {
+                        combined.push('\n');
+                    }
+                    combined.push_str(&String::from_utf8_lossy(&out.stdout));
+                }
+                parse_ffmpeg_vulkan_probe_output(&combined)
+            }
+            Err(_) => VulkanProbeSummary::default(),
+        }
+    };
+
+    let vulkan_compute = if !allow_vulkan_compute {
+        Some(false)
+    } else {
+        vk.probed.then_some(vk.compute_supported)
+    };
+    let (vulkan_video, vulkan_video_decode_codecs, vulkan_video_encode_codecs) =
+        if !allow_vulkan_video {
+            (Some(false), Vec::new(), Vec::new())
+        } else if vk.probed {
+            let has_video =
+                !vk.video_decode_codecs.is_empty() || !vk.video_encode_codecs.is_empty();
+            (
+                Some(has_video),
+                vk.video_decode_codecs.clone(),
+                vk.video_encode_codecs.clone(),
+            )
+        } else {
+            (None, Vec::new(), Vec::new())
+        };
+    let vulkan_device = if vk.probed && (vulkan_compute == Some(true) || vulkan_video == Some(true))
+    {
+        vk.device_name.clone()
+    } else {
+        None
+    };
+
     let hw_decoders: Vec<String> = render_nodes
         .iter()
         .flat_map(|n| n.vaapi_decode_codecs.iter().cloned())
@@ -583,6 +927,12 @@ pub async fn probe_capabilities(
         .collect();
 
     let (encoders, hw_encoders_verified) = filter_encoders_with_vainfo(encoders, &render_nodes);
+    let encoders = filter_encoders_with_vulkan(
+        encoders,
+        allow_vulkan_video,
+        &vulkan_video_encode_codecs,
+        vk.probed,
+    );
     let primary_render_node = render_nodes.first().map(|n| n.path.clone());
     let adapt_backend_mode =
         Some(configured_worker_adapt_backend()).filter(|m| *m != BackendAdaptMode::Off);
@@ -600,6 +950,11 @@ pub async fn probe_capabilities(
         hw_decoders,
         hw_encoders_verified,
         adapt_backend_mode,
+        vulkan_compute,
+        vulkan_device,
+        vulkan_video,
+        vulkan_video_decode_codecs,
+        vulkan_video_encode_codecs,
     })
 }
 
@@ -959,5 +1314,275 @@ vainfo: Driver version: Mesa Gallium driver 25.0 for AMD Radeon
         assert!(rt.hw_encoders_verified);
         assert_eq!(rt.hw_decoders, vec!["h264", "hevc"]);
         assert!(rt.render_nodes[0].supports_vpp);
+    }
+
+    #[test]
+    fn parse_ffmpeg_vulkan_probe_output_separates_compute_video_and_software_renderers() {
+        // 1. Intel HD 630 compute-only with parenthesized GPU name.
+        let intel_compute_only = "\
+[Vulkan @ 0x55a100001000] Supported validation layers:
+[Vulkan @ 0x55a100001000] Device 0: Intel(R) HD Graphics 630 (KBL GT2) (integrated) (0x5912)
+[Vulkan @ 0x55a100001000] Device 0 selected: Intel(R) HD Graphics 630 (KBL GT2) (integrated) (0x5912)
+[Vulkan @ 0x55a100001000] Queue families:
+[Vulkan @ 0x55a100001000]     0: graphics compute transfer sparse (queues: 1)
+[Vulkan @ 0x55a100001000] Using device extension VK_KHR_external_memory_fd
+";
+        let intel = parse_ffmpeg_vulkan_probe_output(intel_compute_only);
+        assert_eq!(
+            intel,
+            VulkanProbeSummary {
+                probed: true,
+                device_name: Some("Intel(R) HD Graphics 630 (KBL GT2)".to_string()),
+                device_type: Some("integrated".to_string()),
+                compute_supported: true,
+                video_decode_codecs: Vec::new(),
+                video_encode_codecs: Vec::new(),
+            }
+        );
+
+        // 2. AMD Rembrandt with compute + Vulkan Video decode & encode queues/extensions.
+        let amd_full = "\
+[Vulkan @ 0x55a100002000] Device 0 selected: AMD Radeon Graphics (RADV REMBRANDT) (integrated) (0x1681)
+[Vulkan @ 0x55a100002000] Queue families:
+[Vulkan @ 0x55a100002000]     0: graphics compute transfer sparse (queues: 1)
+[Vulkan @ 0x55a100002000]     1: compute transfer sparse (queues: 4)
+[Vulkan @ 0x55a100002000]     2: transfer decode (queues: 1)
+[Vulkan @ 0x55a100002000]     3: transfer encode (queues: 1)
+[Vulkan @ 0x55a100002000] Using device extension VK_KHR_video_decode_queue
+[Vulkan @ 0x55a100002000] Using device extension VK_KHR_video_encode_queue
+[Vulkan @ 0x55a100002000] Using device extension VK_KHR_video_decode_h265
+[Vulkan @ 0x55a100002000] Using device extension VK_KHR_video_decode_h264
+[Vulkan @ 0x55a100002000] Using device extension VK_KHR_video_decode_av1
+[Vulkan @ 0x55a100002000] Using device extension VK_KHR_video_decode_vp9
+[Vulkan @ 0x55a100002000] Using device extension VK_KHR_video_encode_h265
+[Vulkan @ 0x55a100002000] Using device extension VK_KHR_video_encode_h264
+[Vulkan @ 0x55a100002000] Using device extension VK_KHR_video_encode_av1
+";
+        let amd = parse_ffmpeg_vulkan_probe_output(amd_full);
+        assert!(amd.probed);
+        assert_eq!(
+            amd.device_name.as_deref(),
+            Some("AMD Radeon Graphics (RADV REMBRANDT)")
+        );
+        assert_eq!(amd.device_type.as_deref(), Some("integrated"));
+        assert!(amd.compute_supported);
+        assert_eq!(amd.video_decode_codecs, vec!["av1", "h264", "hevc", "vp9"]);
+        assert_eq!(amd.video_encode_codecs, vec!["av1", "h264", "hevc"]);
+
+        // 3. Software renderers (`cpu` type or llvmpipe/lavapipe/swiftshader/software) are rejected.
+        let llvmpipe = "\
+[Vulkan @ 0x55a100003000] Device 0 selected: llvmpipe (LLVM 19.1.7, 256 bits) (cpu) (0x0)
+[Vulkan @ 0x55a100003000] Queue families:
+[Vulkan @ 0x55a100003000]     0: graphics compute transfer (queues: 1)
+";
+        let sw = parse_ffmpeg_vulkan_probe_output(llvmpipe);
+        assert!(sw.probed);
+        assert_eq!(
+            sw.device_name.as_deref(),
+            Some("llvmpipe (LLVM 19.1.7, 256 bits)")
+        );
+        assert_eq!(sw.device_type.as_deref(), Some("cpu"));
+        assert!(!sw.compute_supported);
+        assert!(sw.video_decode_codecs.is_empty());
+        assert!(sw.video_encode_codecs.is_empty());
+
+        for fake_sw_name in ["Lavapipe GPU", "SwiftShader Device", "Software Rasterizer"] {
+            let sample = format!(
+                "[Vulkan @ 0x1] Device 0 selected: {fake_sw_name} (discrete) (0x1234)\n\
+                 [Vulkan @ 0x1] Queue families:\n\
+                 [Vulkan @ 0x1]     0: graphics compute decode encode (queues: 1)\n\
+                 [Vulkan @ 0x1] Using device extension VK_KHR_video_decode_h264\n\
+                 [Vulkan @ 0x1] Using device extension VK_KHR_video_encode_h264\n"
+            );
+            let parsed = parse_ffmpeg_vulkan_probe_output(&sample);
+            assert!(parsed.probed);
+            assert!(
+                !parsed.compute_supported,
+                "software renderer '{fake_sw_name}' must not report compute"
+            );
+            assert!(parsed.video_decode_codecs.is_empty());
+            assert!(parsed.video_encode_codecs.is_empty());
+        }
+
+        // 4. Tokens after `(queues:` are ignored and codec extensions without queue support are ignored.
+        let tricky = "\
+[Vulkan @ 0x55a100004000] Device 0 selected: Generic Discrete GPU (discrete) (0x2684)
+[Vulkan @ 0x55a100004000] Queue families:
+[Vulkan @ 0x55a100004000]     0: graphics transfer (queues: 1) compute decode encode
+[Vulkan @ 0x55a100004000] Using device extension VK_KHR_video_decode_h264
+[Vulkan @ 0x55a100004000] Using device extension VK_KHR_video_encode_h264
+";
+        let tricky_res = parse_ffmpeg_vulkan_probe_output(tricky);
+        assert!(tricky_res.probed);
+        assert!(!tricky_res.compute_supported);
+        assert!(tricky_res.video_decode_codecs.is_empty());
+        assert!(tricky_res.video_encode_codecs.is_empty());
+
+        // 5. Explicit Vulkan initialization failures mark `probed = true` with unsupported compute/video.
+        for failure in [
+            "Instance creation failure: VK_ERROR_INCOMPATIBLE_DRIVER\n",
+            "Device creation failed: -12.\n",
+            "Failed to set value 'vulkan=vk' for option 'init_hw_device': Generic error\n",
+        ] {
+            let failed = parse_ffmpeg_vulkan_probe_output(failure);
+            assert!(failed.probed, "failure output must set probed=true");
+            assert!(!failed.compute_supported);
+            assert!(failed.video_decode_codecs.is_empty());
+            assert!(failed.video_encode_codecs.is_empty());
+        }
+
+        // 6. Mock ffmpeg output ignoring `-init_hw_device` leaves `probed = false`.
+        let mock_out = "ffmpeg version 8.1.3-Jellyfin\nbuilt with gcc 14\n";
+        assert_eq!(
+            parse_ffmpeg_vulkan_probe_output(mock_out),
+            VulkanProbeSummary::default()
+        );
+
+        // 7. Trailing text after `(queues: 0)` must NOT bypass zero-queue filtering.
+        let zero_queues_trailing = "\
+[Vulkan @ 0x55a100005000] Device 0 selected: Generic Discrete GPU (discrete) (0x2684)
+[Vulkan @ 0x55a100005000] Queue families:
+[Vulkan @ 0x55a100005000]     0: graphics compute decode encode (queues: 0) [disabled]
+[Vulkan @ 0x55a100005000] Using device extension VK_KHR_video_decode_h264
+[Vulkan @ 0x55a100005000] Using device extension VK_KHR_video_encode_h264
+";
+        let zero_res = parse_ffmpeg_vulkan_probe_output(zero_queues_trailing);
+        assert!(zero_res.probed);
+        assert!(!zero_res.compute_supported);
+        assert!(zero_res.video_decode_codecs.is_empty());
+        assert!(zero_res.video_encode_codecs.is_empty());
+    }
+
+    #[test]
+    fn parse_ffmpeg_vulkan_probe_output_supports_ffmpeg_7_avhwdevicecontext_prefix() {
+        // Real FFmpeg 7.x (`jellyfin-ffmpeg7` / Debian ffmpeg 7.1.5) logs under `[AVHWDeviceContext @ 0x...]`.
+        let ffmpeg7_hw_gpu = "\
+[AVHWDeviceContext @ 0x55d8f0001200] Supported validation layers:
+[AVHWDeviceContext @ 0x55d8f0001200] Device 0: AMD Radeon Graphics (RADV REMBRANDT) (integrated) (0x1681)
+[AVHWDeviceContext @ 0x55d8f0001200] Device 0 selected: AMD Radeon Graphics (RADV REMBRANDT) (integrated) (0x1681)
+[AVHWDeviceContext @ 0x55d8f0001200] Queue families:
+[AVHWDeviceContext @ 0x55d8f0001200]     0: graphics compute transfer sparse (queues: 1)
+[AVHWDeviceContext @ 0x55d8f0001200]     1: compute transfer sparse (queues: 4)
+[AVHWDeviceContext @ 0x55d8f0001200]     2: transfer decode (queues: 1)
+[AVHWDeviceContext @ 0x55d8f0001200]     3: transfer encode (queues: 1)
+[AVHWDeviceContext @ 0x55d8f0001200] Using device extension VK_KHR_video_decode_queue
+[AVHWDeviceContext @ 0x55d8f0001200] Using device extension VK_KHR_video_encode_queue
+[AVHWDeviceContext @ 0x55d8f0001200] Using device extension VK_KHR_video_decode_h264
+[AVHWDeviceContext @ 0x55d8f0001200] Using device extension VK_KHR_video_decode_h265
+[AVHWDeviceContext @ 0x55d8f0001200] Using device extension VK_KHR_video_decode_av1
+[AVHWDeviceContext @ 0x55d8f0001200] Using device extension VK_KHR_video_encode_h264
+[AVHWDeviceContext @ 0x55d8f0001200] Using device extension VK_KHR_video_encode_h265
+";
+        let hw = parse_ffmpeg_vulkan_probe_output(ffmpeg7_hw_gpu);
+        assert_eq!(
+            hw,
+            VulkanProbeSummary {
+                probed: true,
+                device_name: Some("AMD Radeon Graphics (RADV REMBRANDT)".to_string()),
+                device_type: Some("integrated".to_string()),
+                compute_supported: true,
+                video_decode_codecs: vec!["av1".into(), "h264".into(), "hevc".into()],
+                video_encode_codecs: vec!["h264".into(), "hevc".into()],
+            }
+        );
+
+        let ffmpeg7_llvmpipe = "\
+[AVHWDeviceContext @ 0x55d8f0002400] Device 0: llvmpipe (LLVM 19.1.7, 256 bits) (cpu) (0x0)
+[AVHWDeviceContext @ 0x55d8f0002400] Device 0 selected: llvmpipe (LLVM 19.1.7, 256 bits) (cpu) (0x0)
+[AVHWDeviceContext @ 0x55d8f0002400] Queue families:
+[AVHWDeviceContext @ 0x55d8f0002400]     0: graphics compute transfer (queues: 1)
+[AVHWDeviceContext @ 0x55d8f0002400] Using device extension VK_KHR_external_memory_fd
+";
+        let sw = parse_ffmpeg_vulkan_probe_output(ffmpeg7_llvmpipe);
+        assert!(sw.probed);
+        assert_eq!(
+            sw.device_name.as_deref(),
+            Some("llvmpipe (LLVM 19.1.7, 256 bits)")
+        );
+        assert_eq!(sw.device_type.as_deref(), Some("cpu"));
+        assert!(!sw.compute_supported);
+        assert!(sw.video_decode_codecs.is_empty());
+        assert!(sw.video_encode_codecs.is_empty());
+    }
+
+    #[test]
+    fn filter_encoders_with_vulkan_enforces_policy_and_probed_codecs() {
+        let raw = vec![
+            "av1_vulkan",
+            "ffv1_vulkan",
+            "h264_vaapi",
+            "h264_vulkan",
+            "hevc_vulkan",
+            "libx264",
+            "prores_ks_vulkan",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+
+        // Disabled -> strips ALL *_vulkan encoders regardless of probe state.
+        assert_eq!(
+            filter_encoders_with_vulkan(raw.clone(), false, &["h264".into()], true),
+            vec!["h264_vaapi", "libx264"]
+        );
+        assert_eq!(
+            filter_encoders_with_vulkan(raw.clone(), false, &[], false),
+            vec!["h264_vaapi", "libx264"]
+        );
+
+        // Enabled + probed -> keeps only supported h264/hevc/av1 Vulkan Video codecs.
+        assert_eq!(
+            filter_encoders_with_vulkan(raw.clone(), true, &["h264".into(), "hevc".into()], true),
+            vec!["h264_vaapi", "h264_vulkan", "hevc_vulkan", "libx264"]
+        );
+        assert_eq!(
+            filter_encoders_with_vulkan(raw.clone(), true, &[], true),
+            vec!["h264_vaapi", "libx264"]
+        );
+
+        // Enabled + unprobed -> leaves encoders unchanged.
+        assert_eq!(
+            filter_encoders_with_vulkan(raw.clone(), true, &[], false),
+            raw
+        );
+    }
+
+    #[test]
+    fn transcode_capabilities_vulkan_fields_serde_is_backwards_compatible() {
+        let legacy_json = r#"{
+            "ffmpeg_path": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+            "encoders": ["h264_vaapi", "libx264"],
+            "render_nodes": [],
+            "primary_render_node": null
+        }"#;
+        let parsed: TranscodeCapabilities =
+            serde_json::from_str(legacy_json).expect("deserialize legacy");
+        assert_eq!(parsed.vulkan_compute, None);
+        assert_eq!(parsed.vulkan_device, None);
+        assert_eq!(parsed.vulkan_video, None);
+        assert!(parsed.vulkan_video_decode_codecs.is_empty());
+        assert!(parsed.vulkan_video_encode_codecs.is_empty());
+
+        let ser = serde_json::to_string(&parsed).expect("serialize defaults");
+        assert!(!ser.contains("vulkan_compute"));
+        assert!(!ser.contains("vulkan_device"));
+        assert!(!ser.contains("vulkan_video"));
+
+        let mut rich = parsed;
+        rich.vulkan_compute = Some(true);
+        rich.vulkan_device = Some("AMD Radeon Graphics (RADV REMBRANDT)".to_string());
+        rich.vulkan_video = Some(true);
+        rich.vulkan_video_decode_codecs = vec!["h264".into(), "hevc".into()];
+        rich.vulkan_video_encode_codecs = vec!["h264".into()];
+        let rich_json = serde_json::to_string(&rich).expect("serialize rich");
+        let rt: TranscodeCapabilities = serde_json::from_str(&rich_json).expect("deserialize rich");
+        assert_eq!(rt.vulkan_compute, Some(true));
+        assert_eq!(
+            rt.vulkan_device.as_deref(),
+            Some("AMD Radeon Graphics (RADV REMBRANDT)")
+        );
+        assert_eq!(rt.vulkan_video, Some(true));
+        assert_eq!(rt.vulkan_video_decode_codecs, vec!["h264", "hevc"]);
+        assert_eq!(rt.vulkan_video_encode_codecs, vec!["h264"]);
     }
 }

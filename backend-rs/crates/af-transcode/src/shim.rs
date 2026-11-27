@@ -4,7 +4,8 @@
 use crate::argv;
 use crate::config::{
     collect_allowed_env_subset, configured_dispatcher_socket_path, configured_handshake_timeout,
-    configured_real_ffmpeg_path, validate_real_ffmpeg_path, ConfigError,
+    configured_real_ffmpeg_path, configured_worker_optimize_vulkan_tonemap,
+    configured_worker_vulkan_compute, validate_real_ffmpeg_path, ConfigError,
     DEFAULT_FRAME_WRITE_TIMEOUT, ENV_SHIM_RECURSION_GUARD,
 };
 use crate::protocol::{
@@ -101,6 +102,33 @@ pub fn exec_real_ffmpeg(
     })
 }
 
+/// Prepares final local `ffmpeg` execution arguments for a safe local fallback.
+///
+/// Never modifies probe invocations ([`LocalFallbackReason::ProbeArgs`]), non-UTF-8 arguments,
+/// or invocations when either `optimize_vulkan_tonemap` or `vulkan_compute` is `false`.
+/// Otherwise applies [`argv::optimize_vulkan_tonemap_args`] so local Jellyfin HDR tone-mapping
+/// runs benefit from `scale_vaapi -> libplacebo` pre-scaling.
+pub fn prepare_local_exec_args(
+    args: &[OsString],
+    reason: &LocalFallbackReason,
+    optimize_vulkan_tonemap: bool,
+    vulkan_compute: bool,
+) -> Vec<OsString> {
+    if matches!(reason, LocalFallbackReason::ProbeArgs)
+        || !optimize_vulkan_tonemap
+        || !vulkan_compute
+    {
+        return args.to_vec();
+    }
+    let Some(utf8_args): Option<Vec<&str>> = args.iter().map(|arg| arg.to_str()).collect() else {
+        return args.to_vec();
+    };
+    argv::optimize_vulkan_tonemap_args(&utf8_args)
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+}
+
 /// Runs the full shim entry point: enforces anti-recursion, talks to the dispatcher within
 /// the 2 s handshake budget, either `exec`s real `ffmpeg` locally on definite pre-send/RunLocal
 /// fallback, or relays stdio/signals and returns the final Unix exit code.
@@ -144,16 +172,24 @@ pub async fn run_shim(args: &[OsString], config: ShimConfig) -> i32 {
     };
 
     match decision {
-        ShimDecision::ExecLocal { .. } => match exec_real_ffmpeg(&config.real_ffmpeg, args) {
-            Ok(never) => match never {},
-            Err(err) => {
-                let _ = writeln!(
-                    io::stderr(),
-                    "af-transcode: failed to exec real ffmpeg: {err}"
-                );
-                1
+        ShimDecision::ExecLocal { reason } => {
+            let local_args = prepare_local_exec_args(
+                args,
+                &reason,
+                configured_worker_optimize_vulkan_tonemap(),
+                configured_worker_vulkan_compute(),
+            );
+            match exec_real_ffmpeg(&config.real_ffmpeg, &local_args) {
+                Ok(never) => match never {},
+                Err(err) => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "af-transcode: failed to exec real ffmpeg: {err}"
+                    );
+                    1
+                }
             }
-        },
+        }
         ShimDecision::RemoteExited(code) => normalize_exit_code(code),
         ShimDecision::RemoteFailed { exit_code, reason } => {
             let _ = writeln!(io::stderr(), "af-transcode: {reason}");
@@ -670,4 +706,88 @@ pub async fn run_shim_protocol<WOut: Write, WErr: Write>(
     }
 
     decision
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    fn hdr_vaapi_libplacebo_args() -> Vec<OsString> {
+        [
+            "-init_hw_device",
+            "vaapi=va:/dev/dri/renderD128",
+            "-init_hw_device",
+            "vulkan=vk@va",
+            "-filter_hw_device",
+            "va",
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_output_format",
+            "vaapi",
+            "-i",
+            "/srv/media/hdr.mkv",
+            "-vf",
+            "hwmap=derive_device=vulkan,libplacebo=w=1920:h=1080:tonemapping=bt.2390:format=nv12,hwmap=derive_device=vaapi:reverse=1",
+            "-c:v",
+            "h264_vaapi",
+            "out.m3u8",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+    }
+
+    #[test]
+    fn prepare_local_exec_args_optimizes_hdr_tonemap_only_when_safe_and_enabled() {
+        let args = hdr_vaapi_libplacebo_args();
+
+        // Applies pre-scale on RunLocal / DispatcherUnavailable when both flags are true.
+        for reason in [
+            LocalFallbackReason::DispatcherRunLocal,
+            LocalFallbackReason::DispatcherUnavailable("absent".into()),
+            LocalFallbackReason::PreSendFailure("closed".into()),
+        ] {
+            let prepared = prepare_local_exec_args(&args, &reason, true, true);
+            assert!(
+                prepared.iter().any(|a| {
+                    a.to_str().is_some_and(|s| {
+                        s.starts_with(
+                            "scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=vulkan,libplacebo=",
+                        )
+                    })
+                }),
+                "expected local VA-API pre-scale for {reason:?}, got: {prepared:?}"
+            );
+        }
+
+        // Never modifies ProbeArgs.
+        assert_eq!(
+            prepare_local_exec_args(&args, &LocalFallbackReason::ProbeArgs, true, true),
+            args
+        );
+
+        // Never modifies when optimize_vulkan_tonemap or vulkan_compute is false.
+        assert_eq!(
+            prepare_local_exec_args(&args, &LocalFallbackReason::DispatcherRunLocal, false, true),
+            args
+        );
+        assert_eq!(
+            prepare_local_exec_args(&args, &LocalFallbackReason::DispatcherRunLocal, true, false),
+            args
+        );
+
+        // Never modifies non-UTF-8 arguments.
+        let mut non_utf8 = args.clone();
+        non_utf8[11] = OsStr::from_bytes(b"/srv/media/hdr\xff.mkv").to_os_string();
+        assert_eq!(
+            prepare_local_exec_args(
+                &non_utf8,
+                &LocalFallbackReason::DispatcherRunLocal,
+                true,
+                true
+            ),
+            non_utf8
+        );
+    }
 }

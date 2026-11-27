@@ -754,6 +754,8 @@
     "transcodeAdaptBadgeGpu": "后端适配：GPU",
     "transcodeAdaptBadgePreferQsv": "后端适配：优先 QSV",
     "transcodeAdaptBadgeAll": "后端适配：GPU + CPU",
+    "transcodeVulkanComputeBadge": "Vulkan 计算 (HDR)",
+    "transcodeVulkanVideoBadge": "Vulkan 视频",
     "transcodeTelemetryCpuLabel": "CPU",
     "transcodeTelemetryGpuLabel": "GPU"
   },

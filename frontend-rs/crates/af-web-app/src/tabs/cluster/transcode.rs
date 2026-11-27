@@ -106,6 +106,16 @@ pub struct LocalTranscodeInfoView {
     pub cpu_usage_pct: Option<f64>,
     #[serde(default)]
     pub gpu_usage_pct: Option<f64>,
+    #[serde(default)]
+    pub vulkan_compute: Option<bool>,
+    #[serde(default)]
+    pub vulkan_device: Option<String>,
+    #[serde(default)]
+    pub vulkan_video: Option<bool>,
+    #[serde(default)]
+    pub vulkan_video_decode_codecs: Vec<String>,
+    #[serde(default)]
+    pub vulkan_video_encode_codecs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -147,6 +157,16 @@ pub struct TranscodeWorkerView {
     pub gpu_usage_pct: Option<f64>,
     #[serde(default)]
     pub rtt_ms: Option<f64>,
+    #[serde(default)]
+    pub vulkan_compute: Option<bool>,
+    #[serde(default)]
+    pub vulkan_device: Option<String>,
+    #[serde(default)]
+    pub vulkan_video: Option<bool>,
+    #[serde(default)]
+    pub vulkan_video_decode_codecs: Vec<String>,
+    #[serde(default)]
+    pub vulkan_video_encode_codecs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -499,6 +519,39 @@ pub fn adapt_backend_badge_key(mode: Option<&str>) -> Option<&'static str> {
         Some("all" | "gpu_and_cpu") => Some("Cluster.transcodeAdaptBadgeAll"),
         _ => None,
     }
+}
+
+pub fn format_vulkan_compute_tooltip(device: Option<&str>) -> Option<String> {
+    device
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+pub fn format_vulkan_video_tooltip(
+    decode_codecs: &[String],
+    encode_codecs: &[String],
+) -> Option<String> {
+    let mut parts = Vec::new();
+    let decode: Vec<&str> = decode_codecs
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !decode.is_empty() {
+        parts.push(format!("dec: {}", decode.join(", ")));
+    }
+    let encode: Vec<&str> = encode_codecs
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !encode.is_empty() {
+        parts.push(format!("enc: {}", encode.join(", ")));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 pub fn build_toggle_enabled_request(enabled: bool) -> UpdateTranscodeConfigRequest {
@@ -1679,6 +1732,14 @@ pub fn TranscodeSection(
                             let local_hw_verified = cfg.local.hw_encoders_verified;
                             let local_adapt_badge =
                                 adapt_backend_badge_key(cfg.local.adapt_backend_mode.as_deref());
+                            let local_vulkan_compute = cfg.local.vulkan_compute == Some(true);
+                            let local_vulkan_compute_title =
+                                format_vulkan_compute_tooltip(cfg.local.vulkan_device.as_deref());
+                            let local_vulkan_video = cfg.local.vulkan_video == Some(true);
+                            let local_vulkan_video_title = format_vulkan_video_tooltip(
+                                &cfg.local.vulkan_video_decode_codecs,
+                                &cfg.local.vulkan_video_encode_codecs,
+                            );
                             let local_load = format_load_summary(
                                 &locale,
                                 cfg.local.cpu_usage_pct,
@@ -1718,6 +1779,28 @@ pub fn TranscodeSection(
                                             {local_adapt_badge.map(|badge_key| {
                                                 view! {
                                                     <Badge label=badge_key tone="indigo" />
+                                                }
+                                            })}
+                                            {local_vulkan_compute.then(|| {
+                                                view! {
+                                                    <span
+                                                        class="inline-flex"
+                                                        data-testid="transcode-local-vulkan-compute-badge"
+                                                        title=local_vulkan_compute_title
+                                                    >
+                                                        <Badge label="Cluster.transcodeVulkanComputeBadge" tone="success" />
+                                                    </span>
+                                                }
+                                            })}
+                                            {local_vulkan_video.then(|| {
+                                                view! {
+                                                    <span
+                                                        class="inline-flex"
+                                                        data-testid="transcode-local-vulkan-video-badge"
+                                                        title=local_vulkan_video_title
+                                                    >
+                                                        <Badge label="Cluster.transcodeVulkanVideoBadge" tone="indigo" />
+                                                    </span>
                                                 }
                                             })}
                                         </div>
@@ -2481,6 +2564,14 @@ fn TranscodeWorkerCard(
             let has_hw_decoders = !hw_decoders_list.is_empty();
             let hw_encoders_verified = current.hw_encoders_verified;
             let adapt_badge = adapt_backend_badge_key(current.adapt_backend_mode.as_deref());
+            let vulkan_compute = current.vulkan_compute == Some(true);
+            let vulkan_compute_title =
+                format_vulkan_compute_tooltip(current.vulkan_device.as_deref());
+            let vulkan_video = current.vulkan_video == Some(true);
+            let vulkan_video_title = format_vulkan_video_tooltip(
+                &current.vulkan_video_decode_codecs,
+                &current.vulkan_video_encode_codecs,
+            );
             let worker_load = format_load_summary(
                 &locale,
                 current.cpu_usage_pct,
@@ -2489,6 +2580,10 @@ fn TranscodeWorkerCard(
             );
             let worker_load_testid = format!("transcode-worker-load-{link_id_val}");
             let worker_hw_decoders_testid = format!("transcode-worker-hw-decoders-{link_id_val}");
+            let worker_vulkan_compute_testid =
+                format!("transcode-worker-vulkan-compute-badge-{link_id_val}");
+            let worker_vulkan_video_testid =
+                format!("transcode-worker-vulkan-video-badge-{link_id_val}");
             let cap_reason = worker_capability_reason(&locale, &current, current_live_peer.as_ref());
             let disabled_reason =
                 worker_control_disabled_reason(&locale, &current, current_live_peer.as_ref());
@@ -2559,6 +2654,28 @@ fn TranscodeWorkerCard(
                                 {adapt_badge.map(|badge_key| {
                                     view! {
                                         <Badge label=badge_key tone="indigo" />
+                                    }
+                                })}
+                                {vulkan_compute.then(|| {
+                                    view! {
+                                        <span
+                                            class="inline-flex"
+                                            data-testid=worker_vulkan_compute_testid
+                                            title=vulkan_compute_title
+                                        >
+                                            <Badge label="Cluster.transcodeVulkanComputeBadge" tone="success" />
+                                        </span>
+                                    }
+                                })}
+                                {vulkan_video.then(|| {
+                                    view! {
+                                        <span
+                                            class="inline-flex"
+                                            data-testid=worker_vulkan_video_testid
+                                            title=vulkan_video_title
+                                        >
+                                            <Badge label="Cluster.transcodeVulkanVideoBadge" tone="indigo" />
+                                        </span>
                                     }
                                 })}
                                 <Show when=move || is_dirty.get()>
@@ -3621,6 +3738,8 @@ mod tests {
             "Cluster.transcodeAdaptBadgeGpu",
             "Cluster.transcodeAdaptBadgePreferQsv",
             "Cluster.transcodeAdaptBadgeAll",
+            "Cluster.transcodeVulkanComputeBadge",
+            "Cluster.transcodeVulkanVideoBadge",
             "Cluster.transcodeTelemetryCpuLabel",
             "Cluster.transcodeTelemetryGpuLabel",
         ];
@@ -3667,6 +3786,11 @@ mod tests {
         assert_eq!(legacy.local.adapt_backend_mode, None);
         assert_eq!(legacy.local.cpu_usage_pct, None);
         assert_eq!(legacy.local.gpu_usage_pct, None);
+        assert_eq!(legacy.local.vulkan_compute, None);
+        assert_eq!(legacy.local.vulkan_device, None);
+        assert_eq!(legacy.local.vulkan_video, None);
+        assert!(legacy.local.vulkan_video_decode_codecs.is_empty());
+        assert!(legacy.local.vulkan_video_encode_codecs.is_empty());
         assert_eq!(legacy.local.render_nodes[0].vaapi_driver, None);
         assert!(legacy.local.render_nodes[0].vaapi_decode_codecs.is_empty());
         assert!(legacy.local.render_nodes[0].vaapi_encode_codecs.is_empty());
@@ -3678,8 +3802,72 @@ mod tests {
         assert_eq!(legacy_worker.cpu_usage_pct, None);
         assert_eq!(legacy_worker.gpu_usage_pct, None);
         assert_eq!(legacy_worker.rtt_ms, None);
+        assert_eq!(legacy_worker.vulkan_compute, None);
+        assert_eq!(legacy_worker.vulkan_device, None);
+        assert_eq!(legacy_worker.vulkan_video, None);
+        assert!(legacy_worker.vulkan_video_decode_codecs.is_empty());
+        assert!(legacy_worker.vulkan_video_encode_codecs.is_empty());
 
-        // Full new JSON payload with dispatch policy, vainfo silicon capabilities, adaptation, and telemetry.
+        // Full new JSON payload with dispatch policy, vainfo silicon capabilities, Vulkan compute/video, adaptation, and telemetry.
+        let extended_local = json!({
+            "server_name": "controller-1",
+            "ffmpeg_version": "8.1.3-Jellyfin",
+            "package_name": "jellyfin-ffmpeg8",
+            "package_version": "8.1.3-1-trixie",
+            "encoders": ["h264_vaapi", "hevc_vaapi", "libx264"],
+            "render_nodes": [
+                {
+                    "path": "/dev/dri/renderD128",
+                    "vendor_id": "0x8086",
+                    "vendor": "intel",
+                    "vaapi_driver": "Intel iHD driver",
+                    "vaapi_decode_codecs": ["h264", "hevc", "hevc_10bit", "vp9"],
+                    "vaapi_encode_codecs": ["h264", "hevc"],
+                    "supports_vpp": true
+                }
+            ],
+            "primary_render_node": "/dev/dri/renderD128",
+            "transcoding_temp_path": "/var/cache/jellyfin/transcodes",
+            "tmp_dir": "/var/cache/jellyfin/af-tmp",
+            "hw_decoders": ["h264", "hevc", "hevc_10bit", "vp9"],
+            "hw_encoders_verified": true,
+            "adapt_backend_mode": "prefer_qsv",
+            "cpu_usage_pct": 18.4,
+            "gpu_usage_pct": 31.2,
+            "vulkan_compute": true,
+            "vulkan_device": "Intel(R) UHD Graphics 770 (ADL-S GT1)",
+            "vulkan_video": false,
+            "vulkan_video_decode_codecs": [],
+            "vulkan_video_encode_codecs": []
+        });
+        let extended_worker = json!({
+            "link_id": "link-1",
+            "peer_name": "worker-1",
+            "link_state": "active",
+            "compatibility": "compatible",
+            "supports_transcode": true,
+            "has_transcode_write_grant": true,
+            "has_updates_write_grant": true,
+            "enabled": true,
+            "eligible": true,
+            "weight": 10,
+            "max_jobs": 6,
+            "active_jobs": 2,
+            "encoders": ["av1_vaapi", "h264_vaapi", "hevc_vaapi"],
+            "render_node": "/dev/dri/renderD128",
+            "parity_ok": true,
+            "hw_decoders": ["av1", "h264", "hevc", "vp9"],
+            "hw_encoders_verified": true,
+            "adapt_backend_mode": "gpu",
+            "cpu_usage_pct": 14.0,
+            "gpu_usage_pct": 28.0,
+            "rtt_ms": 0.4,
+            "vulkan_compute": true,
+            "vulkan_device": "AMD Radeon Graphics (RADV PHOENIX)",
+            "vulkan_video": true,
+            "vulkan_video_decode_codecs": ["h264", "hevc"],
+            "vulkan_video_encode_codecs": ["h264"]
+        });
         let extended_payload = json!({
             "enabled": true,
             "worker_service_enabled": true,
@@ -3693,57 +3881,8 @@ mod tests {
             "dispatch_policy": "balanced",
             "local_max_jobs": 4,
             "local_active_jobs": 1,
-            "local": {
-                "server_name": "controller-1",
-                "ffmpeg_version": "8.1.3-Jellyfin",
-                "package_name": "jellyfin-ffmpeg8",
-                "package_version": "8.1.3-1-trixie",
-                "encoders": ["h264_vaapi", "hevc_vaapi", "libx264"],
-                "render_nodes": [
-                    {
-                        "path": "/dev/dri/renderD128",
-                        "vendor_id": "0x8086",
-                        "vendor": "intel",
-                        "vaapi_driver": "Intel iHD driver",
-                        "vaapi_decode_codecs": ["h264", "hevc", "hevc_10bit", "vp9"],
-                        "vaapi_encode_codecs": ["h264", "hevc"],
-                        "supports_vpp": true
-                    }
-                ],
-                "primary_render_node": "/dev/dri/renderD128",
-                "transcoding_temp_path": "/var/cache/jellyfin/transcodes",
-                "tmp_dir": "/var/cache/jellyfin/af-tmp",
-                "hw_decoders": ["h264", "hevc", "hevc_10bit", "vp9"],
-                "hw_encoders_verified": true,
-                "adapt_backend_mode": "prefer_qsv",
-                "cpu_usage_pct": 18.4,
-                "gpu_usage_pct": 31.2
-            },
-            "workers": [
-                {
-                    "link_id": "link-1",
-                    "peer_name": "worker-1",
-                    "link_state": "active",
-                    "compatibility": "compatible",
-                    "supports_transcode": true,
-                    "has_transcode_write_grant": true,
-                    "has_updates_write_grant": true,
-                    "enabled": true,
-                    "eligible": true,
-                    "weight": 10,
-                    "max_jobs": 6,
-                    "active_jobs": 2,
-                    "encoders": ["av1_vaapi", "h264_vaapi", "hevc_vaapi"],
-                    "render_node": "/dev/dri/renderD128",
-                    "parity_ok": true,
-                    "hw_decoders": ["av1", "h264", "hevc", "vp9"],
-                    "hw_encoders_verified": true,
-                    "adapt_backend_mode": "gpu",
-                    "cpu_usage_pct": 14.0,
-                    "gpu_usage_pct": 28.0,
-                    "rtt_ms": 0.4
-                }
-            ],
+            "local": extended_local,
+            "workers": [extended_worker],
             "recent_jobs": []
         });
         let extended: TranscodeConfigResponse = serde_json::from_value(extended_payload).unwrap();
@@ -3761,6 +3900,14 @@ mod tests {
         );
         assert_eq!(extended.local.cpu_usage_pct, Some(18.4));
         assert_eq!(extended.local.gpu_usage_pct, Some(31.2));
+        assert_eq!(extended.local.vulkan_compute, Some(true));
+        assert_eq!(
+            extended.local.vulkan_device.as_deref(),
+            Some("Intel(R) UHD Graphics 770 (ADL-S GT1)")
+        );
+        assert_eq!(extended.local.vulkan_video, Some(false));
+        assert!(extended.local.vulkan_video_decode_codecs.is_empty());
+        assert!(extended.local.vulkan_video_encode_codecs.is_empty());
         assert_eq!(
             extended.local.render_nodes[0].vaapi_driver.as_deref(),
             Some("Intel iHD driver")
@@ -3774,6 +3921,14 @@ mod tests {
         assert_eq!(worker.cpu_usage_pct, Some(14.0));
         assert_eq!(worker.gpu_usage_pct, Some(28.0));
         assert_eq!(worker.rtt_ms, Some(0.4));
+        assert_eq!(worker.vulkan_compute, Some(true));
+        assert_eq!(
+            worker.vulkan_device.as_deref(),
+            Some("AMD Radeon Graphics (RADV PHOENIX)")
+        );
+        assert_eq!(worker.vulkan_video, Some(true));
+        assert_eq!(worker.vulkan_video_decode_codecs, vec!["h264", "hevc"]);
+        assert_eq!(worker.vulkan_video_encode_codecs, vec!["h264"]);
 
         let round_tripped: TranscodeConfigResponse =
             serde_json::from_str(&serde_json::to_string(&extended).unwrap()).unwrap();
@@ -3917,5 +4072,23 @@ mod tests {
         assert_eq!(adapt_backend_badge_key(Some("off")), None);
         assert_eq!(adapt_backend_badge_key(Some("")), None);
         assert_eq!(adapt_backend_badge_key(None), None);
+
+        assert_eq!(
+            format_vulkan_compute_tooltip(Some(" AMD Radeon Graphics ")).as_deref(),
+            Some("AMD Radeon Graphics")
+        );
+        assert_eq!(format_vulkan_compute_tooltip(Some("   ")), None);
+        assert_eq!(format_vulkan_compute_tooltip(None), None);
+
+        assert_eq!(
+            format_vulkan_video_tooltip(&["h264".into(), "hevc".into()], &["h264".into()])
+                .as_deref(),
+            Some("dec: h264, hevc · enc: h264")
+        );
+        assert_eq!(
+            format_vulkan_video_tooltip(&["av1".into()], &[]).as_deref(),
+            Some("dec: av1")
+        );
+        assert_eq!(format_vulkan_video_tooltip(&[], &[]), None);
     }
 }

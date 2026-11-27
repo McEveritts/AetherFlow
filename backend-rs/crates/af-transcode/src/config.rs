@@ -58,8 +58,17 @@ pub const MAX_FFMPEG_THREADS: usize = 128;
 /// Environment variable configuring worker backend adaptation (`off`, `gpu`, `prefer_qsv`, `all`).
 pub const ENV_WORKER_ADAPT_BACKEND: &str = "AF_TRANSCODE_ADAPT_BACKEND";
 
-/// Environment variable enabling worker-side Vulkan `libplacebo` scale-before-tonemap optimization.
+/// Environment variable enabling worker-side Vulkan `libplacebo` scale-before-tonemap optimization
+/// (defaults to `true`; opt-out via `0`, `false`, `no`, or `off`).
 pub const ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP: &str = "AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP";
+
+/// Environment variable enabling Vulkan Compute filters (`libplacebo`, `*_vulkan` filters)
+/// (defaults to `true`; opt-out via `0`, `false`, `no`, or `off`).
+pub const ENV_WORKER_VULKAN_COMPUTE: &str = "AF_TRANSCODE_VULKAN_COMPUTE";
+
+/// Environment variable enabling Vulkan Video hardware decode/encode (`-hwaccel vulkan`, `*_vulkan` codecs)
+/// (defaults to `false`; opt-in via `1`, `true`, `yes`, or `on`).
+pub const ENV_WORKER_VULKAN_VIDEO: &str = "AF_TRANSCODE_VULKAN_VIDEO";
 
 /// Environment variable configuring cluster transcode dispatch policy (consumed by dispatcher).
 pub const ENV_DISPATCH_POLICY: &str = "AF_TRANSCODE_DISPATCH_POLICY";
@@ -508,28 +517,82 @@ pub fn configured_worker_adapt_backend() -> BackendAdaptMode {
     configured_worker_adapt_backend_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
 }
 
+fn parse_bool_default_true(raw: Option<&str>) -> bool {
+    !raw.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
+}
+
+fn parse_bool_default_false(raw: Option<&str>) -> bool {
+    raw.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 fn resolve_worker_optimize_vulkan_tonemap(env_override: Option<&str>, env_file: &Path) -> bool {
-    resolve_env_or_file(env_override, env_file, ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP)
-        .as_deref()
-        .is_some_and(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+    let raw = resolve_env_or_file(env_override, env_file, ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP);
+    parse_bool_default_true(raw.as_deref())
 }
 
 /// Resolves whether Vulkan `libplacebo` scale-before-tonemap optimization is enabled from
-/// `AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP`, falling back to the given dedicated transcode env file.
+/// `AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP`, falling back to the given dedicated transcode env file
+/// (defaults to `true`; opt-out via `0`, `false`, `no`, or `off`).
 pub fn configured_worker_optimize_vulkan_tonemap_with_env_file(env_file: &Path) -> bool {
     let env_val = env::var(ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP).ok();
     resolve_worker_optimize_vulkan_tonemap(env_val.as_deref(), env_file)
 }
 
 /// Resolves whether Vulkan `libplacebo` scale-before-tonemap optimization is enabled from
-/// `AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP`, falling back to `/etc/aetherflow/transcode.env`.
+/// `AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP`, falling back to `/etc/aetherflow/transcode.env`
+/// (defaults to `true`; opt-out via `0`, `false`, `no`, or `off`).
 pub fn configured_worker_optimize_vulkan_tonemap() -> bool {
     configured_worker_optimize_vulkan_tonemap_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
+}
+
+fn resolve_worker_vulkan_compute(env_override: Option<&str>, env_file: &Path) -> bool {
+    let raw = resolve_env_or_file(env_override, env_file, ENV_WORKER_VULKAN_COMPUTE);
+    parse_bool_default_true(raw.as_deref())
+}
+
+/// Resolves whether Vulkan Compute (`libplacebo`, `*_vulkan` filters) is enabled from
+/// `AF_TRANSCODE_VULKAN_COMPUTE`, falling back to the given dedicated transcode env file
+/// (defaults to `true`; opt-out via `0`, `false`, `no`, or `off`).
+pub fn configured_worker_vulkan_compute_with_env_file(env_file: &Path) -> bool {
+    let env_val = env::var(ENV_WORKER_VULKAN_COMPUTE).ok();
+    resolve_worker_vulkan_compute(env_val.as_deref(), env_file)
+}
+
+/// Resolves whether Vulkan Compute (`libplacebo`, `*_vulkan` filters) is enabled from
+/// `AF_TRANSCODE_VULKAN_COMPUTE`, falling back to `/etc/aetherflow/transcode.env`
+/// (defaults to `true`; opt-out via `0`, `false`, `no`, or `off`).
+pub fn configured_worker_vulkan_compute() -> bool {
+    configured_worker_vulkan_compute_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
+}
+
+fn resolve_worker_vulkan_video(env_override: Option<&str>, env_file: &Path) -> bool {
+    let raw = resolve_env_or_file(env_override, env_file, ENV_WORKER_VULKAN_VIDEO);
+    parse_bool_default_false(raw.as_deref())
+}
+
+/// Resolves whether Vulkan Video hardware decode/encode (`-hwaccel vulkan`, `*_vulkan` codecs) is
+/// enabled from `AF_TRANSCODE_VULKAN_VIDEO`, falling back to the given dedicated transcode env file
+/// (defaults to `false`; opt-in via `1`, `true`, `yes`, or `on`).
+pub fn configured_worker_vulkan_video_with_env_file(env_file: &Path) -> bool {
+    let env_val = env::var(ENV_WORKER_VULKAN_VIDEO).ok();
+    resolve_worker_vulkan_video(env_val.as_deref(), env_file)
+}
+
+/// Resolves whether Vulkan Video hardware decode/encode (`-hwaccel vulkan`, `*_vulkan` codecs) is
+/// enabled from `AF_TRANSCODE_VULKAN_VIDEO`, falling back to `/etc/aetherflow/transcode.env`
+/// (defaults to `false`; opt-in via `1`, `true`, `yes`, or `on`).
+pub fn configured_worker_vulkan_video() -> bool {
+    configured_worker_vulkan_video_with_env_file(Path::new(DEFAULT_TRANSCODE_ENV_FILE))
 }
 
 fn resolve_dispatch_policy_raw(env_override: Option<&str>, env_file: &Path) -> Option<String> {
@@ -1333,9 +1396,102 @@ AF_TRANSCODE_LOCAL_MAX_JOBS=3
             resolve_worker_adapt_backend(None, &missing),
             BackendAdaptMode::Off
         );
-        assert!(!resolve_worker_optimize_vulkan_tonemap(None, &missing));
+        assert!(resolve_worker_optimize_vulkan_tonemap(None, &missing));
+        assert!(resolve_worker_vulkan_compute(None, &missing));
+        assert!(!resolve_worker_vulkan_video(None, &missing));
         assert_eq!(resolve_dispatch_policy_raw(None, &missing), None);
         assert_eq!(resolve_local_max_jobs(None, &missing), None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vulkan_compute_video_and_tonemap_knobs_defaults_file_fallback_and_overrides() {
+        let dir = unique_temp_dir("vkknobs");
+        let missing = dir.join("absent.env");
+
+        // Unset / empty defaults: compute=true, optimize_tonemap=true, video=false.
+        assert!(resolve_worker_vulkan_compute(None, &missing));
+        assert!(resolve_worker_vulkan_compute(Some(""), &missing));
+        assert!(resolve_worker_vulkan_compute(Some("   "), &missing));
+        assert!(resolve_worker_optimize_vulkan_tonemap(None, &missing));
+        assert!(resolve_worker_optimize_vulkan_tonemap(Some(""), &missing));
+        assert!(!resolve_worker_vulkan_video(None, &missing));
+        assert!(!resolve_worker_vulkan_video(Some(""), &missing));
+        assert!(!resolve_worker_vulkan_video(Some("   "), &missing));
+
+        // Explicit opt-out values for default-true knobs.
+        for falsy in ["0", "false", "FALSE", " no ", "OfF"] {
+            assert!(
+                !resolve_worker_vulkan_compute(Some(falsy), &missing),
+                "compute must opt out on '{falsy}'"
+            );
+            assert!(
+                !resolve_worker_optimize_vulkan_tonemap(Some(falsy), &missing),
+                "optimize_vulkan_tonemap must opt out on '{falsy}'"
+            );
+            assert!(
+                !resolve_worker_vulkan_video(Some(falsy), &missing),
+                "video must stay false on '{falsy}'"
+            );
+        }
+
+        // Explicit truthy values for all three knobs.
+        for truthy in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(
+                resolve_worker_vulkan_compute(Some(truthy), &missing),
+                "compute must stay true on '{truthy}'"
+            );
+            assert!(
+                resolve_worker_optimize_vulkan_tonemap(Some(truthy), &missing),
+                "optimize_vulkan_tonemap must stay true on '{truthy}'"
+            );
+            assert!(
+                resolve_worker_vulkan_video(Some(truthy), &missing),
+                "video must opt in on '{truthy}'"
+            );
+        }
+
+        // Unrecognized tokens keep their safe defaults.
+        assert!(resolve_worker_vulkan_compute(Some("maybe"), &missing));
+        assert!(resolve_worker_optimize_vulkan_tonemap(
+            Some("maybe"),
+            &missing
+        ));
+        assert!(!resolve_worker_vulkan_video(Some("maybe"), &missing));
+
+        // File fallback overrides defaults; process env overrides file fallback.
+        let env_path = dir.join("transcode.env");
+        fs::write(
+            &env_path,
+            r#"
+AF_TRANSCODE_VULKAN_COMPUTE=off
+AF_TRANSCODE_VULKAN_VIDEO=true
+AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=0
+"#,
+        )
+        .expect("write env file");
+        fs::set_permissions(&env_path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        assert!(!resolve_worker_vulkan_compute(None, &env_path));
+        assert!(resolve_worker_vulkan_compute(Some("1"), &env_path));
+        assert!(resolve_worker_vulkan_compute(Some("yes"), &env_path));
+        assert!(!resolve_worker_vulkan_compute(Some("   "), &env_path));
+
+        assert!(resolve_worker_vulkan_video(None, &env_path));
+        assert!(!resolve_worker_vulkan_video(Some("0"), &env_path));
+        assert!(!resolve_worker_vulkan_video(Some("off"), &env_path));
+        assert!(resolve_worker_vulkan_video(Some(""), &env_path));
+
+        assert!(!resolve_worker_optimize_vulkan_tonemap(None, &env_path));
+        assert!(resolve_worker_optimize_vulkan_tonemap(
+            Some("on"),
+            &env_path
+        ));
+        assert!(!resolve_worker_optimize_vulkan_tonemap(
+            Some("no"),
+            &env_path
+        ));
 
         let _ = fs::remove_dir_all(&dir);
     }

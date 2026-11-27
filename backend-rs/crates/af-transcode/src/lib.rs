@@ -12,13 +12,15 @@ pub use argv::{
     adapt_args_for_backend, apply_ffmpeg_thread_cap, has_disallowed_protocol_whitelist,
     has_network_input, inject_local_protocol_whitelist, is_allowed_local_protocol_whitelist,
     is_probe, is_valid_render_node_path, optimize_vulkan_tonemap_args,
-    optimize_vulkan_tonemap_filtergraph, plan_backend_adaptation, required_capability,
-    rewrite_any_render_node, rewrite_render_node, validate_worker_args, AdaptedTargetBackend,
-    Capability, HwAccel, ALLOWED_LOCAL_PROTOCOLS, WORKER_LOCAL_PROTOCOL_WHITELIST,
+    optimize_vulkan_tonemap_filtergraph, plan_backend_adaptation,
+    plan_backend_adaptation_with_vulkan, required_capability, rewrite_any_render_node,
+    rewrite_render_node, validate_worker_args, AdaptedTargetBackend, Capability, HwAccel,
+    WorkerVulkanCapabilities, ALLOWED_LOCAL_PROTOCOLS, WORKER_LOCAL_PROTOCOL_WHITELIST,
 };
 pub use capabilities::{
-    filter_encoders_with_vainfo, parse_vainfo_output, probe_capabilities, select_render_node,
-    CapabilitiesConfig, RenderNodeInfo, TranscodeCapabilities, VaInfoProfileSummary,
+    filter_encoders_with_vainfo, filter_encoders_with_vulkan, parse_ffmpeg_vulkan_probe_output,
+    parse_vainfo_output, probe_capabilities, select_render_node, CapabilitiesConfig,
+    RenderNodeInfo, TranscodeCapabilities, VaInfoProfileSummary, VulkanProbeSummary,
 };
 pub use config::{
     collect_allowed_env_subset, configured_dispatch_policy_raw,
@@ -30,18 +32,21 @@ pub use config::{
     configured_worker_ffmpeg_threads_with_env_file, configured_worker_max_jobs,
     configured_worker_max_jobs_with_env_file, configured_worker_optimize_vulkan_tonemap,
     configured_worker_optimize_vulkan_tonemap_with_env_file, configured_worker_socket_mode,
-    configured_worker_socket_path, read_transcode_env_file, resolve_worker_child_cwd,
-    validate_real_ffmpeg_path, validate_safe_dir, validate_socket_mode, validate_start_request,
-    BackendAdaptMode, ConfigError, ALLOWED_ENV_KEYS, DEFAULT_DISPATCHER_SOCKET_PATH,
-    DEFAULT_FRAME_WRITE_TIMEOUT, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_JELLYFIN_CACHE_DIR,
-    DEFAULT_PROBE_TIMEOUT, DEFAULT_REAL_FFMPEG_PATH, DEFAULT_TRANSCODE_ENV_FILE,
-    DEFAULT_WORKER_MAX_JOBS, DEFAULT_WORKER_SOCKET_MODE, DEFAULT_WORKER_SOCKET_PATH,
-    DEFAULT_WORKER_START_FRAME_TIMEOUT, ENV_DISPATCHER_SOCKET, ENV_DISPATCH_POLICY,
-    ENV_HANDSHAKE_TIMEOUT_MS, ENV_LOCAL_MAX_JOBS, ENV_REAL_FFMPEG, ENV_SHIM_RECURSION_GUARD,
-    ENV_WORKER_ADAPT_BACKEND, ENV_WORKER_FFMPEG_THREADS, ENV_WORKER_MAX_JOBS,
-    ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP, ENV_WORKER_SOCKET, ENV_WORKER_SOCKET_MODE,
-    MAX_FFMPEG_THREADS, MAX_TRANSCODE_ENV_FILE_BYTES, MIN_FFMPEG_THREADS,
-    RECOMMENDED_DISPATCHER_REMOTE_START_TIMEOUT, WORKER_BASELINE_ENV_KEYS,
+    configured_worker_socket_path, configured_worker_vulkan_compute,
+    configured_worker_vulkan_compute_with_env_file, configured_worker_vulkan_video,
+    configured_worker_vulkan_video_with_env_file, read_transcode_env_file,
+    resolve_worker_child_cwd, validate_real_ffmpeg_path, validate_safe_dir, validate_socket_mode,
+    validate_start_request, BackendAdaptMode, ConfigError, ALLOWED_ENV_KEYS,
+    DEFAULT_DISPATCHER_SOCKET_PATH, DEFAULT_FRAME_WRITE_TIMEOUT, DEFAULT_HANDSHAKE_TIMEOUT,
+    DEFAULT_JELLYFIN_CACHE_DIR, DEFAULT_PROBE_TIMEOUT, DEFAULT_REAL_FFMPEG_PATH,
+    DEFAULT_TRANSCODE_ENV_FILE, DEFAULT_WORKER_MAX_JOBS, DEFAULT_WORKER_SOCKET_MODE,
+    DEFAULT_WORKER_SOCKET_PATH, DEFAULT_WORKER_START_FRAME_TIMEOUT, ENV_DISPATCHER_SOCKET,
+    ENV_DISPATCH_POLICY, ENV_HANDSHAKE_TIMEOUT_MS, ENV_LOCAL_MAX_JOBS, ENV_REAL_FFMPEG,
+    ENV_SHIM_RECURSION_GUARD, ENV_WORKER_ADAPT_BACKEND, ENV_WORKER_FFMPEG_THREADS,
+    ENV_WORKER_MAX_JOBS, ENV_WORKER_OPTIMIZE_VULKAN_TONEMAP, ENV_WORKER_SOCKET,
+    ENV_WORKER_SOCKET_MODE, ENV_WORKER_VULKAN_COMPUTE, ENV_WORKER_VULKAN_VIDEO, MAX_FFMPEG_THREADS,
+    MAX_TRANSCODE_ENV_FILE_BYTES, MIN_FFMPEG_THREADS, RECOMMENDED_DISPATCHER_REMOTE_START_TIMEOUT,
+    WORKER_BASELINE_ENV_KEYS,
 };
 pub use protocol::{
     bounded_frame_channel, decode_frame_payload, decode_framed, encode_frame_payload,
@@ -51,8 +56,8 @@ pub use protocol::{
     MAX_START_ARG_BYTES, MAX_START_CWD_BYTES, MAX_START_ENV_ENTRIES, MAX_START_ENV_VALUE_BYTES,
 };
 pub use shim::{
-    exec_real_ffmpeg, normalize_exit_code, run_shim, run_shim_protocol, LocalFallbackReason,
-    ShimConfig, ShimDecision,
+    exec_real_ffmpeg, normalize_exit_code, prepare_local_exec_args, run_shim, run_shim_protocol,
+    LocalFallbackReason, ShimConfig, ShimDecision,
 };
 pub use worker::{
     bind_worker_socket, run_worker, serve_worker_listener, BoundWorkerSocket, WorkerConfig,

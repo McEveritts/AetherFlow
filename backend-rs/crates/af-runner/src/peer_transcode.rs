@@ -1104,8 +1104,14 @@ fn render_default_transcode_env_file() -> &'static str {
      # Cross-vendor backend adaptation mode (off, gpu, prefer_qsv, or all for QSV<->VA-API or CPU overflow):\n\
      # AF_TRANSCODE_ADAPT_BACKEND=off\n\
      #\n\
-     # Scale via scale_vaapi before Vulkan libplacebo HDR tone-mapping:\n\
-     # AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=false\n\
+     # Enable hardware Vulkan Compute for libplacebo HDR tone-mapping and *_vulkan filters (true/false):\n\
+     # AF_TRANSCODE_VULKAN_COMPUTE=true\n\
+     #\n\
+     # Scale via scale_vaapi before Vulkan libplacebo HDR tone-mapping (default true; set false to disable):\n\
+     # AF_TRANSCODE_OPTIMIZE_VULKAN_TONEMAP=true\n\
+     #\n\
+     # Enable experimental Vulkan Video hardware decode/encode (-hwaccel vulkan, *_vulkan codecs; off by default):\n\
+     # AF_TRANSCODE_VULKAN_VIDEO=false\n\
      #\n\
      # Enable Mesa Rusticl OpenCL for AMD HDR tone-mapping on workers:\n\
      # RUSTICL_ENABLE=radeonsi\n\

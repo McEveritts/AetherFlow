@@ -68,14 +68,31 @@ pub struct Capability {
     /// `true` when the video filtergraph references `tonemap_vaapi` (Intel VA-API VPP only).
     #[serde(default)]
     pub requires_vaapi_tonemap: bool,
+    /// `true` when the command requires Vulkan Compute (`libplacebo`, `*_vulkan` filters,
+    /// `hwmap`/`hwupload` with `derive_device=vulkan`, or Vulkan device usage without Vulkan Video).
+    #[serde(default)]
+    pub requires_vulkan_compute: bool,
+    /// `true` when the command requires Vulkan Video hardware decode or encode
+    /// (`-hwaccel vulkan`, `-hwaccel_output_format vulkan`, or `*_vulkan` codecs).
+    #[serde(default)]
+    pub requires_vulkan_video: bool,
+    /// `true` when the command requires Vulkan Video hardware decode
+    /// (`-hwaccel vulkan`, `-hwaccel_output_format vulkan`, or `*_vulkan` input decoder).
+    #[serde(default)]
+    pub requires_vulkan_video_decode: bool,
+    /// `true` when the command requires non-Vulkan hardware video decoding
+    /// (`-hwaccel vaapi|qsv|cuda`, `-hwaccel_output_format vaapi|qsv|cuda`, or an input video
+    /// decoder ending in `_qsv` or `_cuvid`).
+    #[serde(default)]
+    pub requires_non_vulkan_hw_decode: bool,
 }
 
 fn normalize_hw_decoder_codec(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "h264" | "h264_qsv" | "h264_cuvid" | "avc" => Some("h264"),
-        "hevc" | "hevc_qsv" | "hevc_cuvid" | "h265" => Some("hevc"),
-        "av1" | "av1_qsv" | "av1_cuvid" => Some("av1"),
-        "vp9" | "vp9_qsv" | "vp9_cuvid" => Some("vp9"),
+        "h264" | "h264_qsv" | "h264_cuvid" | "h264_vulkan" | "avc" => Some("h264"),
+        "hevc" | "hevc_qsv" | "hevc_cuvid" | "hevc_vulkan" | "h265" => Some("hevc"),
+        "av1" | "av1_qsv" | "av1_cuvid" | "av1_vulkan" => Some("av1"),
+        "vp9" | "vp9_qsv" | "vp9_cuvid" | "vp9_vulkan" => Some("vp9"),
         "vp8" | "vp8_qsv" | "vp8_cuvid" => Some("vp8"),
         "mpeg2" | "mpeg2video" | "mpeg2_qsv" | "mpeg2_cuvid" => Some("mpeg2video"),
         "vc1" | "vc1_qsv" | "vc1_cuvid" => Some("vc1"),
@@ -111,13 +128,14 @@ impl Capability {
     pub fn required_hw_decoder(&self) -> Option<&str> {
         let dec = self.decoder.as_deref()?;
         let has_hw_decode = self.requires_hardware()
-            && (self.required_hwaccels.iter().any(|hw| {
-                matches!(
-                    hw,
-                    HwAccel::Vaapi | HwAccel::Qsv | HwAccel::Cuda | HwAccel::Vulkan
-                )
-            }) || dec.ends_with("_qsv")
-                || dec.ends_with("_cuvid"));
+            && (self
+                .required_hwaccels
+                .iter()
+                .any(|hw| matches!(hw, HwAccel::Vaapi | HwAccel::Qsv | HwAccel::Cuda))
+                || self.requires_vulkan_video_decode
+                || dec.ends_with("_qsv")
+                || dec.ends_with("_cuvid")
+                || dec.ends_with("_vulkan"));
         if !has_hw_decode {
             return None;
         }
@@ -781,6 +799,9 @@ fn inspect_filtergraph(graph: &str, cap: &mut Capability) {
         }
 
         if let Some(hw) = hwaccel_from_filter_name(&lower) {
+            if hw == HwAccel::Vulkan {
+                cap.requires_vulkan_compute = true;
+            }
             push_unique(&mut cap.required_hwaccels, hw);
             push_unique(&mut cap.filters, lower);
             continue;
@@ -796,6 +817,9 @@ fn inspect_filtergraph(graph: &str, cap: &mut Capability) {
                         if let Some((k, v)) = kv.split_once('=') {
                             if k.trim().eq_ignore_ascii_case("derive_device") {
                                 if let Some(hw) = parse_hwaccel_name(v) {
+                                    if hw == HwAccel::Vulkan {
+                                        cap.requires_vulkan_compute = true;
+                                    }
                                     push_unique(&mut cap.required_hwaccels, hw);
                                     push_unique(
                                         &mut cap.filters,
@@ -871,6 +895,12 @@ pub fn required_capability<S: AsRef<str>>(args: &[S]) -> Capability {
                 if let Some(hw) = parse_hwaccel_name(val) {
                     push_unique(&mut cap.required_hwaccels, hw);
                     explicit_primary_hwaccel = Some(hw);
+                    if hw == HwAccel::Vulkan {
+                        cap.requires_vulkan_video = true;
+                        cap.requires_vulkan_video_decode = true;
+                    } else if matches!(hw, HwAccel::Vaapi | HwAccel::Qsv | HwAccel::Cuda) {
+                        cap.requires_non_vulkan_hw_decode = true;
+                    }
                 }
                 i += 2;
                 continue;
@@ -879,6 +909,12 @@ pub fn required_capability<S: AsRef<str>>(args: &[S]) -> Capability {
             if let Some(val) = next {
                 if let Some(hw) = parse_hwaccel_name(val) {
                     push_unique(&mut cap.required_hwaccels, hw);
+                    if hw == HwAccel::Vulkan {
+                        cap.requires_vulkan_video = true;
+                        cap.requires_vulkan_video_decode = true;
+                    } else if matches!(hw, HwAccel::Vaapi | HwAccel::Qsv | HwAccel::Cuda) {
+                        cap.requires_non_vulkan_hw_decode = true;
+                    }
                 }
                 i += 2;
                 continue;
@@ -931,11 +967,20 @@ pub fn required_capability<S: AsRef<str>>(args: &[S]) -> Capability {
                 } else {
                     let lower = val.trim().to_ascii_lowercase();
                     if !lower.is_empty() && lower != "copy" {
+                        if lower.ends_with("_qsv") || lower.ends_with("_cuvid") {
+                            cap.requires_non_vulkan_hw_decode = true;
+                        }
                         cap.decoder = Some(lower);
                     }
                 }
                 if let Some(hw) = hwaccel_from_codec_name(val) {
                     push_unique(&mut cap.required_hwaccels, hw);
+                    if hw == HwAccel::Vulkan {
+                        cap.requires_vulkan_video = true;
+                        if !is_output_section {
+                            cap.requires_vulkan_video_decode = true;
+                        }
+                    }
                 }
                 i += 2;
                 continue;
@@ -952,6 +997,10 @@ pub fn required_capability<S: AsRef<str>>(args: &[S]) -> Capability {
         }
 
         i += 1;
+    }
+
+    if cap.required_hwaccels.contains(&HwAccel::Vulkan) && !cap.requires_vulkan_video {
+        cap.requires_vulkan_compute = true;
     }
 
     // Choose deterministic primary `hwaccel`:
@@ -1901,10 +1950,10 @@ fn hw_to_cpu_encoder(enc: &str) -> Option<&'static str> {
 
 fn hw_decoder_to_base_codec(dec: &str) -> Option<&'static str> {
     match dec.trim().to_ascii_lowercase().as_str() {
-        "h264_qsv" | "h264_cuvid" => Some("h264"),
-        "hevc_qsv" | "hevc_cuvid" => Some("hevc"),
-        "av1_qsv" | "av1_cuvid" => Some("av1"),
-        "vp9_qsv" | "vp9_cuvid" => Some("vp9"),
+        "h264_qsv" | "h264_cuvid" | "h264_vulkan" => Some("h264"),
+        "hevc_qsv" | "hevc_cuvid" | "hevc_vulkan" => Some("hevc"),
+        "av1_qsv" | "av1_cuvid" | "av1_vulkan" => Some("av1"),
+        "vp9_qsv" | "vp9_cuvid" | "vp9_vulkan" => Some("vp9"),
         "vp8_qsv" | "vp8_cuvid" => Some("vp8"),
         "mpeg2_qsv" | "mpeg2_cuvid" => Some("mpeg2video"),
         "vc1_qsv" | "vc1_cuvid" => Some("vc1"),
@@ -2994,7 +3043,7 @@ fn is_valid_x264_preset(val: &str) -> bool {
 
 fn can_adapt_qsv_to_vaapi<S: AsRef<str>>(args: &[S], cap: &Capability) -> bool {
     let is_qsv = cap.hwaccel == Some(HwAccel::Qsv) || cap.required_hwaccels.contains(&HwAccel::Qsv);
-    if !is_qsv || cap.required_hwaccels.contains(&HwAccel::Cuda) {
+    if !is_qsv || cap.required_hwaccels.contains(&HwAccel::Cuda) || cap.requires_vulkan_video {
         return false;
     }
     if let Some(enc) = cap.required_encoder() {
@@ -3087,15 +3136,37 @@ fn worker_has_vaapi_node(nodes: &[af_hardware::RenderNode], requires_vaapi_tonem
     })
 }
 
-/// Plans whether a worker with `mode`, `worker_encoders`, `worker_hw_decoders`, and `worker_nodes`
-/// can execute `args` natively or by adapting to another backend (`Vaapi`, `Qsv`, or `Cpu`).
-pub fn plan_backend_adaptation<S: AsRef<str>>(
+/// Separated Vulkan Compute and Vulkan Video worker capability view consumed by
+/// [`plan_backend_adaptation_with_vulkan`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkerVulkanCapabilities<'a> {
+    pub vulkan_compute: Option<bool>,
+    pub vulkan_video: Option<bool>,
+    pub vulkan_video_decode_codecs: &'a [String],
+    pub vulkan_video_encode_codecs: &'a [String],
+}
+
+fn vulkan_video_codec_for_encoder(enc: &str) -> Option<&'static str> {
+    let lower = enc.trim().to_ascii_lowercase();
+    match lower.strip_suffix("_vulkan")? {
+        "h264" => Some("h264"),
+        "hevc" => Some("hevc"),
+        "av1" => Some("av1"),
+        _ => None,
+    }
+}
+
+/// Plans whether a worker with `mode`, `worker_encoders`, `worker_hw_decoders`, `worker_nodes`,
+/// and separated Vulkan Compute / Vulkan Video capabilities (`vulkan`) can execute `args` natively
+/// or by adapting to another backend (`Vaapi`, `Qsv`, or `Cpu`).
+pub fn plan_backend_adaptation_with_vulkan<S: AsRef<str>>(
     args: &[S],
     cap: &Capability,
     mode: BackendAdaptMode,
     worker_encoders: &[String],
     worker_hw_decoders: &[String],
     worker_nodes: &[af_hardware::RenderNode],
+    vulkan: &WorkerVulkanCapabilities<'_>,
 ) -> Option<AdaptedTargetBackend> {
     let native_encoder_ok = cap
         .required_encoder()
@@ -3105,8 +3176,63 @@ pub fn plan_backend_adaptation<S: AsRef<str>>(
     } else {
         true
     };
-    let native_decoder_ok = hw_decoder_supported_on_worker(cap, worker_hw_decoders);
-    let native_ok = native_encoder_ok && native_node_ok && native_decoder_ok;
+    let native_vulkan_compute_ok =
+        !cap.requires_vulkan_compute || vulkan.vulkan_compute != Some(false);
+    let native_vulkan_video_ok = if !cap.requires_vulkan_video {
+        true
+    } else if vulkan.vulkan_video == Some(false) {
+        false
+    } else {
+        let decode_ok = if cap.requires_vulkan_video_decode {
+            if vulkan.vulkan_video == Some(true) || !vulkan.vulkan_video_decode_codecs.is_empty() {
+                if vulkan.vulkan_video_decode_codecs.is_empty() {
+                    false
+                } else {
+                    match cap.required_hw_decoder() {
+                        Some(req_dec) => vulkan
+                            .vulkan_video_decode_codecs
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(req_dec)),
+                        None => cap.decoder.is_none(),
+                    }
+                }
+            } else {
+                true
+            }
+        } else {
+            true
+        };
+
+        let encode_ok = match cap.required_encoder() {
+            Some(enc)
+                if enc.to_ascii_lowercase().ends_with("_vulkan")
+                    && (vulkan.vulkan_video == Some(true)
+                        || !vulkan.vulkan_video_encode_codecs.is_empty()) =>
+            {
+                vulkan_video_codec_for_encoder(enc).is_some_and(|codec| {
+                    vulkan
+                        .vulkan_video_encode_codecs
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(codec))
+                })
+            }
+            _ => true,
+        };
+
+        decode_ok && encode_ok
+    };
+
+    let native_decoder_ok =
+        if cap.requires_vulkan_video_decode && !cap.requires_non_vulkan_hw_decode {
+            native_vulkan_video_ok
+        } else {
+            hw_decoder_supported_on_worker(cap, worker_hw_decoders)
+        };
+    let native_ok = native_encoder_ok
+        && native_node_ok
+        && native_decoder_ok
+        && native_vulkan_compute_ok
+        && native_vulkan_video_ok;
 
     if mode == BackendAdaptMode::PreferQsv
         && cap.hwaccel == Some(HwAccel::Vaapi)
@@ -3132,6 +3258,7 @@ pub fn plan_backend_adaptation<S: AsRef<str>>(
         if can_adapt_qsv_to_vaapi(args, cap)
             && worker_has_vaapi_node(worker_nodes, cap.requires_vaapi_tonemap)
             && hw_decoder_supported_on_worker(cap, worker_hw_decoders)
+            && native_vulkan_compute_ok
         {
             let target_enc_ok = match cap.required_encoder() {
                 Some(enc) => {
@@ -3168,6 +3295,27 @@ pub fn plan_backend_adaptation<S: AsRef<str>>(
     }
 
     None
+}
+
+/// Plans whether a worker with `mode`, `worker_encoders`, `worker_hw_decoders`, and `worker_nodes`
+/// can execute `args` natively or by adapting to another backend (`Vaapi`, `Qsv`, or `Cpu`).
+pub fn plan_backend_adaptation<S: AsRef<str>>(
+    args: &[S],
+    cap: &Capability,
+    mode: BackendAdaptMode,
+    worker_encoders: &[String],
+    worker_hw_decoders: &[String],
+    worker_nodes: &[af_hardware::RenderNode],
+) -> Option<AdaptedTargetBackend> {
+    plan_backend_adaptation_with_vulkan(
+        args,
+        cap,
+        mode,
+        worker_encoders,
+        worker_hw_decoders,
+        worker_nodes,
+        &WorkerVulkanCapabilities::default(),
+    )
 }
 
 /// Rewrites `ffmpeg` arguments to target `target` (`Native`, `Vaapi`, `Qsv`, or `Cpu`),
@@ -3863,7 +4011,10 @@ fn adapt_hw_to_cpu<S: AsRef<str>>(args: &[S]) -> Result<Vec<String>, String> {
                     }
                 } else {
                     let lower = val.trim().to_ascii_lowercase();
-                    if lower.ends_with("_qsv") || lower.ends_with("_cuvid") {
+                    if lower.ends_with("_qsv")
+                        || lower.ends_with("_cuvid")
+                        || lower.ends_with("_vulkan")
+                    {
                         let base = hw_decoder_to_base_codec(&lower).ok_or_else(|| {
                             format!("unsupported hardware decoder '{val}' for CPU adaptation")
                         })?;
@@ -7015,6 +7166,625 @@ mod tests {
                 "4",
                 "out.m3u8",
             ])
+        );
+    }
+
+    #[test]
+    fn required_capability_separates_vulkan_compute_from_vulkan_video() {
+        // 1. VA-API decode + Vulkan libplacebo HDR tone-mapping -> Vulkan Compute ONLY, NOT Vulkan Video.
+        let vaapi_placebo = [
+            "-init_hw_device",
+            "vaapi=va:/dev/dri/renderD128",
+            "-init_hw_device",
+            "vulkan=vk@va",
+            "-filter_hw_device",
+            "va",
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_output_format",
+            "vaapi",
+            "-c:v",
+            "hevc",
+            "-i",
+            "/srv/media/hdr.mkv",
+            "-vf",
+            "hwmap=derive_device=vulkan,libplacebo=w=1920:h=1080:tonemapping=bt.2390:format=nv12,hwmap=derive_device=vaapi:reverse=1",
+            "-c:v",
+            "h264_vaapi",
+            "out.m3u8",
+        ];
+        let cap = required_capability(&vaapi_placebo);
+        assert!(cap.requires_vulkan_compute);
+        assert!(!cap.requires_vulkan_video);
+        assert!(!cap.requires_vulkan_video_decode);
+        assert_eq!(cap.required_hw_decoder(), Some("hevc"));
+
+        // 2. CPU decode + Vulkan libplacebo -> Vulkan Compute ONLY, and required_hw_decoder() MUST be None!
+        let cpu_placebo = [
+            "-init_hw_device",
+            "vulkan=vk",
+            "-c:v",
+            "av1",
+            "-i",
+            "/srv/media/hdr_av1.mkv",
+            "-vf",
+            "format=p010,hwupload,libplacebo=tonemapping=bt.2390:format=nv12,hwdownload,format=nv12",
+            "-c:v",
+            "libx264",
+            "out.m3u8",
+        ];
+        let cap_cpu = required_capability(&cpu_placebo);
+        assert!(cap_cpu.requires_vulkan_compute);
+        assert!(!cap_cpu.requires_vulkan_video);
+        assert!(!cap_cpu.requires_vulkan_video_decode);
+        assert_eq!(cap_cpu.decoder.as_deref(), Some("av1"));
+        assert_eq!(cap_cpu.required_hw_decoder(), None);
+
+        // 3. `-init_hw_device vulkan=vk` + `format=vulkan,hwupload` -> Vulkan Compute ONLY.
+        let vk_upload = [
+            "-init_hw_device",
+            "vulkan=vk",
+            "-i",
+            "/srv/media/clip.mkv",
+            "-vf",
+            "format=vulkan,hwupload,hwdownload,format=nv12",
+            "-c:v",
+            "libx264",
+            "out.m3u8",
+        ];
+        let cap_up = required_capability(&vk_upload);
+        assert!(cap_up.requires_vulkan_compute);
+        assert!(!cap_up.requires_vulkan_video);
+        assert!(!cap_up.requires_vulkan_video_decode);
+
+        // 4. `-hwaccel vulkan` decode -> Vulkan Video + Vulkan Video Decode, NOT Vulkan Compute.
+        let vk_decode = [
+            "-init_hw_device",
+            "vulkan=vk",
+            "-hwaccel:v:0",
+            "vulkan",
+            "-hwaccel_output_format:v:0",
+            "vulkan",
+            "-c:v",
+            "hevc",
+            "-i",
+            "/srv/media/clip.mkv",
+            "-vf",
+            "hwdownload,format=nv12",
+            "-c:v",
+            "libx264",
+            "out.m3u8",
+        ];
+        let cap_dec = required_capability(&vk_decode);
+        assert!(!cap_dec.requires_vulkan_compute);
+        assert!(cap_dec.requires_vulkan_video);
+        assert!(cap_dec.requires_vulkan_video_decode);
+        assert_eq!(cap_dec.required_hw_decoder(), Some("hevc"));
+
+        // 5. Explicit `av1_vulkan` input decoder -> Vulkan Video Decode with normalized "av1".
+        let vk_explicit_dec = [
+            "-c:v",
+            "av1_vulkan",
+            "-i",
+            "/srv/media/clip.mkv",
+            "-c:v",
+            "libx264",
+            "out.m3u8",
+        ];
+        let cap_exp_dec = required_capability(&vk_explicit_dec);
+        assert!(!cap_exp_dec.requires_vulkan_compute);
+        assert!(cap_exp_dec.requires_vulkan_video);
+        assert!(cap_exp_dec.requires_vulkan_video_decode);
+        assert_eq!(cap_exp_dec.required_hw_decoder(), Some("av1"));
+
+        // 6. Output `h264_vulkan` with CPU decode -> Vulkan Video encode, NOT decode, NOT compute.
+        let vk_encode = [
+            "-c:v",
+            "hevc",
+            "-i",
+            "/srv/media/clip.mkv",
+            "-c:v",
+            "h264_vulkan",
+            "out.m3u8",
+        ];
+        let cap_enc = required_capability(&vk_encode);
+        assert!(!cap_enc.requires_vulkan_compute);
+        assert!(cap_enc.requires_vulkan_video);
+        assert!(!cap_enc.requires_vulkan_video_decode);
+        assert_eq!(cap_enc.required_hw_decoder(), None);
+
+        // 7. Hybrid Vulkan Video decode + `scale_vulkan` compute filter -> BOTH compute & video.
+        let vk_hybrid = [
+            "-init_hw_device",
+            "vulkan=vk",
+            "-hwaccel",
+            "vulkan",
+            "-hwaccel_output_format",
+            "vulkan",
+            "-c:v",
+            "h264_vulkan",
+            "-i",
+            "/srv/media/clip.mkv",
+            "-vf",
+            "scale_vulkan=w=1280:h=720:format=nv12",
+            "-c:v",
+            "h264_vulkan",
+            "out.m3u8",
+        ];
+        let cap_hybrid = required_capability(&vk_hybrid);
+        assert!(cap_hybrid.requires_vulkan_compute);
+        assert!(cap_hybrid.requires_vulkan_video);
+        assert!(cap_hybrid.requires_vulkan_video_decode);
+        assert_eq!(cap_hybrid.required_hw_decoder(), Some("h264"));
+    }
+
+    #[test]
+    fn capability_vulkan_fields_serde_is_backwards_compatible() {
+        let legacy_json = r#"{
+            "hwaccel": "vulkan",
+            "required_hwaccels": ["vulkan"],
+            "encoder": "libx264",
+            "filters": ["libplacebo"],
+            "render_nodes": []
+        }"#;
+        let cap: Capability = serde_json::from_str(legacy_json).expect("deserialize legacy cap");
+        assert!(!cap.requires_vulkan_compute);
+        assert!(!cap.requires_vulkan_video);
+        assert!(!cap.requires_vulkan_video_decode);
+        assert!(!cap.requires_non_vulkan_hw_decode);
+    }
+
+    #[test]
+    fn plan_backend_adaptation_with_vulkan_enforces_compute_and_video_separation() {
+        let amd_nodes = vec![af_hardware::RenderNode {
+            path: std::path::PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some(PCI_VENDOR_AMD.to_string()),
+        }];
+        let encoders = vec_s(&[
+            "h264_vaapi",
+            "h264_vulkan",
+            "hevc_vulkan",
+            "ffv1_vulkan",
+            "libx264",
+        ]);
+        let vaapi_decoders = vec_s(&["h264", "hevc"]);
+
+        // 1. VA-API + Vulkan libplacebo succeeds when vulkan_compute=Some(true), vulkan_video=Some(false).
+        let vaapi_placebo = [
+            "-init_hw_device",
+            "vaapi=va:/dev/dri/renderD128",
+            "-init_hw_device",
+            "vulkan=vk@va",
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_output_format",
+            "vaapi",
+            "-c:v",
+            "hevc",
+            "-i",
+            "/srv/media/hdr.mkv",
+            "-vf",
+            "hwmap=derive_device=vulkan,libplacebo=w=1920:h=1080:tonemapping=bt.2390:format=nv12,hwmap=derive_device=vaapi:reverse=1",
+            "-c:v",
+            "h264_vaapi",
+            "out.m3u8",
+        ];
+        let cap_placebo = required_capability(&vaapi_placebo);
+        let compute_only = WorkerVulkanCapabilities {
+            vulkan_compute: Some(true),
+            vulkan_video: Some(false),
+            vulkan_video_decode_codecs: &[],
+            vulkan_video_encode_codecs: &[],
+        };
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &vaapi_placebo,
+                &cap_placebo,
+                BackendAdaptMode::Gpu,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &compute_only,
+            ),
+            Some(AdaptedTargetBackend::Native)
+        );
+
+        // When vulkan_compute=Some(false), VA-API + libplacebo is rejected even in All mode.
+        let compute_disabled = WorkerVulkanCapabilities {
+            vulkan_compute: Some(false),
+            vulkan_video: Some(false),
+            vulkan_video_decode_codecs: &[],
+            vulkan_video_encode_codecs: &[],
+        };
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &vaapi_placebo,
+                &cap_placebo,
+                BackendAdaptMode::All,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &compute_disabled,
+            ),
+            None
+        );
+
+        // 2. QSV + Vulkan libplacebo -> VA-API adaptation respects native_vulkan_compute_ok.
+        let qsv_placebo = [
+            "-init_hw_device",
+            "vaapi=va:/dev/dri/renderD128,driver=iHD",
+            "-init_hw_device",
+            "qsv=qs@va",
+            "-init_hw_device",
+            "vulkan=vk@va",
+            "-filter_hw_device",
+            "qs",
+            "-hwaccel",
+            "qsv",
+            "-hwaccel_output_format",
+            "qsv",
+            "-c:v",
+            "hevc_qsv",
+            "-i",
+            "/srv/media/hdr.mkv",
+            "-vf",
+            "hwmap=derive_device=vulkan,libplacebo=w=1920:h=1080:tonemapping=bt.2390:format=nv12,hwmap=derive_device=qsv:reverse=1",
+            "-c:v",
+            "h264_qsv",
+            "out.m3u8",
+        ];
+        let cap_qsv_placebo = required_capability(&qsv_placebo);
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &qsv_placebo,
+                &cap_qsv_placebo,
+                BackendAdaptMode::Gpu,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &compute_only,
+            ),
+            Some(AdaptedTargetBackend::Vaapi)
+        );
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &qsv_placebo,
+                &cap_qsv_placebo,
+                BackendAdaptMode::Gpu,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &compute_disabled,
+            ),
+            None
+        );
+
+        // QSV + Vulkan Video cannot adapt to VA-API.
+        let qsv_vk_video = [
+            "-init_hw_device",
+            "vaapi=va:/dev/dri/renderD128",
+            "-init_hw_device",
+            "qsv=qs@va",
+            "-hwaccel",
+            "qsv",
+            "-i",
+            "/srv/media/in.mkv",
+            "-c:v",
+            "h264_vulkan",
+            "out.m3u8",
+        ];
+        let cap_qsv_vk_vid = required_capability(&qsv_vk_video);
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &qsv_vk_video,
+                &cap_qsv_vk_vid,
+                BackendAdaptMode::Gpu,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &compute_only,
+            ),
+            None
+        );
+
+        // 3. Pure Vulkan Video decode + encode checks decode & encode codecs independently of VA-API decoders.
+        let vk_av1_to_h264 = [
+            "-init_hw_device",
+            "vulkan=vk",
+            "-hwaccel",
+            "vulkan",
+            "-hwaccel_output_format",
+            "vulkan",
+            "-c:v",
+            "av1",
+            "-i",
+            "/srv/media/av1.mkv",
+            "-c:v",
+            "h264_vulkan",
+            "out.m3u8",
+        ];
+        let cap_vk_av1 = required_capability(&vk_av1_to_h264);
+
+        // Disabled -> rejected in Gpu, adapted to Cpu in All.
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &vk_av1_to_h264,
+                &cap_vk_av1,
+                BackendAdaptMode::Gpu,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &compute_only,
+            ),
+            None
+        );
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &vk_av1_to_h264,
+                &cap_vk_av1,
+                BackendAdaptMode::All,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &compute_only,
+            ),
+            Some(AdaptedTargetBackend::Cpu)
+        );
+
+        // Enabled with Vulkan Video AV1 decode + H264 encode (even though VA-API lacks AV1!) -> Native!
+        let vk_dec_codecs = vec_s(&["av1", "h264"]);
+        let vk_enc_codecs = vec_s(&["h264"]);
+        let vk_video_caps = WorkerVulkanCapabilities {
+            vulkan_compute: Some(true),
+            vulkan_video: Some(true),
+            vulkan_video_decode_codecs: &vk_dec_codecs,
+            vulkan_video_encode_codecs: &vk_enc_codecs,
+        };
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &vk_av1_to_h264,
+                &cap_vk_av1,
+                BackendAdaptMode::Gpu,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &vk_video_caps,
+            ),
+            Some(AdaptedTargetBackend::Native)
+        );
+
+        // Enabled with empty decode codecs -> rejected for Vulkan Video decode even without explicit -c:v input.
+        let vk_dec_no_codec_flag = [
+            "-init_hw_device",
+            "vulkan=vk",
+            "-hwaccel",
+            "vulkan",
+            "-i",
+            "/srv/media/in.mkv",
+            "-c:v",
+            "h264_vulkan",
+            "out.m3u8",
+        ];
+        let cap_vk_dec_only_enc = required_capability(&vk_dec_no_codec_flag);
+        let encode_only_vk = WorkerVulkanCapabilities {
+            vulkan_compute: Some(true),
+            vulkan_video: Some(true),
+            vulkan_video_decode_codecs: &[],
+            vulkan_video_encode_codecs: &vk_enc_codecs,
+        };
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &vk_dec_no_codec_flag,
+                &cap_vk_dec_only_enc,
+                BackendAdaptMode::Gpu,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &encode_only_vk,
+            ),
+            None
+        );
+
+        // Enabled with h264 encode only -> rejects hevc_vulkan and ffv1_vulkan.
+        for bad_enc in ["hevc_vulkan", "ffv1_vulkan"] {
+            let enc_job = ["-i", "/srv/media/in.mkv", "-c:v", bad_enc, "out.m3u8"];
+            let cap_bad = required_capability(&enc_job);
+            assert_eq!(
+                plan_backend_adaptation_with_vulkan(
+                    &enc_job,
+                    &cap_bad,
+                    BackendAdaptMode::Gpu,
+                    &encoders,
+                    &vaapi_decoders,
+                    &amd_nodes,
+                    &vk_video_caps,
+                ),
+                None,
+                "unsupported Vulkan Video encoder '{bad_enc}' must be rejected"
+            );
+        }
+
+        // 4. CPU decode + Vulkan libplacebo succeeds even when VA-API decoders lack AV1 and vulkan_video=Some(false).
+        let cpu_av1_placebo = [
+            "-init_hw_device",
+            "vulkan=vk",
+            "-c:v",
+            "av1",
+            "-i",
+            "/srv/media/av1_hdr.mkv",
+            "-vf",
+            "format=p010,hwupload,libplacebo=tonemapping=bt.2390:format=nv12,hwdownload,format=nv12",
+            "-c:v",
+            "libx264",
+            "out.m3u8",
+        ];
+        let cap_cpu_av1 = required_capability(&cpu_av1_placebo);
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &cpu_av1_placebo,
+                &cap_cpu_av1,
+                BackendAdaptMode::Gpu,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &compute_only,
+            ),
+            Some(AdaptedTargetBackend::Native)
+        );
+
+        // 5. Unrecognized `*_vulkan` / unsupported input decoders under Vulkan Video decode
+        //    must fail closed even when `vulkan_video = Some(true)` with `["h264", "hevc", "av1"]`.
+        let all_vk_dec = vec_s(&["h264", "hevc", "av1"]);
+        let all_vk_video_caps = WorkerVulkanCapabilities {
+            vulkan_compute: Some(true),
+            vulkan_video: Some(true),
+            vulkan_video_decode_codecs: &all_vk_dec,
+            vulkan_video_encode_codecs: &vk_enc_codecs,
+        };
+        for bad_dec in ["ffv1_vulkan", "prores_vulkan", "mpeg4"] {
+            let dec_job = [
+                "-init_hw_device",
+                "vulkan=vk",
+                "-hwaccel",
+                "vulkan",
+                "-c:v",
+                bad_dec,
+                "-i",
+                "/srv/media/in.mkv",
+                "-c:v",
+                "h264_vulkan",
+                "out.m3u8",
+            ];
+            let cap_bad_dec = required_capability(&dec_job);
+            assert!(cap_bad_dec.requires_vulkan_video_decode);
+            assert_eq!(cap_bad_dec.decoder.as_deref(), Some(bad_dec));
+            assert_eq!(cap_bad_dec.required_hw_decoder(), None);
+            assert_eq!(
+                plan_backend_adaptation_with_vulkan(
+                    &dec_job,
+                    &cap_bad_dec,
+                    BackendAdaptMode::Gpu,
+                    &encoders,
+                    &vaapi_decoders,
+                    &amd_nodes,
+                    &all_vk_video_caps,
+                ),
+                None,
+                "unsupported Vulkan Video input decoder '{bad_dec}' must fail closed"
+            );
+        }
+        // Implicit `-hwaccel vulkan` without explicit `-c:v` input decoder still succeeds when
+        // Vulkan Video decode codecs are present.
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &vk_dec_no_codec_flag,
+                &cap_vk_dec_only_enc,
+                BackendAdaptMode::Gpu,
+                &encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &all_vk_video_caps,
+            ),
+            Some(AdaptedTargetBackend::Native)
+        );
+
+        // 6. Hybrid Vulkan Video decode + VA-API encode checks Vulkan Video decode codecs, NOT VA-API `hw_decoders`.
+        let hybrid_vk_dec_vaapi_enc = [
+            "-init_hw_device",
+            "vaapi=va:/dev/dri/renderD128",
+            "-init_hw_device",
+            "vulkan=vk@va",
+            "-hwaccel",
+            "vulkan",
+            "-c:v",
+            "av1",
+            "-i",
+            "in.mkv",
+            "-vf",
+            "hwmap=derive_device=vaapi:reverse=1",
+            "-c:v",
+            "h264_vaapi",
+            "out.m3u8",
+        ];
+        let cap_hybrid = required_capability(&hybrid_vk_dec_vaapi_enc);
+        assert!(cap_hybrid.requires_vulkan_video);
+        assert!(cap_hybrid.requires_vulkan_video_decode);
+        assert!(!cap_hybrid.requires_non_vulkan_hw_decode);
+        assert_eq!(cap_hybrid.required_hw_decoder(), Some("av1"));
+
+        let vaapi_only_encoders = vec_s(&["h264_vaapi"]);
+        let av1_vk_dec = vec_s(&["av1"]);
+        let hybrid_vk_caps = WorkerVulkanCapabilities {
+            vulkan_compute: Some(true),
+            vulkan_video: Some(true),
+            vulkan_video_decode_codecs: &av1_vk_dec,
+            vulkan_video_encode_codecs: &[],
+        };
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &hybrid_vk_dec_vaapi_enc,
+                &cap_hybrid,
+                BackendAdaptMode::Gpu,
+                &vaapi_only_encoders,
+                &vaapi_decoders, // ["h264", "hevc"] (no VA-API AV1)
+                &amd_nodes,
+                &hybrid_vk_caps,
+            ),
+            Some(AdaptedTargetBackend::Native)
+        );
+
+        // When Vulkan Video decode lacks AV1, the hybrid pipeline must be rejected even if VA-API has other codecs.
+        let h264_only_vk_dec = vec_s(&["h264", "hevc"]);
+        let no_av1_vk_caps = WorkerVulkanCapabilities {
+            vulkan_compute: Some(true),
+            vulkan_video: Some(true),
+            vulkan_video_decode_codecs: &h264_only_vk_dec,
+            vulkan_video_encode_codecs: &[],
+        };
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &hybrid_vk_dec_vaapi_enc,
+                &cap_hybrid,
+                BackendAdaptMode::Gpu,
+                &vaapi_only_encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &no_av1_vk_caps,
+            ),
+            None
+        );
+
+        // Explicit `-hwaccel vaapi` alongside `-hwaccel vulkan` sets `requires_non_vulkan_hw_decode`
+        // so VA-API `hw_decoders` is still enforced.
+        let dual_hwaccel = [
+            "-init_hw_device",
+            "vaapi=va:/dev/dri/renderD128",
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel",
+            "vulkan",
+            "-c:v",
+            "av1",
+            "-i",
+            "in.mkv",
+            "-c:v",
+            "h264_vaapi",
+            "out.m3u8",
+        ];
+        let cap_dual = required_capability(&dual_hwaccel);
+        assert!(cap_dual.requires_vulkan_video_decode);
+        assert!(cap_dual.requires_non_vulkan_hw_decode);
+        assert_eq!(
+            plan_backend_adaptation_with_vulkan(
+                &dual_hwaccel,
+                &cap_dual,
+                BackendAdaptMode::Gpu,
+                &vaapi_only_encoders,
+                &vaapi_decoders,
+                &amd_nodes,
+                &hybrid_vk_caps,
+            ),
+            None
         );
     }
 }

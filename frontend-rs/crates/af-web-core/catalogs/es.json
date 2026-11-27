@@ -754,6 +754,8 @@
     "transcodeAdaptBadgeGpu": "Adaptar: GPU",
     "transcodeAdaptBadgePreferQsv": "Adaptar: Preferir QSV",
     "transcodeAdaptBadgeAll": "Adaptar: GPU + CPU",
+    "transcodeVulkanComputeBadge": "Cómputo Vulkan (HDR)",
+    "transcodeVulkanVideoBadge": "Vídeo Vulkan",
     "transcodeTelemetryCpuLabel": "CPU",
     "transcodeTelemetryGpuLabel": "GPU"
   },

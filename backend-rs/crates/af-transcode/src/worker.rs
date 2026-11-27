@@ -27,12 +27,13 @@ use crate::capabilities::{
 use crate::config::{
     configured_real_ffmpeg_path, configured_worker_adapt_backend, configured_worker_ffmpeg_threads,
     configured_worker_max_jobs, configured_worker_optimize_vulkan_tonemap,
-    configured_worker_socket_mode, configured_worker_socket_path, resolve_worker_child_cwd,
-    validate_absolute_clean_path, validate_real_ffmpeg_path, validate_safe_dir,
-    validate_socket_mode, validate_start_request, BackendAdaptMode, ConfigError,
-    DEFAULT_FRAME_WRITE_TIMEOUT, DEFAULT_JELLYFIN_CACHE_DIR, DEFAULT_PROBE_TIMEOUT,
-    DEFAULT_WORKER_MAX_JOBS, DEFAULT_WORKER_SOCKET_MODE, DEFAULT_WORKER_START_FRAME_TIMEOUT,
-    MAX_UNIX_SOCKET_PATH_BYTES, MAX_WORKER_MAX_JOBS, WORKER_BASELINE_ENV_KEYS,
+    configured_worker_socket_mode, configured_worker_socket_path, configured_worker_vulkan_compute,
+    configured_worker_vulkan_video, resolve_worker_child_cwd, validate_absolute_clean_path,
+    validate_real_ffmpeg_path, validate_safe_dir, validate_socket_mode, validate_start_request,
+    BackendAdaptMode, ConfigError, DEFAULT_FRAME_WRITE_TIMEOUT, DEFAULT_JELLYFIN_CACHE_DIR,
+    DEFAULT_PROBE_TIMEOUT, DEFAULT_WORKER_MAX_JOBS, DEFAULT_WORKER_SOCKET_MODE,
+    DEFAULT_WORKER_START_FRAME_TIMEOUT, MAX_UNIX_SOCKET_PATH_BYTES, MAX_WORKER_MAX_JOBS,
+    WORKER_BASELINE_ENV_KEYS,
 };
 use crate::protocol::{
     bounded_frame_channel, encode_framed, read_frame, write_frame, ErrorKind, Frame, ProtocolError,
@@ -87,8 +88,12 @@ pub struct WorkerConfig {
     pub adapt_backend_mode: BackendAdaptMode,
     /// When `true`, pre-scales linear VA-API -> Vulkan `libplacebo` tonemapping graphs on VA-API.
     pub optimize_vulkan_tonemap: bool,
+    /// When `true`, worker permits Vulkan Compute filters (`libplacebo`, `*_vulkan` filters).
+    pub vulkan_compute: bool,
+    /// When `true`, worker permits Vulkan Video hardware decode/encode (`-hwaccel vulkan`, `*_vulkan` codecs).
+    pub vulkan_video: bool,
     /// Optional explicit worker capabilities override (primarily for tests/fixtures).
-    /// When `None` and `adapt_backend_mode != Off`, the worker probes capabilities once at startup.
+    /// When `None`, the worker probes capabilities once at startup.
     pub capabilities_override: Option<TranscodeCapabilities>,
 }
 
@@ -108,6 +113,8 @@ impl WorkerConfig {
             ffmpeg_max_threads: configured_worker_ffmpeg_threads(),
             adapt_backend_mode: configured_worker_adapt_backend(),
             optimize_vulkan_tonemap: configured_worker_optimize_vulkan_tonemap(),
+            vulkan_compute: configured_worker_vulkan_compute(),
+            vulkan_video: configured_worker_vulkan_video(),
             capabilities_override: None,
         })
     }
@@ -128,6 +135,8 @@ impl WorkerConfig {
             ffmpeg_max_threads: None,
             adapt_backend_mode: BackendAdaptMode::Off,
             optimize_vulkan_tonemap: false,
+            vulkan_compute: true,
+            vulkan_video: false,
             capabilities_override: None,
         }
     }
@@ -490,12 +499,10 @@ pub async fn serve_worker_listener(
         }
     }
 
-    // Probe or load worker capabilities once at startup when backend adaptation is enabled so
-    // worker-side `plan_backend_adaptation` decisions match the controller identically.
+    // Probe or load worker capabilities once at startup regardless of `adapt_backend_mode` so
+    // worker-side Vulkan checks and `plan_backend_adaptation` decisions match the controller.
     let worker_capabilities: Arc<Option<TranscodeCapabilities>> = Arc::new(
-        if config.adapt_backend_mode == BackendAdaptMode::Off {
-            config.capabilities_override.clone()
-        } else if let Some(override_caps) = config.capabilities_override.clone() {
+        if let Some(override_caps) = config.capabilities_override.clone() {
             Some(override_caps)
         } else {
             let probe_cfg = CapabilitiesConfig {
@@ -504,15 +511,18 @@ pub async fn serve_worker_listener(
                 vainfo_path: CapabilitiesConfig::from_env().vainfo_path,
                 render_nodes_override: config.render_nodes_override.clone(),
                 probe_timeout: DEFAULT_PROBE_TIMEOUT,
+                vulkan_compute_override: Some(config.vulkan_compute),
+                vulkan_video_override: Some(config.vulkan_video),
             };
             match capabilities::probe_capabilities(&probe_cfg).await {
-                Ok(caps) if !caps.encoders.is_empty() => Some(caps),
-                Ok(_) => {
-                    tracing::debug!(
-                        ffmpeg = %validated_real_ffmpeg.display(),
-                        "worker capability probe returned no video encoders; falling back to node-derived capability synthesis"
-                    );
-                    None
+                Ok(caps) => {
+                    if caps.encoders.is_empty() {
+                        tracing::debug!(
+                            ffmpeg = %validated_real_ffmpeg.display(),
+                            "worker capability probe returned no video encoders; retaining probed Vulkan metadata with fallback encoder synthesis"
+                        );
+                    }
+                    Some(caps)
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -677,7 +687,11 @@ fn resolve_worker_render_nodes(config: &WorkerConfig) -> Vec<RenderNode> {
     af_hardware::detect_render_nodes()
 }
 
-fn synthesize_fallback_encoders(nodes: &[RenderNode], capability: &Capability) -> Vec<String> {
+fn synthesize_fallback_encoders(
+    nodes: &[RenderNode],
+    capability: &Capability,
+    vulkan_video_enabled: bool,
+) -> Vec<String> {
     let mut encoders = vec!["libx264".to_string(), "libx265".to_string()];
 
     let has_vaapi = nodes.iter().any(|n| {
@@ -735,8 +749,8 @@ fn synthesize_fallback_encoders(nodes: &[RenderNode], capability: &Capability) -
             encoders.push(enc.to_string());
         }
     }
-    if !nodes.is_empty() {
-        for enc in ["h264_vulkan", "hevc_vulkan"] {
+    if vulkan_video_enabled && !nodes.is_empty() {
+        for enc in ["h264_vulkan", "hevc_vulkan", "av1_vulkan"] {
             encoders.push(enc.to_string());
         }
     }
@@ -751,29 +765,126 @@ fn synthesize_fallback_encoders(nodes: &[RenderNode], capability: &Capability) -
     encoders
 }
 
+fn effective_worker_vulkan_capabilities<'a>(
+    config: &WorkerConfig,
+    worker_capabilities: Option<&'a TranscodeCapabilities>,
+) -> argv::WorkerVulkanCapabilities<'a> {
+    let vulkan_compute = if !config.vulkan_compute {
+        Some(false)
+    } else {
+        worker_capabilities.and_then(|c| c.vulkan_compute)
+    };
+
+    let (vulkan_video, decode_codecs, encode_codecs) = if !config.vulkan_video {
+        (Some(false), &[][..], &[][..])
+    } else if let Some(caps) = worker_capabilities {
+        (
+            caps.vulkan_video,
+            caps.vulkan_video_decode_codecs.as_slice(),
+            caps.vulkan_video_encode_codecs.as_slice(),
+        )
+    } else {
+        (None, &[][..], &[][..])
+    };
+
+    argv::WorkerVulkanCapabilities {
+        vulkan_compute,
+        vulkan_video,
+        vulkan_video_decode_codecs: decode_codecs,
+        vulkan_video_encode_codecs: encode_codecs,
+    }
+}
+
+fn validate_worker_vulkan_requirements(
+    capability: &Capability,
+    vulkan: &argv::WorkerVulkanCapabilities<'_>,
+) -> Result<(), String> {
+    if capability.requires_vulkan_compute && vulkan.vulkan_compute == Some(false) {
+        return Err("Vulkan Compute is disabled or unavailable on this worker".to_string());
+    }
+    if capability.requires_vulkan_video {
+        if vulkan.vulkan_video == Some(false) {
+            return Err("Vulkan Video is disabled or unavailable on this worker".to_string());
+        }
+        if capability.requires_vulkan_video_decode
+            && (vulkan.vulkan_video == Some(true) || !vulkan.vulkan_video_decode_codecs.is_empty())
+        {
+            if vulkan.vulkan_video_decode_codecs.is_empty() {
+                return Err("worker does not support Vulkan Video hardware decode".to_string());
+            }
+            if let Some(req_dec) = capability.required_hw_decoder() {
+                if !vulkan
+                    .vulkan_video_decode_codecs
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(req_dec))
+                {
+                    return Err(format!(
+                        "worker does not support Vulkan Video decode for codec '{req_dec}'"
+                    ));
+                }
+            } else if let Some(raw_dec) = capability.decoder.as_deref() {
+                return Err(format!(
+                    "worker does not support Vulkan Video decode for decoder '{raw_dec}'"
+                ));
+            }
+        }
+        if (vulkan.vulkan_video == Some(true) || !vulkan.vulkan_video_encode_codecs.is_empty())
+            && capability
+                .required_encoder()
+                .is_some_and(|e| e.to_ascii_lowercase().ends_with("_vulkan"))
+        {
+            if let Some(enc) = capability.required_encoder() {
+                let lower = enc.to_ascii_lowercase();
+                let mapped = match lower.strip_suffix("_vulkan") {
+                    Some("h264") => Some("h264"),
+                    Some("hevc") => Some("hevc"),
+                    Some("av1") => Some("av1"),
+                    _ => None,
+                };
+                let supported = mapped.is_some_and(|codec| {
+                    vulkan
+                        .vulkan_video_encode_codecs
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(codec))
+                });
+                if !supported {
+                    return Err(format!(
+                        "worker does not support Vulkan Video encoder '{enc}'"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn adapt_worker_args(
     args: &[String],
     capability: &Capability,
-    mode: BackendAdaptMode,
+    config: &WorkerConfig,
     worker_capabilities: Option<&TranscodeCapabilities>,
     detected_nodes: &[RenderNode],
 ) -> Result<Vec<String>, String> {
+    let mode = config.adapt_backend_mode;
     let fallback_encoders;
     let (worker_encoders, worker_hw_decoders): (&[String], &[String]) =
-        if let Some(caps) = worker_capabilities {
+        if let Some(caps) = worker_capabilities.filter(|c| !c.encoders.is_empty()) {
             (&caps.encoders, &caps.hw_decoders)
         } else {
-            fallback_encoders = synthesize_fallback_encoders(detected_nodes, capability);
+            fallback_encoders =
+                synthesize_fallback_encoders(detected_nodes, capability, config.vulkan_video);
             (&fallback_encoders, &[])
         };
+    let vulkan_caps = effective_worker_vulkan_capabilities(config, worker_capabilities);
 
-    match argv::plan_backend_adaptation(
+    match argv::plan_backend_adaptation_with_vulkan(
         args,
         capability,
         mode,
         worker_encoders,
         worker_hw_decoders,
         detected_nodes,
+        &vulkan_caps,
     ) {
         Some(AdaptedTargetBackend::Native) => {
             if !capability.render_nodes.is_empty() {
@@ -995,7 +1106,19 @@ async fn handle_connection(
     // Infer required hardware capability, apply optional backend adaptation, and rewrite DRM render node.
     let capability = argv::required_capability(&start_req.args);
     let rewritten_args = if config.adapt_backend_mode == BackendAdaptMode::Off {
-        if !capability.render_nodes.is_empty() {
+        let vulkan_caps =
+            effective_worker_vulkan_capabilities(&config, worker_capabilities.as_ref().as_ref());
+        if let Err(reason) = validate_worker_vulkan_requirements(&capability, &vulkan_caps) {
+            send_error_and_close(
+                &mut writer,
+                ErrorKind::DeviceUnavailable,
+                reason,
+                config.frame_write_timeout,
+            )
+            .await;
+            return;
+        }
+        if capability.requires_hardware() {
             let detected_nodes = resolve_worker_render_nodes(&config);
             let Some(selected_node) =
                 capabilities::select_render_node(&capability, &detected_nodes)
@@ -1012,17 +1135,21 @@ async fn handle_connection(
                 .await;
                 return;
             };
-            let Some(selected_str) = selected_node.to_str() else {
-                send_error_and_close(
-                    &mut writer,
-                    ErrorKind::DeviceUnavailable,
-                    "selected render node path is not valid UTF-8".to_string(),
-                    config.frame_write_timeout,
-                )
-                .await;
-                return;
-            };
-            argv::rewrite_any_render_node(&start_req.args, selected_str)
+            if !capability.render_nodes.is_empty() {
+                let Some(selected_str) = selected_node.to_str() else {
+                    send_error_and_close(
+                        &mut writer,
+                        ErrorKind::DeviceUnavailable,
+                        "selected render node path is not valid UTF-8".to_string(),
+                        config.frame_write_timeout,
+                    )
+                    .await;
+                    return;
+                };
+                argv::rewrite_any_render_node(&start_req.args, selected_str)
+            } else {
+                start_req.args.clone()
+            }
         } else {
             start_req.args.clone()
         }
@@ -1031,7 +1158,7 @@ async fn handle_connection(
         match adapt_worker_args(
             &start_req.args,
             &capability,
-            config.adapt_backend_mode,
+            &config,
             worker_capabilities.as_ref().as_ref(),
             &detected_nodes,
         ) {
@@ -1050,7 +1177,7 @@ async fn handle_connection(
     };
 
     // Optional Vulkan libplacebo scale-before-tonemap optimization.
-    let rewritten_args = if config.optimize_vulkan_tonemap {
+    let rewritten_args = if config.optimize_vulkan_tonemap && config.vulkan_compute {
         argv::optimize_vulkan_tonemap_args(&rewritten_args)
     } else {
         rewritten_args
@@ -1454,5 +1581,149 @@ mod tests {
         assert!(ensure_safe_mesa_shader_cache_dir(&long_path).is_err());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_worker_vulkan_requirements_fails_closed_on_unrecognized_vulkan_decoders() {
+        let decode_codecs = vec!["h264".to_string(), "hevc".to_string(), "av1".to_string()];
+        let encode_codecs = vec!["h264".to_string()];
+        let vk_caps = argv::WorkerVulkanCapabilities {
+            vulkan_compute: Some(true),
+            vulkan_video: Some(true),
+            vulkan_video_decode_codecs: &decode_codecs,
+            vulkan_video_encode_codecs: &encode_codecs,
+        };
+
+        for bad_dec in ["ffv1_vulkan", "prores_vulkan", "mpeg4"] {
+            let cap = argv::required_capability(&[
+                "-init_hw_device",
+                "vulkan=vk",
+                "-hwaccel",
+                "vulkan",
+                "-c:v",
+                bad_dec,
+                "-i",
+                "/srv/media/in.mkv",
+                "-c:v",
+                "h264_vulkan",
+                "out.m3u8",
+            ]);
+            assert!(
+                validate_worker_vulkan_requirements(&cap, &vk_caps).is_err(),
+                "unrecognized Vulkan Video decoder '{bad_dec}' must fail closed"
+            );
+        }
+
+        let valid_cap = argv::required_capability(&[
+            "-init_hw_device",
+            "vulkan=vk",
+            "-hwaccel",
+            "vulkan",
+            "-c:v",
+            "av1",
+            "-i",
+            "/srv/media/in.mkv",
+            "-c:v",
+            "h264_vulkan",
+            "out.m3u8",
+        ]);
+        assert!(validate_worker_vulkan_requirements(&valid_cap, &vk_caps).is_ok());
+    }
+
+    #[test]
+    fn synthesize_fallback_encoders_includes_av1_vulkan_and_adapt_honors_probed_vulkan_with_empty_encoders(
+    ) {
+        let amd_nodes = vec![RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some(PCI_VENDOR_AMD.to_string()),
+        }];
+        let cap_av1 = argv::required_capability(&[
+            "-init_hw_device",
+            "vulkan=vk",
+            "-i",
+            "/srv/media/in.mkv",
+            "-c:v",
+            "av1_vulkan",
+            "out.m3u8",
+        ]);
+
+        let encs_enabled = synthesize_fallback_encoders(&amd_nodes, &cap_av1, true);
+        assert!(encs_enabled.iter().any(|e| e == "h264_vulkan"));
+        assert!(encs_enabled.iter().any(|e| e == "hevc_vulkan"));
+        assert!(encs_enabled.iter().any(|e| e == "av1_vulkan"));
+
+        let encs_disabled = synthesize_fallback_encoders(&amd_nodes, &cap_av1, false);
+        assert!(!encs_disabled.iter().any(|e| e.ends_with("_vulkan")));
+
+        // When probed `TranscodeCapabilities` has empty `encoders` (minimal mock ffmpeg) but valid
+        // probed Vulkan fields, `adapt_worker_args` falls back to synthesized encoders while still
+        // enforcing probed Vulkan Video codecs and Vulkan Compute availability.
+        let mut cfg = WorkerConfig::for_paths(
+            PathBuf::from("/tmp/unused.sock"),
+            PathBuf::from("/usr/bin/true"),
+        );
+        cfg.adapt_backend_mode = BackendAdaptMode::Gpu;
+        cfg.vulkan_compute = true;
+        cfg.vulkan_video = true;
+
+        let probed_empty_encoders = TranscodeCapabilities {
+            encoders: Vec::new(),
+            vulkan_compute: Some(false),
+            vulkan_video: Some(true),
+            vulkan_video_decode_codecs: vec!["h264".into()],
+            vulkan_video_encode_codecs: vec!["av1".into()],
+            ..Default::default()
+        };
+
+        let av1_args: Vec<String> = [
+            "-init_hw_device",
+            "vulkan=vk",
+            "-i",
+            "/srv/media/in.mkv",
+            "-c:v",
+            "av1_vulkan",
+            "out.m3u8",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(
+            adapt_worker_args(
+                &av1_args,
+                &cap_av1,
+                &cfg,
+                Some(&probed_empty_encoders),
+                &amd_nodes,
+            )
+            .is_ok(),
+            "av1_vulkan should be synthesized in fallback encoders and accepted when probed encode codecs contain av1"
+        );
+
+        let placebo_args: Vec<String> = [
+            "-init_hw_device",
+            "vulkan=vk",
+            "-i",
+            "/srv/media/in.mkv",
+            "-vf",
+            "format=p010,hwupload,libplacebo=tonemapping=bt.2390:format=nv12,hwdownload,format=nv12",
+            "-c:v",
+            "libx264",
+            "out.m3u8",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let cap_placebo = argv::required_capability(&placebo_args);
+        assert!(
+            adapt_worker_args(
+                &placebo_args,
+                &cap_placebo,
+                &cfg,
+                Some(&probed_empty_encoders),
+                &amd_nodes,
+            )
+            .is_err(),
+            "probed vulkan_compute=Some(false) must still be enforced when caps.encoders is empty"
+        );
     }
 }
