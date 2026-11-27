@@ -281,6 +281,39 @@ class ReadinessProbeContractTests(unittest.TestCase):
             s_503.shutdown()
             s_503.server_close()
 
+    def test_autobrr_uses_readiness_endpoint_and_traversable_receipt_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self._run_wait(
+                Path(tmp),
+                "printf 'autobrr=%s\\ngitea=%s\\n' "
+                "\"$(resolve_app_readiness_path autobrr)\" "
+                "\"$(resolve_app_readiness_path gitea)\"",
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(
+                res.stdout.splitlines(),
+                ["autobrr=/api/healthz/readiness", "gitea=/api/healthz"],
+            )
+
+        with InstallerFixture("autobrr") as fixture:
+            res = fixture.run("install", AF_EMIT_READINESS_RECORD="1")
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertEqual(
+                _parse_probe_records(res.stderr),
+                [
+                    {
+                        "unit": "autobrr.service",
+                        "url": "http://127.0.0.1:7474/api/healthz/readiness",
+                        "accept_auth": False,
+                        "accept_409": False,
+                    }
+                ],
+            )
+            state_dir = fixture.root / "var/lib/autobrr"
+            self.assertEqual(state_dir.stat().st_mode & 0o777, 0o755)
+            self.assertEqual((state_dir / "config.toml").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((state_dir / "autobrr.db").stat().st_mode & 0o777, 0o600)
+
 
 @unittest.skipUnless(
     os.name == "posix" and shutil.which("bash") and shutil.which("curl"),

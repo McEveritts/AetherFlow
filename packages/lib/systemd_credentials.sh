@@ -217,7 +217,8 @@ resolve_app_readiness_path() {
         return 0
     fi
     case "$app_name" in
-        gitea*|autobrr*) printf '%s\n' /api/healthz ;;
+        gitea*) printf '%s\n' /api/healthz ;;
+        autobrr*) printf '%s\n' /api/healthz/readiness ;;
         nzbget*) printf '%s\n' /jsonrpc/version ;;
         transmission*) printf '%s\n' /transmission/rpc ;;
         filebrowser*) printf '%s\n' /health ;;

@@ -96,7 +96,9 @@ fi
 set_config_value "/var/lib/autobrr/config.toml" ini "port" "$APP_PORT" ""
 
 chown -hRP autobrr:autobrr /var/lib/autobrr
+chmod 755 /var/lib/autobrr
 chmod 600 /var/lib/autobrr/config.toml
+[[ -f /var/lib/autobrr/autobrr.db ]] && chmod 600 /var/lib/autobrr/autobrr.db
 
 report_progress 85 "Configuring and starting autobrr.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/autobrr.service
@@ -122,7 +124,7 @@ af_logged systemctl daemon-reload
 af_logged systemctl enable --now autobrr
 af_logged systemctl restart autobrr
 systemctl is-active --quiet autobrr
-finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/api/healthz"
+finish_app_archive_update "$PACKAGE_NAME" "$APP_PORT" "/api/healthz/readiness"
 
 commit_app_versions
 write_lock "${PACKAGE_NAME}"
