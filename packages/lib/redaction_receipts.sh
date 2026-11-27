@@ -1669,6 +1669,7 @@ sync_node_global_bins() {
     local npm_prefix=""
     if command_exists npm; then
         npm_prefix="$(npm config get prefix 2>/dev/null || true)"
+        npm_prefix="${npm_prefix%/}"
     fi
     local bin_dir
     for bin_dir in "/usr/local/nodejs/bin" "${npm_prefix:+${npm_prefix}/bin}" "/usr/local/bin"; do
@@ -1677,11 +1678,14 @@ sync_node_global_bins() {
             *":${bin_dir}:"*) ;;
             *) export PATH="${bin_dir}:$PATH" ;;
         esac
+        case "$bin_dir" in
+            ""|/bin|/sbin|/usr/bin|/usr/sbin|/usr/local/bin) continue ;;
+        esac
         local bin_path bin_name
         for bin_path in "$bin_dir"/*; do
             [[ -e "$bin_path" && -x "$bin_path" && ! -d "$bin_path" ]] || continue
             bin_name="$(basename "$bin_path")"
-            if [[ "$bin_dir" != "/usr/local/bin" && ! -e "/usr/local/bin/${bin_name}" ]]; then
+            if [[ ! -e "/usr/local/bin/${bin_name}" && ! -L "/usr/local/bin/${bin_name}" ]]; then
                 ln -sf "$bin_path" "/usr/local/bin/${bin_name}" 2>/dev/null || true
             fi
         done

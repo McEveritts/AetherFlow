@@ -78,16 +78,65 @@ BUILD_DIR=""
 chmod 0755 /opt/Kavita/Kavita
 queue_app_version /opt/Kavita/.af-version "${KAV_VERSION#v}"
 
-for kav_cfg in /opt/Kavita/appsettings.json /opt/Kavita/config/appsettings.json; do
-    if [[ -f "$kav_cfg" ]]; then
-        sed -i 's/"Port": [0-9]*/"Port": '"${APP_PORT}"'/' "$kav_cfg" 2>/dev/null || true
+KAVITA_BIND_HOST="$(retained_bind_address /etc/systemd/system/kavita.service 'ASPNETCORE_URLS=http://(\[[^\]]+\]|[^:\s"\x27/]+)')"
+mkdir -p /opt/Kavita/config
+validate_config_paths /opt/Kavita/config/appsettings.json
+if [[ -e /opt/Kavita/appsettings.json || -L /opt/Kavita/appsettings.json ]]; then
+    validate_config_paths /opt/Kavita/appsettings.json
+fi
+safe_config_python /opt/Kavita/config/appsettings.json /opt/Kavita/config/appsettings-init.json /opt/Kavita/appsettings.json "$APP_PORT" "$KAVITA_BIND_HOST" <<'PYEOF'
+import base64, json, os, secrets, sys
+
+target_path, init_path, legacy_path, port_str, bind_host = sys.argv[1:6]
+port = int(port_str)
+ip_value = "" if bind_host in ("0.0.0.0", "::", "[::]") else bind_host.strip("[]")
+
+def load_json_dict(path):
+    if not os.path.isfile(path) or os.path.islink(path):
+        return None
+    raw = safe_read_text(path)
+    if not raw.strip():
+        return None
+    loaded = json.loads(raw)
+    return loaded if isinstance(loaded, dict) else None
+
+data = None
+for candidate in (target_path, init_path, legacy_path):
+    try:
+        data = load_json_dict(candidate)
+        if data is not None:
+            break
+    except Exception:
+        data = None
+if data is None:
+    data = {}
+
+data["Port"] = port
+data["IpAddresses"] = ip_value
+token_key = str(data.get("TokenKey", "") or "")
+if len(token_key) < 64 or "super secret unguessable key" in token_key.lower():
+    data["TokenKey"] = base64.b64encode(secrets.token_bytes(64)).decode("ascii")
+
+safe_write_text(target_path, json.dumps(data, indent=2) + "\n", 0o600)
+
+if os.path.isfile(legacy_path) and not os.path.islink(legacy_path):
+    legacy = load_json_dict(legacy_path)
+    if legacy is not None:
+        legacy["Port"] = port
+        safe_write_text(legacy_path, json.dumps(legacy, indent=2) + "\n", 0o600)
+PYEOF
+
+chown -hRP kavita:kavita /opt/Kavita /var/lib/kavita
+chmod 755 /opt/Kavita /var/lib/kavita
+chmod 700 /opt/Kavita/config
+chmod 600 /opt/Kavita/config/appsettings.json
+for kav_dll in /opt/Kavita/Kavita.dll /opt/Kavita/Kavita.Common.dll; do
+    if [[ -f "$kav_dll" && ! -L "$kav_dll" ]]; then
+        chmod 644 "$kav_dll"
     fi
 done
 
-chown -hRP kavita:kavita /opt/Kavita /var/lib/kavita
-
 report_progress 85 "Configuring and starting kavita.service on port ${APP_PORT}..."
-KAVITA_BIND_HOST="$(retained_bind_address /etc/systemd/system/kavita.service 'ASPNETCORE_URLS=http://(\[[^\]]+\]|[^:\s"\x27/]+)')"
 sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_BIND_HOST@/${KAVITA_BIND_HOST}/g" <<'EOF' > /etc/systemd/system/kavita.service
 [Unit]
 Description=Kavita Dedicated Comic and Manga Server

@@ -38,40 +38,85 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing SMART drive telemetry utilities and libraries..."
 
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
-DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl smartmontools udev ca-certificates
+DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq curl tar openssl smartmontools udev ca-certificates
 
 if ! id -u scrutiny >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/scrutiny --shell /usr/sbin/nologin scrutiny
 fi
 
-mkdir -p /opt/scrutiny/bin /var/lib/scrutiny /etc/scrutiny
+mkdir -p /opt/scrutiny/bin /var/lib/scrutiny/influxdb /etc/scrutiny
 
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
-    amd64) SCRUT_ARCH="amd64" ;;
-    arm64) SCRUT_ARCH="arm64" ;;
+    amd64)
+        SCRUT_ARCH="amd64"
+        INFLUXDB_DEFAULT_SHA256="825641e678b4a0f6e2094293f326b472269f30c3d02a989bee8c37bfa706f8d7"
+        ;;
+    arm64)
+        SCRUT_ARCH="arm64"
+        INFLUXDB_DEFAULT_SHA256="6e7f96bed9d35db23a992f23ffcdcdb538c7ea4c22644d5f97886ff761ab60d3"
+        ;;
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
 report_progress 35 "Resolving latest Scrutiny binaries from GitHub..."
 SCRUT_VER="$(github_latest_tag "AnalogJ/scrutiny" "0.8.1")"
+INFLUXDB_VER="2.7.12"
+INFLUXDB_SHA256="${AF_SCRUTINY_INFLUXDB_SHA256:-$INFLUXDB_DEFAULT_SHA256}"
 
 WEB_URL="https://github.com/AnalogJ/scrutiny/releases/download/v${SCRUT_VER}/scrutiny-web-linux-${SCRUT_ARCH}"
 COLLECTOR_URL="https://github.com/AnalogJ/scrutiny/releases/download/v${SCRUT_VER}/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
+FRONTEND_URL="https://github.com/AnalogJ/scrutiny/releases/download/v${SCRUT_VER}/scrutiny-web-frontend.tar.gz"
+INFLUXDB_URL="https://dl.influxdata.com/influxdb/releases/v${INFLUXDB_VER}/influxdb2-${INFLUXDB_VER}_linux_${SCRUT_ARCH}.tar.gz"
 
-report_progress 60 "Downloading Scrutiny Web UI and Collector binaries..."
+report_progress 55 "Downloading Scrutiny Web UI, frontend, collector, and standalone InfluxDB v2..."
+mkdir -p "${AF_JOB_SCRATCH_ROOT:-/var/tmp}"
 BUILD_DIR="$(mktemp -d /opt/.scrutiny-build.XXXXXX)"
-trap 'rm -rf -- "$BUILD_DIR"' EXIT
-mkdir "$BUILD_DIR/bin"
+TMP_STAGE="$(mktemp -d "${AF_JOB_SCRATCH_ROOT:-/var/tmp}/scrutiny-stage-XXXXXX")"
+trap 'rm -rf -- "${BUILD_DIR:-}" "${TMP_STAGE:-}"' EXIT
+mkdir -p "$BUILD_DIR/bin" "$BUILD_DIR/web"
 af_logged download_file "$WEB_URL" "$BUILD_DIR/bin/scrutiny-web-linux-${SCRUT_ARCH}"
 af_logged download_file "$COLLECTOR_URL" "$BUILD_DIR/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
+af_logged download_file "$FRONTEND_URL" "$TMP_STAGE/scrutiny-web-frontend.tar.gz"
+af_logged download_file "$INFLUXDB_URL" "$TMP_STAGE/influxdb2.tar.gz" scrutiny "$INFLUXDB_SHA256"
+af_validate_tar_archive "$TMP_STAGE/scrutiny-web-frontend.tar.gz"
+af_logged tar --no-same-owner --no-same-permissions -xzf "$TMP_STAGE/scrutiny-web-frontend.tar.gz" -C "$BUILD_DIR/web" --strip-components=1
+af_validate_tar_archive "$TMP_STAGE/influxdb2.tar.gz"
+mkdir -p "$TMP_STAGE/influxdb2"
+af_logged tar --no-same-owner --no-same-permissions -xzf "$TMP_STAGE/influxdb2.tar.gz" -C "$TMP_STAGE/influxdb2"
+INFLUXD_BIN="$(find "$TMP_STAGE/influxdb2" -type f -name influxd | head -n1)"
+if [[ -z "$INFLUXD_BIN" || ! -s "$INFLUXD_BIN" ]]; then
+    print_error "InfluxDB v2 archive did not contain an influxd binary"
+    exit 1
+fi
+cp -f -- "$INFLUXD_BIN" "$BUILD_DIR/bin/influxd"
+rm -rf -- "$TMP_STAGE"
+TMP_STAGE=""
 test -s "$BUILD_DIR/bin/scrutiny-web-linux-${SCRUT_ARCH}"
 test -s "$BUILD_DIR/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
+test -s "$BUILD_DIR/bin/influxd"
 chmod 0755 "$BUILD_DIR/bin/"*
+SCRUTINY_INFLUX_EXISTED=false
+if [[ -e /etc/systemd/system/scrutiny-influxdb.service ]]; then
+    SCRUTINY_INFLUX_EXISTED=true
+fi
+rollback_scrutiny_companions() {
+    if [[ "$SCRUTINY_INFLUX_EXISTED" != true ]]; then
+        if [[ -e /etc/systemd/system/scrutiny-influxdb.service || -L /etc/systemd/system/multi-user.target.wants/scrutiny-influxdb.service ]]; then
+            stop_systemd_unit scrutiny-influxdb.service || true
+            af_logged systemctl disable -- scrutiny-influxdb.service || true
+            rm -f -- /etc/systemd/system/scrutiny-influxdb.service || true
+            af_logged systemctl daemon-reload || true
+        fi
+    fi
+}
 stage_app_archive "$BUILD_DIR" /opt/scrutiny "bin/scrutiny-web-linux-${SCRUT_ARCH}" /etc/scrutiny "$PACKAGE_NAME" "." /var/lib/scrutiny
+AF_ARCHIVE_ROLLBACK_HOOK=rollback_scrutiny_companions
+BUILD_DIR=""
 
 chmod 0755 "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" \
-         "/opt/scrutiny/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
+         "/opt/scrutiny/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}" \
+         "/opt/scrutiny/bin/influxd"
 
 ln -sfn "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" /opt/scrutiny/bin/scrutiny-web
 ln -sfn "/opt/scrutiny/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}" /opt/scrutiny/bin/scrutiny-collector
@@ -85,15 +130,30 @@ queue_app_version /opt/scrutiny/.af-version "${SCRUT_VER#v}"
 
 validate_config_paths /etc/scrutiny/scrutiny.yaml
 if [[ ! -s /etc/scrutiny/scrutiny.yaml ]]; then
-sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' | write_config_file /etc/scrutiny/scrutiny.yaml
+    INFLUX_INIT_PASS="$(openssl rand -hex 24)"
+    INFLUX_API_TOKEN="$(openssl rand -hex 32)"
+    cat <<EOF | write_config_file /etc/scrutiny/scrutiny.yaml 0640
 version: 1
 web:
   listen:
-    port: @AF_APP_PORT@
+    port: ${APP_PORT}
     host: "127.0.0.1"
+  src:
+    frontend:
+      path: /opt/scrutiny/web
   database:
     location: /var/lib/scrutiny/scrutiny.db
+  influxdb:
+    scheme: http
+    host: "127.0.0.1"
+    port: 8086
+    org: scrutiny
+    bucket: metrics
+    init_username: admin
+    init_password: "${INFLUX_INIT_PASS}"
+    token: "${INFLUX_API_TOKEN}"
 EOF
+    unset INFLUX_INIT_PASS INFLUX_API_TOKEN
 fi
 safe_config_python /etc/scrutiny/scrutiny.yaml "$APP_PORT" <<'PYEOF'
 import pathlib, re, sys
@@ -135,14 +195,43 @@ with ManagedConfig(path) as config:
     config.write_text(''.join(lines))
 PYEOF
 
+mkdir -p /var/lib/scrutiny/influxdb
 chown -hRP scrutiny:scrutiny /opt/scrutiny /var/lib/scrutiny /etc/scrutiny
+chmod 755 /opt/scrutiny /opt/scrutiny/bin /var/lib/scrutiny
+chmod 700 /var/lib/scrutiny/influxdb
+chmod 750 /etc/scrutiny
+chmod 640 /etc/scrutiny/scrutiny.yaml
+if [[ -d /opt/scrutiny/web ]]; then
+    chmod -R a+rX /opt/scrutiny/web
+fi
 
-report_progress 80 "Configuring scrutiny.service, collector service, and timer..."
-cat <<EOF > /etc/systemd/system/scrutiny.service
+report_progress 80 "Configuring scrutiny-influxdb.service, scrutiny.service, collector service, and timer..."
+cat <<'EOF' > /etc/systemd/system/scrutiny-influxdb.service
 [Unit]
-Description=Scrutiny SMART Hard Drive Telemetry Dashboard
+Description=Scrutiny Embedded InfluxDB v2 Time-Series Store
 After=network-online.target
 Wants=network-online.target
+
+[Service]
+User=scrutiny
+Group=scrutiny
+Type=simple
+WorkingDirectory=/var/lib/scrutiny/influxdb
+ExecStart=/opt/scrutiny/bin/influxd --http-bind-address=127.0.0.1:8086 --bolt-path=/var/lib/scrutiny/influxdb/influxd.bolt --engine-path=/var/lib/scrutiny/influxdb/engine --reporting-disabled
+ExecStartPost=/usr/bin/curl --noproxy * -fsS --retry 30 --retry-delay 1 --retry-connrefused --connect-timeout 1 --max-time 2 -o /dev/null http://127.0.0.1:8086/health
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod 0644 /etc/systemd/system/scrutiny-influxdb.service
+
+cat <<'EOF' > /etc/systemd/system/scrutiny.service
+[Unit]
+Description=Scrutiny SMART Hard Drive Telemetry Dashboard
+After=network-online.target scrutiny-influxdb.service
+Wants=network-online.target scrutiny-influxdb.service
 
 [Service]
 User=scrutiny
@@ -184,6 +273,23 @@ EOF
 chmod 0644 /etc/systemd/system/scrutiny-collector.timer
 
 af_logged systemctl daemon-reload
+af_logged systemctl enable --now scrutiny-influxdb
+af_logged systemctl restart scrutiny-influxdb
+INFLUX_READY=false
+for _attempt in $(seq 1 30); do
+    if ! systemctl is-active --quiet scrutiny-influxdb; then
+        break
+    fi
+    if curl --noproxy '*' -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8086/health >/dev/null 2>&1; then
+        INFLUX_READY=true
+        break
+    fi
+    sleep 1
+done
+if [[ "$INFLUX_READY" != true ]]; then
+    print_error "Scrutiny InfluxDB backend did not become ready on 127.0.0.1:8086"
+    exit 1
+fi
 af_logged systemctl enable --now scrutiny
 af_logged systemctl enable --now scrutiny-collector.timer
 af_logged systemctl restart scrutiny

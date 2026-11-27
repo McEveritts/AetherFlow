@@ -75,11 +75,65 @@ fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Apache, MariaDB, and PHP extensions for Nextcloud..."
 
+NC_PHP_VER=""
+NC_PHP_BIN="php"
+NC_PHP_USE_FPM=false
+# Nextcloud 32-35 supports PHP 8.3-8.5 and rejects PHP >= 8.6 (e.g., Sury experimental php8.6).
+for candidate_ver in 8.4 8.5 8.3; do
+    if [[ -x "/usr/bin/php${candidate_ver}" ]]; then
+        NC_PHP_VER="$candidate_ver"
+        break
+    fi
+done
 DEBIAN_FRONTEND=noninteractive af_logged apt-get update -y -qq
-DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
-    apache2 mariadb-server libapache2-mod-php \
-    php php-cli php-mysql php-gd php-curl php-zip php-xml php-mbstring php-intl php-bcmath php-gmp \
-    unzip curl openssl ca-certificates
+if [[ -z "$NC_PHP_VER" ]] && command_exists apt-cache; then
+    for candidate_ver in 8.4 8.5 8.3; do
+        candidate_pkg="$(apt-cache policy "php${candidate_ver}-cli" 2>/dev/null | awk '/Candidate:/ {print $2; exit}' || true)"
+        if [[ -n "$candidate_pkg" && "$candidate_pkg" != "(none)" ]]; then
+            NC_PHP_VER="$candidate_ver"
+            break
+        fi
+    done
+fi
+
+if [[ -n "$NC_PHP_VER" ]]; then
+    if [[ -e /etc/apache2/mods-enabled/mpm_event.load || -e /etc/apache2/mods-enabled/mpm_worker.load || -e "/etc/apache2/conf-enabled/php${NC_PHP_VER}-fpm.conf" || -x "/usr/sbin/php-fpm${NC_PHP_VER}" ]]; then
+        NC_PHP_USE_FPM=true
+    elif command_exists apt-cache; then
+        fpm_candidate="$(apt-cache policy "php${NC_PHP_VER}-fpm" 2>/dev/null | awk '/Candidate:/ {print $2; exit}' || true)"
+        if [[ -n "$fpm_candidate" && "$fpm_candidate" != "(none)" && ! -e /etc/apache2/mods-enabled/mpm_prefork.load ]]; then
+            NC_PHP_USE_FPM=true
+        fi
+    fi
+    NC_PHP_SAPI_PKG="libapache2-mod-php${NC_PHP_VER}"
+    if [[ "$NC_PHP_USE_FPM" == true ]]; then
+        NC_PHP_SAPI_PKG="php${NC_PHP_VER}-fpm"
+    fi
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+        apache2 mariadb-server "${NC_PHP_SAPI_PKG}" \
+        "php${NC_PHP_VER}-cli" "php${NC_PHP_VER}-mysql" "php${NC_PHP_VER}-gd" \
+        "php${NC_PHP_VER}-curl" "php${NC_PHP_VER}-zip" "php${NC_PHP_VER}-xml" \
+        "php${NC_PHP_VER}-mbstring" "php${NC_PHP_VER}-intl" "php${NC_PHP_VER}-bcmath" \
+        "php${NC_PHP_VER}-gmp" \
+        unzip curl openssl ca-certificates
+    if [[ -x "/usr/bin/php${NC_PHP_VER}" ]]; then
+        NC_PHP_BIN="/usr/bin/php${NC_PHP_VER}"
+    fi
+else
+    DEBIAN_FRONTEND=noninteractive af_logged apt-get install -y -qq \
+        apache2 mariadb-server libapache2-mod-php \
+        php php-cli php-mysql php-gd php-curl php-zip php-xml php-mbstring php-intl php-bcmath php-gmp \
+        unzip curl openssl ca-certificates
+fi
+
+if [[ "$NC_PHP_USE_FPM" == true && -n "$NC_PHP_VER" && -x "/usr/sbin/php-fpm${NC_PHP_VER}" ]]; then
+    af_logged a2enmod proxy_fcgi setenvif
+    if [[ -f "/etc/apache2/conf-available/php${NC_PHP_VER}-fpm.conf" && ! -e "/etc/apache2/conf-enabled/php${NC_PHP_VER}-fpm.conf" ]]; then
+        ln -sfn "../conf-available/php${NC_PHP_VER}-fpm.conf" "/etc/apache2/conf-enabled/php${NC_PHP_VER}-fpm.conf"
+    fi
+    af_logged systemctl enable --now "php${NC_PHP_VER}-fpm"
+    af_logged systemctl restart "php${NC_PHP_VER}-fpm"
+fi
 
 af_logged systemctl enable --now mariadb
 af_logged systemctl enable --now apache2
@@ -128,7 +182,7 @@ rollback_web_runtime() {
             fi
         fi
         if [[ "$EXISTING_INSTALL" -eq 1 && -f /var/www/nextcloud/occ ]]; then
-            af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off || true
+            af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ maintenance:mode --off || true
             if [[ -f "$RUNTIME_BACKUP/0/config/config.php" ]]; then
                 safe_restore_path_from_backup "$RUNTIME_BACKUP/0/config/config.php" /var/www/nextcloud/config/config.php || restore_failed=true
             fi
@@ -201,11 +255,11 @@ RUNTIME_CHANGED=true
 mkdir -p /var/lib/nextcloud/data
 if [[ "$EXISTING_INSTALL" -eq 1 ]]; then
     if [[ -f /var/www/nextcloud/occ ]]; then
-        af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on
+        af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ maintenance:mode --on
     fi
     if ! af_logged_stderr backup_configured_database "$RUNTIME_BACKUP/database" "$NC_DB_TYPE" "$NC_DB_NAME" "$NC_DB_HOST" "$NC_DB_USER" "$NC_DB_PASSWORD" "$NC_SQLITE_PATH"; then
         if [[ -f /var/www/nextcloud/occ ]]; then
-            af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off || true
+            af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ maintenance:mode --off || true
         fi
         print_error "Cannot back up Nextcloud database; refusing to migrate"
         exit 1
@@ -227,7 +281,7 @@ nextcloud_database_ownership create "$NC_DB_OWNER_FILE" mysql nextcloud localhos
 fi
 
 if [[ "$EXISTING_INSTALL" == 1 && -f /var/www/nextcloud/occ ]]; then
-    af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on
+    af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ maintenance:mode --on
 fi
 for app_directory in /var/www/nextcloud/apps/*; do
     [[ -d "$app_directory" && ! -L "$app_directory" ]] || continue
@@ -242,15 +296,22 @@ rm -rf "$BUILD_DIR"
 BUILD_DIR=""
 
 chown -hRP www-data:www-data /var/www/nextcloud /var/lib/nextcloud
+chmod 755 /var/www/nextcloud /var/lib/nextcloud
+if [[ -d /var/lib/nextcloud/data && ! -L /var/lib/nextcloud/data ]]; then
+    chmod 700 /var/lib/nextcloud/data
+fi
+if [[ -f /var/www/nextcloud/version.php && ! -L /var/www/nextcloud/version.php ]]; then
+    chmod 644 /var/www/nextcloud/version.php
+fi
 
 report_progress 75 "Running unattended Nextcloud initialization..."
 if [[ "$EXISTING_INSTALL" == 1 ]]; then
-    af_logged sudo -u www-data php /var/www/nextcloud/occ upgrade
-    af_logged sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off
+    af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ upgrade
+    af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ maintenance:mode --off
 else
 (
 export AF_NEXTCLOUD_DB_PASS="$DB_PASS" AF_NEXTCLOUD_ADMIN_PASS="$ADMIN_PASS"
-af_logged sudo --preserve-env=AF_NEXTCLOUD_DB_PASS,AF_NEXTCLOUD_ADMIN_PASS -u www-data php -f /dev/stdin -- maintenance:install \
+af_logged sudo --preserve-env=AF_NEXTCLOUD_DB_PASS,AF_NEXTCLOUD_ADMIN_PASS -u www-data "${NC_PHP_BIN}" -- maintenance:install \
     --database "mysql" \
     --database-name "nextcloud" \
     --database-user "nextclouduser" \
@@ -271,16 +332,16 @@ fi
 if [[ "$EXISTING_INSTALL" == 0 ]]; then
 PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1)"
 BASE_DOMAIN="$(get_base_domain || true)"
-af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 0 --value="localhost"
-af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 1 --value="127.0.0.1"
-af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 2 --value="${PRIMARY_IP}"
-af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 3 --value="$(hostname -f 2>/dev/null || hostname)"
-af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 4 --value="nextcloud.aether.local"
+af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ config:system:set trusted_domains 0 --value="localhost"
+af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ config:system:set trusted_domains 1 --value="127.0.0.1"
+af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ config:system:set trusted_domains 2 --value="${PRIMARY_IP}"
+af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ config:system:set trusted_domains 3 --value="$(hostname -f 2>/dev/null || hostname)"
+af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ config:system:set trusted_domains 4 --value="nextcloud.aether.local"
 if [[ -n "$BASE_DOMAIN" ]]; then
-    af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 5 --value="nextcloud.${BASE_DOMAIN}"
+    af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ config:system:set trusted_domains 5 --value="nextcloud.${BASE_DOMAIN}"
 fi
-af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 0 --value="127.0.0.1"
-af_logged sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 1 --value="::1"
+af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ config:system:set trusted_proxies 0 --value="127.0.0.1"
+af_logged sudo -u www-data "${NC_PHP_BIN}" /var/www/nextcloud/occ config:system:set trusted_proxies 1 --value="::1"
 fi
 
 NC_VER="$(grep -oE "OC_VersionString = '[^']+'" /var/www/nextcloud/version.php 2>/dev/null | cut -d"'" -f2 || true)"

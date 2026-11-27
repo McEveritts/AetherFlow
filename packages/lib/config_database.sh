@@ -1198,7 +1198,7 @@ rollback_app_archive_update() {
         fi
         if [[ -e "$AF_ARCHIVE_BACKUP/unit" ]]; then
             safe_restore_path_from_backup "$AF_ARCHIVE_BACKUP/unit" "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || restored=false
-        else
+        elif [[ -e "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || -L "/etc/systemd/system/multi-user.target.wants/${AF_ARCHIVE_UNIT}.service" ]] || systemctl is-enabled --quiet "$AF_ARCHIVE_UNIT" 2>/dev/null; then
             af_logged systemctl disable -- "$AF_ARCHIVE_UNIT" || restored=false
             rm -f -- "/etc/systemd/system/${AF_ARCHIVE_UNIT}.service" || restored=false
         fi

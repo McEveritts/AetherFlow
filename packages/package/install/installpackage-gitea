@@ -105,6 +105,15 @@ rm -rf "$TMP_DIR"
 queue_app_version /var/lib/gitea/.af-version "${GITEA_VERSION#v}"
 
 if [[ ! -f /etc/gitea/app.ini ]]; then
+    GITEA_SECRET_KEY="$(/usr/local/bin/gitea generate secret SECRET_KEY 2>/dev/null | tr -d '\r\n' || true)"
+    [[ -n "$GITEA_SECRET_KEY" ]] || GITEA_SECRET_KEY="$(openssl rand -hex 32)"
+    GITEA_INTERNAL_TOKEN="$(/usr/local/bin/gitea generate secret INTERNAL_TOKEN 2>/dev/null | tr -d '\r\n' || true)"
+    [[ -n "$GITEA_INTERNAL_TOKEN" ]] || GITEA_INTERNAL_TOKEN="$(openssl rand -hex 64)"
+    GITEA_JWT_SECRET="$(/usr/local/bin/gitea generate secret JWT_SECRET 2>/dev/null | tr -d '\r\n' || true)"
+    [[ -n "$GITEA_JWT_SECRET" ]] || GITEA_JWT_SECRET="$(openssl rand -hex 32)"
+    GITEA_LFS_JWT_SECRET="$(/usr/local/bin/gitea generate secret LFS_JWT_SECRET 2>/dev/null | tr -d '\r\n' || true)"
+    [[ -n "$GITEA_LFS_JWT_SECRET" ]] || GITEA_LFS_JWT_SECRET="$(openssl rand -hex 32)"
+    (umask 077
     cat <<EOF > /etc/gitea/app.ini
 APP_NAME = Gitea: Git with a cup of tea
 RUN_USER = gitea
@@ -116,6 +125,7 @@ HTTP_ADDR = 127.0.0.1
 HTTP_PORT = ${APP_PORT}
 DOMAIN = localhost
 ROOT_URL = http://localhost:${APP_PORT}/
+LFS_JWT_SECRET = ${GITEA_LFS_JWT_SECRET}
 
 [database]
 DB_TYPE = sqlite3
@@ -128,11 +138,20 @@ ROOT_PATH = /var/lib/gitea/log
 
 [security]
 INSTALL_LOCK = true
+SECRET_KEY = ${GITEA_SECRET_KEY}
+INTERNAL_TOKEN = ${GITEA_INTERNAL_TOKEN}
+
+[oauth2]
+JWT_SECRET = ${GITEA_JWT_SECRET}
 EOF
+    )
+    unset GITEA_SECRET_KEY GITEA_INTERNAL_TOKEN GITEA_JWT_SECRET GITEA_LFS_JWT_SECRET
 fi
 set_config_value /etc/gitea/app.ini ini HTTP_PORT "$APP_PORT" server
 
 chown -hRP gitea:gitea /var/lib/gitea
+chmod 755 /var/lib/gitea
+chmod 700 /var/lib/gitea/data
 [[ ! -L /etc/gitea/app.ini ]]
 chown root:gitea /etc/gitea/app.ini
 chmod 640 /etc/gitea/app.ini

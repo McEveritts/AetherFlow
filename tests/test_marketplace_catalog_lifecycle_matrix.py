@@ -507,6 +507,8 @@ elif command in ('curl', 'wget'):
         if 'nodejs.org' in source_url and source_url.endswith('.tar.xz'): return (root / 'node.tar.xz').read_bytes()
         if 'node_exporter' in source_url: return (root / 'node-exporter.tar.gz').read_bytes()
         if 'prometheus-' in source_url: return (root / 'prometheus.tar.gz').read_bytes()
+        if 'influxdb2-' in source_url: return (root / 'influxdb2.tar.gz').read_bytes()
+        if 'scrutiny-web-frontend' in source_url: return (root / 'scrutiny-frontend.tar.gz').read_bytes()
         if 'librespeed' in source_url or 'speedtest' in source_url:
             return (root / ('librespeed-src.tar.gz' if '/archive/' in source_url else 'release.tar.gz')).read_bytes()
         if app == 'notifiarr' and source_url.endswith('.linux.gz'):
@@ -1165,12 +1167,14 @@ youtube_private_port() {
         for filename, directory, names in (
             ("prometheus.tar.gz", "prometheus-2.1.0.linux-amd64", ("prometheus", "promtool")),
             ("node-exporter.tar.gz", "node_exporter-1.8.2.linux-amd64", ("node_exporter",)),
+            ("influxdb2.tar.gz", "influxdb2-2.7.12/usr/bin", ("influxd",)),
+            ("scrutiny-frontend.tar.gz", "dist", ("index.html",)),
         ):
             with tarfile.open(self.root / filename, "w:gz") as output:
                 for name in names:
-                    payload = executable.encode()
+                    payload = b"<!doctype html><html></html>\n" if name.endswith(".html") else executable.encode()
                     entry = tarfile.TarInfo(directory + "/" + name)
-                    entry.size, entry.mode = len(payload), 0o755
+                    entry.size, entry.mode = len(payload), 0o644 if name.endswith(".html") else 0o755
                     output.addfile(entry, io.BytesIO(payload))
 
     @property
@@ -1194,6 +1198,7 @@ youtube_private_port() {
             "AETHERFLOW_APACHE_ROOT": str(self.root / "etc/apache2"),
             "AF_PIHOLE_BOOTSTRAP_SHA256": hashlib.sha256(PIHOLE_BOOTSTRAP_SCRIPT.encode()).hexdigest(),
             "AF_NODESOURCE_BOOTSTRAP_SHA256": hashlib.sha256(NODESOURCE_BOOTSTRAP_SCRIPT.encode()).hexdigest(),
+            "AF_SCRUTINY_INFLUXDB_SHA256": hashlib.sha256((self.root / "influxdb2.tar.gz").read_bytes()).hexdigest(),
             "AF_TRUSTED_KEY_SHA256": hashlib.sha256((self.root / "release.tar.gz").read_bytes()).hexdigest(),
             "TMPDIR": str(self.root / "tmp"), "HOME": str(self.root / "home"),
             "AF_PROC_ROOT": str(self.root / "proc"),

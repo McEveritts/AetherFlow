@@ -143,6 +143,9 @@ fi
 mkdir -p /var/lib/jellyseerr
 chown -hRP jellyseerr:jellyseerr "$BUILD_DIR" /var/lib/jellyseerr
 chmod 755 "$BUILD_DIR"
+if [[ -f "$BUILD_DIR/package.json" && ! -L "$BUILD_DIR/package.json" ]]; then
+    chmod 644 "$BUILD_DIR/package.json"
+fi
 
 report_progress 80 "Backing up Jellyseerr state and activating Seerr ${LATEST_TAG}..."
 validate_config_paths /var/backups/.af-backup-root
@@ -155,7 +158,7 @@ fi
 if systemctl is-active --quiet jellyseerr; then
     WAS_ACTIVE=1
 fi
-af_logged systemctl stop jellyseerr
+stop_systemd_unit jellyseerr
 SERVICE_STOPPED=1
 tar -czf "$BACKUP_DIR/data.tar.gz" -C /var/lib/jellyseerr .
     snapshot_app_state "$BACKUP_DIR" /var/lib/jellyseerr

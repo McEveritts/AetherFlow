@@ -117,7 +117,7 @@ if [[ -L "$DATA_DIR" || -L "${DATA_DIR}/.vnc" ]]; then
     print_error "Refusing symlinked KasmVNC state directory"
     exit 1
 fi
-install -d -m 700 -o af-kasmvnc -g af-kasmvnc "$DATA_DIR"
+install -d -m 755 -o af-kasmvnc -g af-kasmvnc "$DATA_DIR"
 install -d -m 700 -o af-kasmvnc -g af-kasmvnc "${DATA_DIR}/.vnc"
 install -d -m 755 "$CONFIG_DIR"
 
@@ -321,7 +321,8 @@ for attempt in {1..30}; do
         break
     fi
     READY_URL="https://127.0.0.1:${APP_PORT}/"
-    if ! HTTP_STATUS="$(curl --noproxy '*' -k -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$READY_URL" 2>/dev/null)"; then
+    HTTP_STATUS="$(curl --noproxy '*' -k -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$READY_URL" 2>/dev/null || true)"
+    if [[ ! "$HTTP_STATUS" =~ ^[1-5][0-9][0-9]$ ]]; then
         READY_URL="http://127.0.0.1:${APP_PORT}/"
         HTTP_STATUS="$(curl --noproxy '*' -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$READY_URL" 2>/dev/null || true)"
     fi

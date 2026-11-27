@@ -33,7 +33,7 @@ require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and disabling companion scrutiny-collector.timer and service..."
 
-purge_systemd_unit "scrutiny-collector.timer" "scrutiny-collector.service" "scrutiny.service"
+purge_systemd_unit "scrutiny-collector.timer" "scrutiny-collector.service" "scrutiny.service" "scrutiny-influxdb.service"
 
 report_progress 50 "Stopping and removing scrutiny.service dashboard..."
 

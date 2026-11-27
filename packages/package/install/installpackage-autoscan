@@ -160,6 +160,7 @@ with ManagedConfig(cfg_path, create_parents=False) as cfg:
 PYEOF
 
 chown -hRP autoscan:autoscan /etc/autoscan /var/lib/autoscan /opt/autoscan
+chmod 755 /opt/autoscan /var/lib/autoscan
 chmod 640 /etc/autoscan/config.yml
 
 READY_URL="$(application_readiness_url "$PACKAGE_NAME" "$APP_PORT")"
