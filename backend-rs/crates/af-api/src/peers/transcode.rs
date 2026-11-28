@@ -4400,7 +4400,7 @@ pub(crate) fn balanced_local_baseline_weight(remote_configured_weights: &[u64]) 
 #[derive(Debug, Clone)]
 enum DispatchChoice {
     Local { weight: u64 },
-    Remote(EligibleWorkerCandidate),
+    Remote(Box<EligibleWorkerCandidate>),
 }
 
 impl DispatchChoice {
@@ -5185,7 +5185,7 @@ async fn handle_dispatcher_connection(
         .collect();
     let mut choices: Vec<DispatchChoice> = eligible_workers
         .into_iter()
-        .map(DispatchChoice::Remote)
+        .map(|worker| DispatchChoice::Remote(Box::new(worker)))
         .collect();
 
     if dispatch_policy == TranscodeDispatchPolicy::Balanced {
@@ -5267,7 +5267,7 @@ async fn handle_dispatcher_connection(
                 .await;
                 return;
             }
-            DispatchChoice::Remote(candidate) => candidate,
+            DispatchChoice::Remote(candidate) => *candidate,
         };
 
         if *shutdown_rx.borrow() || tokio::time::Instant::now() >= start_deadline {
