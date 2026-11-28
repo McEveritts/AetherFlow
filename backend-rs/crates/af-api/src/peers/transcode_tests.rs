@@ -1009,8 +1009,29 @@ async fn weighted_selection_and_eligibility_filtering_with_cooldown_recovery() {
     // Start real workers on distinct short Unix sockets
     let w1_sock = tmp.path.join("w1.sock");
     let w2_sock = tmp.path.join("w2.sock");
-    let (w1_stop, w1_task) = spawn_real_worker(w1_sock.clone(), fake_ffmpeg.clone(), 4);
-    let (w2_stop, w2_task) = spawn_real_worker(w2_sock.clone(), fake_ffmpeg.clone(), 4);
+    // Pin each worker's DRM render node to the hardware its advertised capabilities claim, so
+    // QSV/VA-API render-node selection does not depend on the host running the test (CI runners
+    // expose no `/dev/dri`, and developer hosts may expose a different GPU vendor).
+    let (w1_stop, w1_task) = spawn_real_worker_with_config(
+        w1_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::Off,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x8086".to_string()),
+        }]),
+    );
+    let (w2_stop, w2_task) = spawn_real_worker_with_config(
+        w2_sock.clone(),
+        fake_ffmpeg.clone(),
+        4,
+        af_transcode::BackendAdaptMode::Off,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x1002".to_string()),
+        }]),
+    );
     rt_w1.transcode_state.set_worker_socket_override(w1_sock);
     rt_w2.transcode_state.set_worker_socket_override(w2_sock);
 

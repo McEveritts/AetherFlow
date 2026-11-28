@@ -527,6 +527,7 @@ fn librespeed_and_novnc_catalog_resolution_and_component_policies() {
         vec![
             "scrutiny-collector.timer".to_string(),
             "scrutiny".to_string(),
+            "scrutiny-influxdb".to_string(),
             "scrutiny-collector".to_string(),
         ]
     );
@@ -534,6 +535,7 @@ fn librespeed_and_novnc_catalog_resolution_and_component_policies() {
         resolve_controllable_service_units("scrutiny", "start"),
         vec![
             "scrutiny".to_string(),
+            "scrutiny-influxdb".to_string(),
             "scrutiny-collector.timer".to_string()
         ]
     );

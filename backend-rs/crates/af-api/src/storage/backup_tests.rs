@@ -346,14 +346,14 @@ async fn test_oauth_only_admin_backup_stepup_against_current_schema() {
         std::env::set_var(k, &db_file);
     }
 
-    af_db::init_db().expect("initialize full v27 schema");
+    af_db::init_db().expect("initialize full v28 schema");
     let now = Utc::now().timestamp();
     {
         let conn = af_db::get_conn().unwrap();
         let max_ver: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_versions", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(max_ver, 27);
+        assert_eq!(max_ver, 28);
         conn.execute(
             "INSERT INTO users (id, username, role, password_hash, totp_enabled) VALUES (77, 'oauth-admin', 'admin', '', 0)",
             [],
