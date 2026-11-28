@@ -20,6 +20,31 @@ id = "generic-api-key"
   regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
 
   [[rules.allowlists]]
+  description = "Synthetic Wave 1A password canary in lifecycle redaction regressions"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = [
+    '''^backend-rs/crates/af-release/src/lifecycle/tests/redaction_tests\.rs$''',
+    '''^backend-rs/crates/af-runner/src/package_lifecycle/version_verification_tests/redaction_and_receipts\.rs$''',
+    '''^backend-rs/crates/af-services/src/package_jobs/unit_tests\.rs$''',
+  ]
+  regexes = ['''^hUnt3r2_pR0d$''']
+
+  [[rules.allowlists]]
+  description = "Synthetic sequential-hex AES key fixtures in Wave 1B af-db crypto zeroization tests"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''^backend-rs/crates/af-db/src/crypto\.rs$''']
+  regexes = ['''^(?:0123456789abcdef|fedcba9876543210|0123456789abcdef0123456789abcdef)$''']
+
+  [[rules.allowlists]]
+  description = "Synthetic unsigned HS256 JWT fixture (signature literally 'signature') in Wave 1B rotation-grace redaction test"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''^backend-rs/crates/af-api/src/auth/revocation\.rs$''']
+  regexes = ['''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxIn0\.c2lnbmF0dXJl$''']
+
+  [[rules.allowlists]]
   description = "Synthetic lifecycle redaction canary in the API persistence regression"
   condition = "AND"
   regexTarget = "secret"
@@ -299,6 +324,17 @@ id = "curl-auth-header"
   paths = ['''^tests/test_marketplace_safe_updates\.py$''']
   regexes = ['''^API_CANARY$''']
 
+  [[rules.allowlists]]
+  description = "Synthetic base64 user:pass Basic-auth canary in Wave 1A lifecycle redaction regressions"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = [
+    '''^backend-rs/crates/af-release/src/lifecycle/tests/redaction_tests\.rs$''',
+    '''^backend-rs/crates/af-runner/src/package_lifecycle/version_verification_tests/redaction_and_receipts\.rs$''',
+    '''^backend-rs/crates/af-services/src/package_jobs/unit_tests\.rs$''',
+  ]
+  regexes = ['''^dXNlcjpwYXNz=$''']
+
 [[rules]]
 id = "curl-auth-user"
 
@@ -317,11 +353,15 @@ id = "curl-auth-user"
     '''^backend-rs/crates/af-runner/src/package_lifecycle/version_verification_tests(?:/redaction_and_receipts)?\.rs$''',
     '''^backend-rs/crates/af-services/src/(?:package_jobs(?:/unit_tests)?|workers)\.rs$''',
     '''^backend-rs/crates/af-services/src/workers/tests(?:/discovery_and_pagination)?\.rs$''',
+    '''^backend-rs/crates/af-models/src/secret_redaction\.rs$''',
   ]
   regexes = [
     '''^admin:(?:mysecret123|hunter2|synthetic-secret|secret_pass|secret|supersecret|super_secret_curl|SECRET)$''',
     '''^"admin:(?:my secret|SECRET words)"$''',
     '''^operator:SENTINEL$''',
+    '''^(?:admin|stage):(?:SUPER_SECRET|SUPER_SECRET_3|sec1|hUnt3r2_pR0d)$''',
+    '''^"admin:\\nSUPER_SECRET"$''',
+    '''^admin:":SECRET_TAIL"$''',
   ]
 
   [[rules.allowlists]]
