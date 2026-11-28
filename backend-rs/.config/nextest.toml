@@ -1,0 +1,22 @@
+# cargo-nextest configuration for the backend-rs workspace.
+#
+# The Wave 1A redaction regressions assert linear-time scaling by timing the
+# same sanitizer at n and 2n and requiring d2/d1 < ~3.2. Those wall-clock
+# ratios are sound in isolation but flake when the shared runner is saturated
+# by the rest of the parallel suite (observed ratios of 3.27x-4.48x under load,
+# 2.0x-2.4x when run alone), which intermittently failed the Security Gate and
+# release Rust gates.
+#
+# Run only those scaling tests with the whole machine to themselves and allow a
+# bounded retry, without loosening any assertion. nextest reports a test that
+# passes on retry as FLAKY, so a real superlinear regression (which fails every
+# attempt) still fails the gate.
+[[profile.default.overrides]]
+filter = '''
+(package(af-models) & test(/^secret_redaction::tests::diagnostic_r(?:6|7|17)_/))
+| (package(af-release) & test(/^lifecycle::tests::redaction_tests::test_wave1a_r/))
+| (package(af-runner) & test(/^package_lifecycle::version_verification_tests::redaction_and_receipts::test_wave1a_/))
+| (package(af-services) & test(/^package_jobs::unit_tests::test_wave1a_r1[45]_package_jobs_regressions$/))
+'''
+threads-required = "num-cpus"
+retries = { backoff = "fixed", count = 2, delay = "1s" }
