@@ -171,6 +171,19 @@ updated = re.sub(
     lambda m: f"<VirtualHost {vhost_host if m.group(1) in ('*', '0.0.0.0', '127.0.0.1') else m.group(1)}:{port}>",
     existing,
 )
+if "ProxyFCGISetEnvIf" not in updated and "<VirtualHost" in updated:
+    fcgi_block = (
+        "    <IfModule proxy_fcgi_module>\n"
+        "        ProxyFCGIBackendType FPM\n"
+        '        ProxyFCGISetEnvIf "true" !PATH_TRANSLATED\n'
+        "    </IfModule>\n"
+    )
+    updated = re.sub(
+        r"(<VirtualHost\s+[^>]+>\r?\n)",
+        r"\1" + fcgi_block,
+        updated,
+        count=1,
+    )
 if updated != existing:
     safe_write_text(path, updated, 0o644)
 ORG_VHOST_PYEOF
@@ -179,6 +192,10 @@ sed -e "s/@AF_APP_PORT@/${APP_PORT}/g" -e "s/@AF_VHOST_HOST@/${ORG_VHOST_HOST}/g
 <VirtualHost @AF_VHOST_HOST@:@AF_APP_PORT@>
     DocumentRoot /var/www/organizr
     Alias /organizr "/var/www/organizr"
+    <IfModule proxy_fcgi_module>
+        ProxyFCGIBackendType FPM
+        ProxyFCGISetEnvIf "true" !PATH_TRANSLATED
+    </IfModule>
     <Directory /var/www/organizr>
         Options FollowSymLinks
         AllowOverride All

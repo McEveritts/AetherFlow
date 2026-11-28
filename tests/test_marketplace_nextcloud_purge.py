@@ -243,6 +243,27 @@ class NextcloudPurgeTests(unittest.TestCase):
             self.assertFalse((fixture.root / self.ownership_path).exists())
             self.assertFalse(fixture.lock.exists())
 
+    def test_fresh_install_and_upgrade_write_proxy_fcgi_path_translated_guard(self):
+        with InstallerFixture('nextcloud') as fixture:
+            result = fixture.run('install')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            vhost = fixture.root / 'etc/apache2/sites-available/nextcloud.conf'
+            text = vhost.read_text()
+            self.assertIn('ProxyFCGIBackendType FPM', text)
+            self.assertIn('ProxyFCGISetEnvIf "true" !PATH_TRANSLATED', text)
+
+            # Simulate an older pre-existing nextcloud.conf lacking the ProxyFCGI directive.
+            vhost.write_text(
+                '<VirtualHost 127.0.0.1:8088>\n'
+                '    DocumentRoot /var/www/nextcloud\n'
+                '</VirtualHost>\n'
+            )
+            upgrade = fixture.run('install')
+            self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
+            upgraded_text = vhost.read_text()
+            self.assertIn('ProxyFCGIBackendType FPM', upgraded_text)
+            self.assertIn('ProxyFCGISetEnvIf "true" !PATH_TRANSLATED', upgraded_text)
+
 
 if __name__ == '__main__':
     unittest.main()
