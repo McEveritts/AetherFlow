@@ -10,8 +10,8 @@ AetherFlow release tracks are managed by the built-in Rust Release Engine (`af-r
 
 | Version / Track | Branch / Source | Supported | Notes |
 | :--- | :--- | :---: | :--- |
-| **`4.0.x` (`stable`)** | `master` / GitHub Releases | ✅ | Production Rust control plane track (`v4.0.1`) with SHA-256 + Sigstore/SLSA v1 verified artifacts, WAL-safe snapshots, atomic helper sync, and automatic rollback |
-| **`4.0.x` (`nightly`)** | `nightly` / Pre-Releases | ✅ | Rolling pre-release channel (`v4.0.1-nightly.<run>.<attempt>`) for early validation (retired `experimental` aliases to `nightly`) |
+| **`4.0.x` (`stable`)** | `master` / GitHub Releases | ✅ | Production Rust control plane track (`v4.0.2`) with SHA-256 + Sigstore/SLSA v1 verified artifacts, WAL-safe snapshots, atomic helper sync, and automatic rollback |
+| **`4.0.x` (`nightly`)** | `nightly` / Pre-Releases | ✅ | Rolling pre-release channel (`v4.0.2-nightly.<run>.<attempt>`) for early validation (retired `experimental` aliases to `nightly`) |
 | **`3.2.x`** | Historical Go Tags | ⚠️ | Security fixes land in `4.0.x`; see [`docs/upgrading.md`](./docs/upgrading.md) for the v3.2.x to v4.0.x upgrade procedure |
 | **`< 3.2.0`** | Legacy | ❌ | Unsupported legacy architecture; upgrade required |
 
@@ -61,7 +61,7 @@ Please report vulnerabilities privately through **[GitHub Security Advisories (P
 To help us triage and reproduce the issue quickly, please include:
 
 - **Affected Component**: Rust control plane crate (`backend-rs/crates/af-*`), privileged runner (`af-runner`), McBrowser (`af-files` / `af-api::mcbrowser`), WASM frontend (`frontend-rs/crates/af-web-*`), Apache2 Subdomain Gateway, or a specific Marketplace installer (`packages/`).
-- **Version & Environment**: AetherFlow version/commit (e.g., `v4.0.1`), release channel (`stable` or `nightly`), and host OS (`Debian 12/13` or `Ubuntu 22.04/24.04`).
+- **Version & Environment**: AetherFlow version/commit (e.g., `v4.0.2`), release channel (`stable` or `nightly`), and host OS (`Debian 12/13` or `Ubuntu 22.04/24.04`).
 - **Reproduction Steps**: Clear, step-by-step instructions or a minimal proof-of-concept request/payload demonstrating the vulnerability.
 - **Security Impact**: What security boundary is crossed (e.g., authentication bypass, IDOR, privilege escalation across `runner.sock`, path/symlink traversal, command/SQL injection, SSRF, or secret exposure) and the relevant CWE if known.
 

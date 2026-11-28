@@ -1,6 +1,6 @@
 # Security Guide
 
-AetherFlow v4.0.1 implements defense-in-depth across authentication, encryption at rest, volatile memory zeroization, capability-scoped file access, systemd namespace sandboxing, and CI/CD supply-chain verification.
+AetherFlow v4.0.2 implements defense-in-depth across authentication, encryption at rest, volatile memory zeroization, capability-scoped file access, systemd namespace sandboxing, and CI/CD supply-chain verification.
 
 ## Authentication & Perimeter SSO
 

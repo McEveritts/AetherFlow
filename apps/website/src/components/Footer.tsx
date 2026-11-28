@@ -16,7 +16,7 @@ export function Footer() {
               Command your Linux servers without container bloat.
             </h2>
             <p className="mt-2 text-sm leading-relaxed text-slate-300">
-              Inspect the 12-crate Rust control plane, audit the Leptos WebAssembly dashboard, and deploy AetherFlow v4.0.1 under GPL-3.0.
+              Inspect the 12-crate Rust control plane, audit the Leptos WebAssembly dashboard, and deploy AetherFlow v4.0.2 under GPL-3.0.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
@@ -35,7 +35,7 @@ export function Footer() {
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.05] px-5 py-3 text-sm font-semibold text-slate-100 transition-colors hover:border-cyan-400/45 hover:bg-white/[0.09]"
             >
-              <span>v4.0.1 Releases</span>
+              <span>v4.0.2 Releases</span>
               <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
             </a>
           </div>
@@ -50,7 +50,7 @@ export function Footer() {
                 AetherFlow
               </span>
               <span className="rounded-full border border-indigo-400/35 bg-indigo-500/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-indigo-200">
-                v4.0.1
+                v4.0.2
               </span>
             </div>
             <p className="mt-4 max-w-sm text-sm leading-relaxed text-slate-400">

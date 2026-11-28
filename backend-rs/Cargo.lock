@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "af-api"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "af-db",
  "af-files",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "af-cli"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "af-db",
  "af-host",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "af-db"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "aes-gcm",
  "af-models",
@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "af-files"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "chrono",
  "libc",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "af-hardware"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "af-models",
  "libloading",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "af-host"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "af-models",
  "chrono",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "af-librespeed"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "af-models"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "chrono",
  "libc",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "af-release"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "af-models",
  "anyhow",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "af-runner"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "af-db",
  "af-host",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "af-services"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "af-db",
  "af-hardware",
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "af-transcode"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "af-hardware",
  "af-models",

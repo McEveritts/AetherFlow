@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/banner.svg?v=4.0.1" alt="AetherFlow — Sovereign bare-metal control plane" width="100%">
+<img src="./docs/assets/banner.svg?v=4.0.2" alt="AetherFlow — Sovereign bare-metal control plane" width="100%">
 
 <br>
 
@@ -15,7 +15,7 @@
 [![OS](https://img.shields.io/badge/Debian_12%2F13_·_Ubuntu_22.04%2F24.04-A81D33?style=flat-square&logo=debian&logoColor=white)](./setup)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-10b981?style=flat-square)](./LICENSE.md)
 
-**[Install](#-quick-install)** · **[What's new](#-whats-new-in-v401)** · **[Features](#-features)** · **[Peer Clustering](#-peer-clustering)** · **[Architecture](#-architecture)** · **[Catalog](#-77-app-native-catalog)** · **[Docs](./docs/README.md)** · **[Changelog](./CHANGELOG.md)**
+**[Install](#-quick-install)** · **[What's new](#-whats-new-in-v402)** · **[Features](#-features)** · **[Peer Clustering](#-peer-clustering)** · **[Architecture](#-architecture)** · **[Catalog](#-77-app-native-catalog)** · **[Docs](./docs/README.md)** · **[Changelog](./CHANGELOG.md)**
 
 </div>
 
@@ -30,11 +30,26 @@
 
 ---
 
-## ✨ What's new in v4.0.1
+## ✨ What's new in v4.0.2
 
-v4.0.1 ships the **Unified Flat Surface & Control System** across the Leptos WebAssembly dashboard together with all post-`v4.0.0` reliability, installer, ingress, Jellyfin, and Peer Clustering fixes ([`v4.0.0...v4.0.1`](https://github.com/McEveritts/AetherFlow/compare/v4.0.0...v4.0.1)) across both **`stable` (`master`)** and **`nightly`**, with **zero breaking changes** from `v4.0.0`.
+v4.0.2 brings **`stable` (`master`)** and **`nightly`** back together. It combines the post-`v4.0.1` **Wave 0–2 security hardening program** with the nightly **distributed transcoding**, **service topology map**, ingress, sandbox, and Debian 13 installer work ([`v4.0.1...v4.0.2`](https://github.com/McEveritts/AetherFlow/compare/v4.0.1...v4.0.2)). There are no breaking API or CLI changes, but several requirements are now stricter. See the upgrade checklist below.
 
-| | Since v4.0.0 |
+| | Since v4.0.1 |
+| :--- | :--- |
+| 🛡️ **Wave 0–2 security hardening** | Linear-time, UTF-8-safe diagnostic redaction with depth- and byte-budgeted JSON scrubbing; zeroized in-memory secrets (`SecretString`/`SecretBytes`); a `JWT_SECRET` of at least 32 bytes; forwarding headers stripped from untrusted peers; process-group-bounded subprocesses; `O_NOFOLLOW`/dirfd and per-thread `fsuid` filesystem confinement; a 31-key release-config allowlist; and root-owned plugin trees. |
+| 🎞️ **Distributed transcoding** | Silicon-verified VA-API (`vainfo`) and hardware Vulkan probing, load- and RTT-aware worker scoring, `remote_first`/`local_first`/`balanced` dispatch policies with a local job cap, cross-vendor backend adaptation, an FFmpeg thread cap, a 512 MiB Mesa shader cache, and Vulkan Compute HDR tone-mapping on by default (separate from opt-in Vulkan Video codecs). |
+| 🗺️ **Service topology map** | Overview → Service health becomes a three-tier Gateway → Service → Dependency map with status cards, curved labelled links, search highlighting, zoom and pan, a legend, a Map/List switcher, and a richer Service inspector in all 6 locales. |
+| 🌐 **Ingress & lifecycle** | Confined managed `sites-enabled` symlinks in snapshots, managed vhost cleanup on package remove, automatic TLS-pending vhost upgrades (`POST /v1/ingress/resync-tls`), post-lifecycle DNS reconciliation, and update probes that can no longer resurrect stale "update available" rows. |
+| 🧱 **Sandbox & peer storage** | A single canonical `10-aetherflow-sandbox.conf` drop-in, `UMask=0002` for 32 media, downloader and `*arr` unit families, and warnings for writable peer NFS exports or mounts on host-local system GIDs (1–999). |
+| 🛠️ **Debian 13 installers & release pipeline** | Fresh-install fixes for Autobrr, Gitea, Jellyseerr, KasmVNC, Kavita, Nextcloud and Scrutiny (standalone InfluxDB 2.7.12), isolated builds for Calibre-Web, SABnzbd and Palate, a serialized setup lock, and `McEveritts`-verified publishing from a protected `release-publish` environment under an 18-job concurrency ceiling. |
+
+Full notes: **[v4.0.2 release notes](./docs/releases/v4.0.2.md)** · **[CHANGELOG](./CHANGELOG.md)** · **[v4.0.1 release notes](./docs/releases/v4.0.1.md)** · **[Upgrading & Rollbacks](./docs/upgrading.md)**
+
+<details>
+<summary><b>Previously in v4.0.1 — Unified Flat Design System, installer, ingress & peer hardening</b></summary>
+<br>
+
+| | Shipped in v4.0.1 (`v4.0.0...v4.0.1`) |
 | :--- | :--- |
 | 🎨 **Unified Flat Design System** | Retires translucent glassmorphism (`backdrop-filter`, chromatic rims, aurora gradients, grain noise, card hover lift) across all 16 tabs and standalone routes in favor of a deterministic 3-tier flat hierarchy (`--af-*` 1:1 dark/light tokens, atomic control transitions, WCAG 2.1 AA contrast parity, 6 locales) enforced by a permanent Rust CI drift gate ([Design System](./docs/design-system.md)). |
 | 🪟 **Opaque overlays & popup launches** | Keeps Command Palette, Notifications drawer, McBrowser previews, header popovers, and toasts solid and stationary on hover, restores WebKit/Safari `Escape` dismissal, and eliminates cross-realm `dyn_into` casts in Services/Marketplace app launch popups. |
@@ -43,7 +58,7 @@ v4.0.1 ships the **Unified Flat Surface & Control System** across the Leptos Web
 | 🎬 **Jellyfin & Peer Clustering fixes** | Retries transient Kestrel HTTP 503/socket handoff errors during Jellyfin seeding and restores missing conffiles (`--force-confmiss`); deprioritizes VPN, overlay, container, and hypervisor interfaces (`wg*`, `tailscale*`, `docker*`, `br-*`, `veth*`, `virbr*`, etc.) during Peer Clustering WireGuard endpoint detection. |
 | 📸 **Refreshed docs & 1440p showcase** | Updates README, docs index, GitHub Pages site, reproducible capture scripts (`scripts/docs/`), 42 dark/light 1440p screenshots (21 views), 33 regenerated annotated operator guides, and release workflow `cancel-in-progress` concurrency. |
 
-Full notes: **[v4.0.1 release notes](./docs/releases/v4.0.1.md)** · **[CHANGELOG](./CHANGELOG.md)** · **[v4.0.0 release notes](./docs/releases/v4.0.0.md)** · **[Upgrading & Rollbacks](./docs/upgrading.md)**
+</details>
 
 <details>
 <summary><b>Previously in v4.0.0 — Pure-Rust Zero-Go cutover, Leptos WASM & Peer Clustering (373 commits since v3.2.7)</b></summary>
@@ -63,7 +78,7 @@ Full notes: **[v4.0.1 release notes](./docs/releases/v4.0.1.md)** · **[CHANGELO
 </details>
 
 > [!IMPORTANT]
-> **Upgrading a v3.2.x node?** Database Migration 26 removes the legacy master/worker cluster (`CLUSTER_*` settings and `/api/v1/admin/cluster/*` routes). Take a WAL-safe backup first with `sudo af backup create`, then re-pair servers from the **Cluster** tab after the upgrade. Upgrading from `v4.0.0` to `v4.0.1` has **no breaking changes**. See [Upgrading & Rollbacks](./docs/upgrading.md).
+> **Upgrading a v3.2.x node?** Database Migration 26 removes the legacy master/worker cluster (`CLUSTER_*` settings and `/api/v1/admin/cluster/*` routes). Take a WAL-safe backup first with `sudo af backup create`, then re-pair servers from the **Cluster** tab after the upgrade. Upgrading from `v4.0.x` to `v4.0.2` has no breaking API or CLI changes, but `JWT_SECRET` must be at least 32 bytes, `af release --config` files must be root-owned and use only allowlisted keys, and production plugin trees must be root-owned ([checklist](./docs/releases/v4.0.2.md#breaking-changes--upgrade-guide)). See [Upgrading & Rollbacks](./docs/upgrading.md).
 
 ---
 
@@ -347,8 +362,8 @@ Browser suites (Playwright against the real WASM bundle) are covered in [e2e/tes
 
 | Channel | Branch | Cadence |
 | :--- | :--- | :--- |
-| **`stable`** | `master` | Promoted releases (`vX.Y.Z`), currently **v4.0.1** |
-| **`nightly`** | `nightly` | Continuous prereleases (`v4.0.1-nightly.<run>.<attempt>`) with patch notes in [CHANGELOG.md](./CHANGELOG.md) |
+| **`stable`** | `master` | Promoted releases (`vX.Y.Z`), currently **v4.0.2** |
+| **`nightly`** | `nightly` | Continuous prereleases (`v4.0.2-nightly.<run>.<attempt>`) with patch notes in [CHANGELOG.md](./CHANGELOG.md) |
 
 Every release artifact ships with `SHA256SUMS` and Sigstore bundles, and the updater verifies both before it switches binaries.
 

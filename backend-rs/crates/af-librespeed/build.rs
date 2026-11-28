@@ -2,7 +2,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=AF_BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=AETHERFLOW_VERSION");
 
-    let fallback = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "4.0.1".to_string());
+    let fallback = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "4.0.2".to_string());
     let effective = std::env::var("AF_BUILD_VERSION")
         .ok()
         .or_else(|| std::env::var("AETHERFLOW_VERSION").ok())

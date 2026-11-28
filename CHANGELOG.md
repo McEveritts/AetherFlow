@@ -1,3 +1,24 @@
+## Nightly Patch Notes — November 28, 2026 — v4.0.2 Security Hardening, Distributed Transcoding & Topology Map
+
+- **Wave 0–2 Security & Privilege-Boundary Hardening:** Rewrites diagnostic and lifecycle secret redaction as a linear-time, UTF-8-safe line-classifier state machine with depth- and byte-budgeted JSON scrubbing and re-sanitization of persisted history; zeroizes JWT, AES, OIDC, peer, WireGuard and plugin signing secrets on drop (`SecretString`/`SecretBytes`); requires a `JWT_SECRET` of at least 32 bytes; strips forwarding headers from untrusted peers; bounds every privileged subprocess by process group, output size and timeout; confines root-side SQLite, lease and snapshot I/O with `O_NOFOLLOW`/dirfd and per-thread `fsuid`; restricts `af release --config` to 31 allowlisted keys in a root-owned file; and requires root-owned plugin trees with manifests of at most 256 KiB.
+- **Distributed Jellyfin Transcoding:** Probes real VA-API profiles (`vainfo`) and hardware Vulkan devices on each worker; scores workers by weight, free slots, live CPU/GPU load and tunnel RTT; adds `remote_first`/`local_first`/`balanced` dispatch policies with a local job cap (migration 28); adds backend adaptation (`AF_TRANSCODE_ADAPT_BACKEND`), an FFmpeg thread cap and a 512 MiB Mesa shader cache; and enables Vulkan Compute HDR tone-mapping by default, keeping it separate from opt-in Vulkan Video codecs.
+- **Service Topology Map:** Redesigns Overview → Service health as a three-tier Gateway → Service → Dependency map with status cards, curved labelled links, search highlighting, zoom and pan, a legend, a Map/List switcher and a richer Service inspector across all 6 locales.
+- **Marketplace Ingress & Lifecycle:** Accepts strictly confined managed Apache `sites-enabled` symlinks in snapshots; removes managed `aetherflow-*` vhosts when a package is removed; upgrades TLS-pending vhosts automatically once a certificate covers them (`POST /v1/ingress/resync-tls`); reconciles DNS after every lifecycle change; and prevents stale update probes from resurrecting "update available" after a remove or update.
+- **Sandbox & Peer Storage:** Writes a single canonical `10-aetherflow-sandbox.conf` drop-in, applies `UMask=0002` to 32 media, downloader and `*arr` unit families for group-shared and peer NFS media, and warns about writable peer NFS exports or mounts on host-local system GIDs (1–999).
+- **Debian 13 Installers:** Fixes fresh installs of Autobrr, Gitea, Jellyseerr, KasmVNC, Kavita, Nextcloud and Scrutiny (standalone InfluxDB 2.7.12), hardens Calibre-Web, SABnzbd, Palate, Dispatcharr, Invidious and Piped builds with isolated environments (resolving `/usr/sbin/runuser` so the scrubbed Piped and Invidious PostgreSQL bootstrap no longer fails), and serializes setup with `/run/aetherflow-setup.lock`.
+- **Release Pipeline:** Publishes from the protected `release-publish` environment under a PAT verified as `McEveritts`, caps worst-case Actions concurrency at 18 jobs, produces deterministic GNU tar archives, and restores green nightly gates (Clippy, Gitleaks, stale tests and timing-ratio flakes).
+
+---
+
+## Release v4.0.2 — November 28, 2026
+
+Brings `stable` (`master`) and `nightly` back together. Combines the post-`v4.0.1` Wave 0–2 security hardening with the nightly transcoding, topology, ingress, sandbox and installer work. There are no breaking API or CLI changes, but review the stricter `JWT_SECRET`, release-config, plugin-ownership and transcode-peer requirements before upgrading.
+
+- **Full release notes:** [docs/releases/v4.0.2.md](./docs/releases/v4.0.2.md)
+- **Full compare:** https://github.com/McEveritts/AetherFlow/compare/v4.0.1...v4.0.2
+
+---
+
 ## Nightly Patch Notes — November 25, 2026 — v4.0.1 Flat Design System, Installer, Ingress & Peer Hardening
 
 - **Unified Flat Surface & Control System (`frontend-rs`):** Migrates the entire Leptos WebAssembly dashboard (all 16 tabs, shell chrome, editor, login, onboarding, OIDC consent, and public shares) from translucent glassmorphism to a deterministic 3-tier flat surface hierarchy backed by 1:1 dark/light `--af-*` semantic tokens, layered `@layer components` CSS, atomic control color/background transitions, WCAG 2.1 AA light/dark contrast parity, passive legacy `localStorage` tolerance for retired `atmosphere`/`card_lift` preferences across all 6 locales, and a permanent Rust CI drift gate (`af-web-ui/tests/design_contract.rs`) documented in `docs/design-system.md`.

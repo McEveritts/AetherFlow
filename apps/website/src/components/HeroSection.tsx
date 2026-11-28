@@ -230,7 +230,7 @@ export function HeroSection({ heroScreenshots }: HeroSectionProps) {
               className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 shadow-[0_0_10px_#34d399]"
               aria-hidden="true"
             />
-            <span className="sm:hidden">v4.0.1 · Rust Control Plane &amp; WASM</span>
+            <span className="sm:hidden">v4.0.2 · Rust Control Plane &amp; WASM</span>
             <span className="hidden sm:inline">{heroContent.versionPill}</span>
             <ArrowRight
               className="h-3.5 w-3.5 shrink-0 text-indigo-300 transition-transform group-hover:translate-x-0.5"

@@ -3,14 +3,14 @@ resolver = "2"
 members = ["crates/af-web-core", "crates/af-web-worker", "crates/af-web-ui", "crates/af-web-app"]
 
 [workspace.package]
-version = "4.0.1"
+version = "4.0.2"
 edition = "2021"
 license = "GPL-3.0-only"
 
 [workspace.dependencies]
-af-models = { path = "../backend-rs/crates/af-models", version = "=4.0.1" }
-af-web-core = { path = "crates/af-web-core", version = "=4.0.1", default-features = false }
-af-web-ui = { path = "crates/af-web-ui", version = "=4.0.1" }
+af-models = { path = "../backend-rs/crates/af-models", version = "=4.0.2" }
+af-web-core = { path = "crates/af-web-core", version = "=4.0.2", default-features = false }
+af-web-ui = { path = "crates/af-web-ui", version = "=4.0.2" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 leptos = { version = "0.8", features = ["csr"] }

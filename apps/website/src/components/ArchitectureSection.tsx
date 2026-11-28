@@ -28,7 +28,7 @@ function FallbackArchitectureSvg() {
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 1160 440"
       role="img"
-      aria-label="AetherFlow v4.0.1 system architecture diagram showing Leptos WASM browser, Apache2 TLS ingress, unprivileged 12-crate Rust aetherflow-api, runner.sock privilege boundary, root aetherflow-runner, and bare-metal systemd workloads"
+      aria-label="AetherFlow v4.0.2 system architecture diagram showing Leptos WASM browser, Apache2 TLS ingress, unprivileged 12-crate Rust aetherflow-api, runner.sock privilege boundary, root aetherflow-runner, and bare-metal systemd workloads"
       className="h-auto w-full"
     >
       <defs>
@@ -187,7 +187,7 @@ export function ArchitectureSection({
           {showSvg && architectureSvgSrc ? (
             <img
               src={architectureSvgSrc}
-              alt="AetherFlow v4.0.1 System Architecture diagram showing the 12-crate Rust control plane, 4-crate Leptos WASM frontend, Apache2 ingress, and zero-sudo runner.sock boundary"
+              alt="AetherFlow v4.0.2 System Architecture diagram showing the 12-crate Rust control plane, 4-crate Leptos WASM frontend, Apache2 ingress, and zero-sudo runner.sock boundary"
               width={1600}
               height={900}
               onError={() => setSvgFailed(true)}

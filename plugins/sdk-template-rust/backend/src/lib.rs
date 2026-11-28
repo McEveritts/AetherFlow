@@ -1,7 +1,7 @@
 //! AetherFlow Rust Plugin SDK Template (`{{PLUGIN_ID}}` / `{{PLUGIN_NAME}}`)
 //!
 //! Operates as a host-managed or standalone companion HTTP service that communicates with
-//! verified AetherFlow v4.0.1 HTTP routes using a short-lived scoped plugin token (`AETHERFLOW_PLUGIN_TOKEN`):
+//! verified AetherFlow v4.0.2 HTTP routes using a short-lived scoped plugin token (`AETHERFLOW_PLUGIN_TOKEN`):
 //! - `GET /api/v1/public/marketplace` (unauthenticated public catalog route)
 //! - `GET /api/v1/auth/system/metrics` (authenticated via `Authorization: Bearer <scoped_plugin_token>`)
 
@@ -27,11 +27,11 @@ pub const PLUGIN_ID: &str = "{{PLUGIN_ID}}";
 /// Placeholder human-readable plugin name replaced during scaffold instantiation.
 pub const PLUGIN_NAME: &str = "{{PLUGIN_NAME}}";
 
-/// Verified AetherFlow v4.0.1 public marketplace endpoint (`backend-rs/crates/af-api/src/routes.rs`).
+/// Verified AetherFlow v4.0.2 public marketplace endpoint (`backend-rs/crates/af-api/src/routes.rs`).
 pub const PATH_PUBLIC_MARKETPLACE: &str = "/api/v1/public/marketplace";
-/// Verified AetherFlow v4.0.1 authenticated system metrics endpoint (`backend-rs/crates/af-api/src/routes.rs`).
+/// Verified AetherFlow v4.0.2 authenticated system metrics endpoint (`backend-rs/crates/af-api/src/routes.rs`).
 pub const PATH_AUTH_SYSTEM_METRICS: &str = "/api/v1/auth/system/metrics";
-/// Verified AetherFlow v4.0.1 public liveness endpoint (`backend-rs/crates/af-api/src/routes.rs`).
+/// Verified AetherFlow v4.0.2 public liveness endpoint (`backend-rs/crates/af-api/src/routes.rs`).
 pub const PATH_PUBLIC_HEALTH: &str = "/health";
 
 /// Default base URL for the local AetherFlow Rust control plane (`aetherflow-api`).
@@ -139,7 +139,7 @@ pub enum ClientError {
     },
 }
 
-/// HTTP client wrapper for verified AetherFlow v4.0.1 control-plane endpoints.
+/// HTTP client wrapper for verified AetherFlow v4.0.2 control-plane endpoints.
 #[derive(Debug, Clone)]
 pub struct AetherFlowClient {
     base_url: String,

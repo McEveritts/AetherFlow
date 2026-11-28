@@ -66,7 +66,7 @@ _af_default_release_tag() {
             fi
         fi
     done
-    printf '%s' "v4.0.1"
+    printf '%s' "v4.0.2"
 }
 
 _validate_prebuilt_tarball() {

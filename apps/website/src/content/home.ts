@@ -17,15 +17,15 @@ export const navLinks = [
   { label: 'Peer Clustering', href: '#peer-clustering' },
   { label: 'Catalog', href: '#catalog' },
   { label: 'Install', href: '#install' },
-  { label: 'v4.0.1 Notes', href: '#whats-new' },
+  { label: 'v4.0.2 Notes', href: '#whats-new' },
 ] as const;
 
 export const heroContent = {
-  versionPill: 'v4.0.1 • Pure Rust Control Plane & Flat WASM UI',
+  versionPill: 'v4.0.2 • Pure Rust Control Plane & Flat WASM UI',
   headlineLead: 'Bare-metal Linux infrastructure,',
   headlineAccent: 'orchestrated in pure Rust.',
   subheadline:
-    'AetherFlow v4.0.1 pairs a 12-crate Rust control plane (Axum + Tokio) with a 4-crate Leptos WebAssembly dashboard built on the Unified Flat Surface & Control System. Provision 77 native systemd applications, pair independent servers over an afpeer0 WireGuard mesh, manage scoped tenant storage in McBrowser, and gate FlowAI operations behind explicit human approval.',
+    'AetherFlow v4.0.2 pairs a 12-crate Rust control plane (Axum + Tokio) with a 4-crate Leptos WebAssembly dashboard built on the Unified Flat Surface & Control System. Provision 77 native systemd applications, pair independent servers over an afpeer0 WireGuard mesh, manage scoped tenant storage in McBrowser, and gate FlowAI operations behind explicit human approval.',
   primaryCta: {
     label: 'Explore on GitHub',
     href: REPO_URL,
@@ -35,7 +35,7 @@ export const heroContent = {
     href: `${DOCS_BLOB_BASE}/docs/quickstart.md`,
   },
   releasesCta: {
-    label: 'v4.0.1 Releases',
+    label: 'v4.0.2 Releases',
     href: RELEASES_URL,
   },
   trustPills: [
@@ -632,28 +632,28 @@ export interface ChangelogHighlight {
 
 export const whatsNewHighlights: ChangelogHighlight[] = [
   {
-    badge: 'v4.0.1 Design System',
-    title: 'Unified Flat Surface & Control System',
+    badge: 'v4.0.2 Security',
+    title: 'Wave 0–2 Privilege-Boundary Hardening',
     summary:
-      'Retired glassmorphism across all 16 dashboard tabs and standalone routes in favor of a 3-tier flat elevation hierarchy with 1:1 dark/light semantic tokens.',
+      'Linear-time secret redaction, zeroized in-memory secrets, bounded subprocesses, and dirfd/fsuid filesystem confinement across the control plane.',
     bullets: [
-      'Zero backdrop-filter, chromatic rims, aurora gradients, grain noise, or card hover lift',
-      'Opaque steady overlays (.af-modal/.af-popover/.af-toast), WebKit Escape & popup launch fixes',
-      'Permanent Rust CI drift gate (design_contract.rs) and WCAG 2.1 AA cross-browser contrast',
+      'UTF-8-safe line-classifier redaction with depth- and byte-budgeted JSON scrubbing',
+      'SecretString/SecretBytes zeroization, 32-byte JWT_SECRET floor, and untrusted forwarding-header stripping',
+      'Process-group-bounded installers, a 31-key release-config allowlist, and root-owned plugin trees',
     ],
-    tone: 'violet',
+    tone: 'amber',
   },
   {
-    badge: 'v4.0.1 Reliability',
-    title: 'Debian 13 Setup, Ingress, Jellyfin & Peers',
+    badge: 'v4.0.2 Transcoding & Topology',
+    title: 'Load-Aware Transcoding & Tiered Topology Map',
     summary:
-      'Hardened fresh installations, Apache2 subdomain routing, Jellyfin seeding, and WireGuard peer endpoint selection.',
+      'Silicon-verified, load- and latency-aware Jellyfin transcode dispatch, plus a three-tier Gateway → Service → Dependency service map.',
     bullets: [
-      'Debian 13 vsftpd 3.0.5 + UFW alignment, OUTTO setup logging, and RFC-1123 hostname guards',
-      'Apache default-ssl hijack prevention and automatic post-install app vhost/TLS sync',
-      'Jellyfin Kestrel startup retries (--force-confmiss) and VPN/virtual NIC deprioritization',
+      'vainfo and hardware Vulkan probing with remote_first / local_first / balanced dispatch policies',
+      'Vulkan Compute HDR tone-mapping by default, Mesa shader cache, and cross-vendor backend adaptation',
+      'Searchable, zoomable topology map with curved labelled links, a Map/List switcher, and a Service inspector',
     ],
-    tone: 'emerald',
+    tone: 'violet',
   },
   {
     badge: 'v4 Core Subsystem',
@@ -730,7 +730,7 @@ export const footerColumns = [
     heading: 'Project & Security',
     links: [
       { label: 'GitHub Repository', href: REPO_URL },
-      { label: 'GitHub Releases (v4.0.1)', href: RELEASES_URL },
+      { label: 'GitHub Releases (v4.0.2)', href: RELEASES_URL },
       { label: 'Changelog', href: `${DOCS_BLOB_BASE}/CHANGELOG.md` },
       { label: 'Security Policy (SECURITY.md)', href: `${DOCS_BLOB_BASE}/SECURITY.md` },
       { label: 'Threat Model', href: `${DOCS_BLOB_BASE}/docs/threat_model.md` },
