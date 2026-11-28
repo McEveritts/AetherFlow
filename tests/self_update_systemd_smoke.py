@@ -67,9 +67,20 @@ def fake_release_worker(root, caller, engine, args):
 
 def smoke(binary, engine):
     caller = "af-update-test-" + uuid.uuid4().hex + ".service"
-    with tempfile.TemporaryDirectory(prefix="af-self-update-test-", dir="/var/tmp") as directory:
+    with tempfile.TemporaryDirectory(prefix="af-self-update-test-", dir="/var/tmp") as directory, \
+            tempfile.TemporaryDirectory(prefix="af-self-update-bin-", dir="/run") as bin_directory:
         root = Path(directory)
-        worker = root / "af"
+        # As root, the runner only executes AETHERFLOW_CLI_BIN / AETHERFLOW_RELEASE_MANAGER_SCRIPT
+        # when the file and every ancestor directory are root-owned and not group/world-writable,
+        # with no sticky-bit exemption (is_trusted_runner_target). The sticky, world-writable
+        # /var/tmp therefore cannot hold the fake worker, so keep it under root-owned /run.
+        bin_dir = Path(bin_directory)
+        for ancestor in (bin_dir, *bin_dir.parents):
+            info = ancestor.lstat()
+            assert info.st_uid == 0 and not stat.S_ISLNK(info.st_mode) and not info.st_mode & 0o022, (
+                f"untrusted fake-worker ancestor {ancestor}"
+            )
+        worker = bin_dir / "af"
         worker.write_text(
             f"#!/bin/sh\nexec /usr/bin/python3 '{Path(__file__).resolve()}' "
             f"--worker '{root}' '{caller}' '{engine}' \"$@\"\n",
