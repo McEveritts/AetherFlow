@@ -225,6 +225,42 @@ youtube_asset() {
 '''
 
 
+RUNUSER_MOCK = r'''#!/usr/bin/python3
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(os.environ.get("TEST_ROOT") or "__TEST_ROOT__")
+env_file = root / ".af-test-env.json"
+snapshot = json.loads(env_file.read_text()) if env_file.exists() else {}
+args = sys.argv[1:]
+if args and args[0] == "--preserve-environment":
+    args = args[1:]
+if "--" in args:
+    inner = args[args.index("--") + 1:]
+else:
+    inner = args[3:]
+with (root / "commands").open("a") as output:
+    output.write("runuser " + " ".join(inner) + "\n")
+while inner and inner[0] == "env":
+    inner = inner[1:]
+    if inner and inner[0] == "-i":
+        inner = inner[1:]
+    while inner and "=" in inner[0] and not inner[0].startswith("-"):
+        inner = inner[1:]
+if inner and inner[0] == "psql":
+    sql = sys.stdin.read()
+    if "SELECT (SELECT count(*) FROM pg_database" in sql:
+        print(os.environ.get("MOCK_PG_REMAINING", snapshot.get("MOCK_PG_REMAINING", "0")))
+    sys.exit(0)
+if inner and inner[0] == "pg_dump":
+    print("fixture SQL backup")
+    sys.exit(0)
+sys.exit(1)
+'''
+
+
 class YouTubeCatalogTest(unittest.TestCase):
     def test_catalog_contracts(self):
         catalog = json.loads((REPO / "config/packages.json").read_text())
@@ -245,6 +281,23 @@ class YouTubeCatalogTest(unittest.TestCase):
                 self.assertNotRegex(script, r"(?m)^\s*(docker|podman)\b")
                 self.assertIn("common.sh", script)
 
+    def test_database_bootstrap_resolves_sbin_runuser_before_scrubbed_exec(self):
+        # Debian/Ubuntu ship runuser only in /usr/sbin (and /sbin). os.execvpe()
+        # searches the *child* env's PATH, so exec'ing "runuser" with the scrubbed
+        # /usr/local/bin:/usr/bin:/bin PATH raised FileNotFoundError on real hosts
+        # and broke every Piped/Invidious database bootstrap.
+        source = (REPO / "packages/youtube-common.sh").read_text()
+        start = source.index("youtube_database() {")
+        # The embedded Python dict also closes with a column-0 "}", so end the slice at
+        # the next top-level shell function instead of the first "\n}\n".
+        next_fn = re.compile(r"(?m)^[A-Za-z_][A-Za-z0-9_]*\(\) \{$").search(source, start + 1)
+        body = source[start:next_fn.start() if next_fn else len(source)]
+        self.assertNotIn("os.execvpe(", body)
+        self.assertIn('shutil.which("runuser", path="/usr/sbin:/sbin:/usr/bin:/bin")', body)
+        self.assertRegex(body, r"os\.execve\(\s*runuser_bin,")
+        self.assertIn('"PATH": "/usr/local/bin:/usr/bin:/bin"', body)
+        self.assertNotRegex(body, r'\["runuser"[^\]]*AF_YOUTUBE_DB_PASSWORD')
+
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "Requires Linux Bash")
 class YouTubeLifecycleTest(unittest.TestCase):
@@ -262,6 +315,9 @@ class YouTubeLifecycleTest(unittest.TestCase):
             executable = self.root / "mock-bin" / command
             executable.write_text("#!/bin/sh\nexit 99\n")
             executable.chmod(0o755)
+        runuser_exec = self.root / "mock-bin/runuser"
+        runuser_exec.write_text(RUNUSER_MOCK.replace("__TEST_ROOT__", str(self.root)))
+        runuser_exec.chmod(0o755)
         self.command_path = os.pathsep.join((str(self.root / "mock-bin"), str(Path(sys.executable).parent), os.environ.get("PATH", "")))
         helpers = common_functions("safe_config_python", "validate_config_paths", "write_config_file", "set_config_value", "node_build", "write_app_version", "systemd_unit_inactive", "stop_systemd_unit", "purge_systemd_unit", "safe_rm_rf", "backup_postgresql_database", "restore_postgresql_database")
         (self.root / "common.sh").write_text(COMMON + self.rewrite(helpers))
@@ -286,11 +342,17 @@ class YouTubeLifecycleTest(unittest.TestCase):
         source = source.replace("youtube_init " + app, 'source "$TEST_ROOT/overrides.sh"\nyoutube_init ' + app)
         path = self.root / "script.sh"
         path.write_text(source)
-        return subprocess.run(["bash", str(path)], text=True, capture_output=True,
-                              env=dict(os.environ, TEST_ROOT=str(self.root),
-                                       AF_PROC_ROOT=str(self.root / "proc"),
-                                       PATH=self.command_path,
-                                       **environment))
+        run_env = dict(
+            os.environ,
+            TEST_ROOT=str(self.root),
+            AF_PROC_ROOT=str(self.root / "proc"),
+            PATH=self.command_path,
+            **environment,
+        )
+        (self.root / ".af-test-env.json").write_text(
+            json.dumps({k: v for k, v in run_env.items() if k.startswith(("TEST_", "MOCK_"))})
+        )
+        return subprocess.run(["bash", str(path)], text=True, capture_output=True, env=run_env)
 
     def test_private_package_commands_preserve_apt_rollback(self):
         packages = self.root / "apt-packages.json"

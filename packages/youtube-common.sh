@@ -433,17 +433,22 @@ youtube_database() {
     DB_PASSWORD="$(youtube_secret database-password)"
     systemctl enable --now postgresql.service
     (
-    # Scrub parent environment via os.execvpe without placing DB_PASSWORD on process argv.
+    # Scrub parent environment via os.execve without placing DB_PASSWORD on process argv.
     AF_YOUTUBE_DB_PASSWORD="$DB_PASSWORD" af_logged python3 -I -c '
-import os, sys
+import os, shutil, sys
 app_name = sys.argv[1]
+runuser_bin = (
+    shutil.which("runuser")
+    or shutil.which("runuser", path="/usr/sbin:/sbin:/usr/bin:/bin")
+    or "/usr/sbin/runuser"
+)
 clean_env = {
     "PATH": "/usr/local/bin:/usr/bin:/bin",
     "LANG": "C.UTF-8",
     "AF_YOUTUBE_DB_PASSWORD": os.environ["AF_YOUTUBE_DB_PASSWORD"],
 }
-os.execvpe(
-    "runuser",
+os.execve(
+    runuser_bin,
     ["runuser", "-u", "postgres", "--", "psql", "-v", "ON_ERROR_STOP=1", f"--set=app={app_name}"],
     clean_env,
 )
