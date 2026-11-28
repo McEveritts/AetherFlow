@@ -4811,7 +4811,19 @@ async fn local_first_and_balanced_dispatch_policies_overflow_and_load_balance() 
     );
 
     let worker_sock = make_socket_subdir(&tmp.path, "w").join("w.sock");
-    let (w_stop, w_task) = spawn_real_worker(worker_sock.clone(), fake_ffmpeg.clone(), 8);
+    // Pin the remote worker's DRM render node to the AMD node its advertised capabilities claim,
+    // so VA-API render-node selection does not depend on the host GPU (CI runners expose neither
+    // `/dev/dri` nor `/sys/class/drm`).
+    let (w_stop, w_task) = spawn_real_worker_with_config(
+        worker_sock.clone(),
+        fake_ffmpeg.clone(),
+        8,
+        af_transcode::BackendAdaptMode::Off,
+        Some(vec![af_hardware::RenderNode {
+            path: PathBuf::from("/dev/dri/renderD128"),
+            vendor_id: Some("0x1002".to_string()),
+        }]),
+    );
     rt_b.transcode_state.set_worker_socket_override(worker_sock);
 
     let mut local_caps = sample_caps(
