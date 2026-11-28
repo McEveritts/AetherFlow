@@ -1299,3 +1299,482 @@ async fn rclone_api_lifecycle_port_reservation_and_secondary_port_coordination()
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_runner_rollback_restores_apache_vhost_backups_and_symlinks() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let (root, connection) = lifecycle_status_fixture();
+    std::env::remove_var("AETHERFLOW_CONFIG_ROOT");
+    std::env::set_var("AETHERFLOW_HOSTS_FILE", root.join("etc/hosts"));
+    std::env::set_var("AETHERFLOW_LAN_IP", "127.0.0.1");
+    std::env::set_var(
+        "AETHERFLOW_RUNNER_SOCK",
+        short_test_socket_path(&format!(
+            "afr-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        )),
+    );
+    af_db::init_db().unwrap();
+
+    let hosts_file = root.join("etc/hosts");
+    std::fs::create_dir_all(hosts_file.parent().unwrap()).unwrap();
+    std::fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+
+    let sites_avail = root.join("etc/apache2/sites-available");
+    let sites_en = root.join("etc/apache2/sites-enabled");
+    std::fs::create_dir_all(&sites_avail).unwrap();
+    std::fs::create_dir_all(&sites_en).unwrap();
+
+    let app_avail = sites_avail.join("aetherflow-app-sonarr.conf");
+    let app_en = sites_en.join("aetherflow-app-sonarr.conf");
+    let ext_avail = sites_avail.join("aetherflow-ext-sonarr.conf");
+    let ext_en = sites_en.join("aetherflow-ext-sonarr.conf");
+
+    let original_app_vhost = "# original internal sonarr vhost\n<VirtualHost *:80>\nServerName sonarr.aether.local\nProxyPass / http://127.0.0.1:18989/\n</VirtualHost>\n";
+    let original_ext_vhost = "# original external sonarr vhost\n<VirtualHost *:80>\nServerName sonarr.example.com\nProxyPass / http://127.0.0.1:18989/\n</VirtualHost>\n";
+    std::fs::write(&app_avail, original_app_vhost).unwrap();
+    std::fs::write(&ext_avail, original_ext_vhost).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("../sites-available/aetherflow-app-sonarr.conf", &app_en)
+            .unwrap();
+        std::os::unix::fs::symlink("../sites-available/aetherflow-ext-sonarr.conf", &ext_en)
+            .unwrap();
+    }
+
+    let lock_file = root.join("install/.sonarr.lock");
+    std::fs::create_dir_all(lock_file.parent().unwrap()).unwrap();
+    std::fs::write(&lock_file, b"installed\n").unwrap();
+
+    // Persisted ingress has port 28989 and external_access_enabled = false so the blueprint apply
+    // stage rewrites aetherflow-app-sonarr.conf to 28989 and deletes aetherflow-ext-sonarr.conf
+    // (including its sites-enabled symlink), before the trigger forces post-certification rollback.
+    let saved_ingress = AppIngressConfig {
+        app_name: "sonarr".into(),
+        public_domain: "sonarr.example.com".into(),
+        external_access_enabled: false,
+        tls_enabled: false,
+        listen_port: 28989,
+        ..Default::default()
+    };
+    af_db::set_app_ingress_config(&saved_ingress).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_sonarr_vhost_rollback_ingress_update \
+             AFTER UPDATE ON app_ingress_configs \
+             WHEN NEW.app_name = 'sonarr' \
+             BEGIN SELECT RAISE(ABORT, 'fixture rejected sonarr ingress commit'); END;",
+        )
+        .unwrap();
+
+    let pkg = af_models::Package {
+        name: "sonarr".into(),
+        label: "Sonarr".into(),
+        service_name: "sonarr".into(),
+        lock_file: "/install/.sonarr.lock".into(),
+        default_port: 8989,
+        status: "installed".into(),
+        ..Default::default()
+    };
+    let catalog = root.join("catalog.json");
+    let automation = root.join("automation.json");
+    std::fs::write(&catalog, serde_json::to_vec(&vec![pkg]).unwrap()).unwrap();
+    std::fs::write(&automation, "{}").unwrap();
+    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+
+    let install_scripts = root.join("packages/package/install");
+    std::fs::create_dir_all(&install_scripts).unwrap();
+    let script = install_scripts.join("installpackage-sonarr");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let previous_directory = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+
+    let admin = progress_test_user("admin", None);
+    let response = dispatch_package_lifecycle_with_target(
+        "sonarr".into(),
+        "reinstall",
+        "installing",
+        false,
+        None,
+        admin,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(10));
+        loop {
+            if let Some(outcome) = af_services::get_package_job_outcome("sonarr") {
+                if outcome.job_id == job_id {
+                    let _finished = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
+                    break outcome;
+                }
+            }
+            interval.tick().await;
+        }
+    })
+    .await
+    .expect("reinstall job must settle");
+
+    assert_eq!(
+        outcome.status, "failed",
+        "expected reinstall to fail on ingress commit trigger, got: {:?}",
+        outcome
+    );
+    assert_eq!(
+        outcome.failed_stage.as_deref(),
+        Some("configuration"),
+        "expected configuration failure stage, got: {:?}",
+        outcome
+    );
+    assert_eq!(
+        outcome.recovery_state.as_deref(),
+        Some(af_runner::af_release::lifecycle::RECOVERY_STATE_PRIOR_VERIFIED),
+        "expected verified prior-state recovery after vhost rollback, got: {:?}",
+        outcome
+    );
+    // `sync_local_dns_domains` runs immediately after `sync_apache_app_vhost_with_tls` inside
+    // `apply_lifecycle_blueprint_app_config`, proving the vhosts were mutated before the trigger
+    // aborted ingress persistence and triggered rollback.
+    assert!(
+        std::fs::read_to_string(&hosts_file)
+            .unwrap()
+            .contains("sonarr.aether.local"),
+        "expected blueprint apply stage to have completed vhost+DNS mutation before ingress commit failed"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&app_avail).unwrap(),
+        original_app_vhost,
+        "non-runner rollback must restore sites-available internal vhost content"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ext_avail).unwrap(),
+        original_ext_vhost,
+        "non-runner rollback must restore sites-available external vhost content"
+    );
+    #[cfg(unix)]
+    {
+        assert!(
+            std::fs::symlink_metadata(&app_en)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "internal sites-enabled symlink must be restored"
+        );
+        assert_eq!(
+            std::fs::read_link(&app_en).unwrap(),
+            std::path::PathBuf::from("../sites-available/aetherflow-app-sonarr.conf")
+        );
+        assert!(
+            std::fs::symlink_metadata(&ext_en)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "external sites-enabled symlink must be restored by vhost_backups rollback"
+        );
+        assert_eq!(
+            std::fs::read_link(&ext_en).unwrap(),
+            std::path::PathBuf::from("../sites-available/aetherflow-ext-sonarr.conf")
+        );
+    }
+
+    drop(connection);
+    std::env::set_current_dir(previous_directory).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn package_remove_cleans_managed_apache_vhosts_under_fs_root() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let (root, connection) = lifecycle_status_fixture();
+    std::env::remove_var("AETHERFLOW_CONFIG_ROOT");
+    std::env::set_var("AETHERFLOW_HOSTS_FILE", root.join("etc/hosts"));
+    std::env::set_var("AETHERFLOW_LAN_IP", "127.0.0.1");
+    std::env::set_var(
+        "AETHERFLOW_RUNNER_SOCK",
+        short_test_socket_path(&format!(
+            "afr-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        )),
+    );
+    af_db::init_db().unwrap();
+
+    let hosts_file = root.join("etc/hosts");
+    std::fs::create_dir_all(hosts_file.parent().unwrap()).unwrap();
+    std::fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+
+    let sites_avail = root.join("etc/apache2/sites-available");
+    let sites_en = root.join("etc/apache2/sites-enabled");
+    std::fs::create_dir_all(&sites_avail).unwrap();
+    std::fs::create_dir_all(&sites_en).unwrap();
+
+    let sonarr_app_avail = sites_avail.join("aetherflow-app-sonarr.conf");
+    let sonarr_app_en = sites_en.join("aetherflow-app-sonarr.conf");
+    let sonarr_ext_avail = sites_avail.join("aetherflow-ext-sonarr.conf");
+    let sonarr_ext_en = sites_en.join("aetherflow-ext-sonarr.conf");
+    let sonarr_ssl_en = sites_en.join("aetherflow-ext-sonarr-le-ssl.conf");
+    let legacy_avail = sites_avail.join("sonarr.conf");
+    let radarr_app_avail = sites_avail.join("aetherflow-app-radarr.conf");
+    let radarr_app_en = sites_en.join("aetherflow-app-radarr.conf");
+
+    std::fs::write(&sonarr_app_avail, "# managed sonarr internal\n").unwrap();
+    std::fs::write(&sonarr_ext_avail, "# managed sonarr external\n").unwrap();
+    std::fs::write(&legacy_avail, "# legacy sonarr\n").unwrap();
+    std::fs::write(&radarr_app_avail, "# managed radarr internal\n").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-app-sonarr.conf",
+            &sonarr_app_en,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-ext-sonarr.conf",
+            &sonarr_ext_en,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-ext-sonarr-le-ssl.conf",
+            &sonarr_ssl_en,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-app-radarr.conf",
+            &radarr_app_en,
+        )
+        .unwrap();
+    }
+
+    let lock_file = root.join("install/.sonarr.lock");
+    std::fs::create_dir_all(lock_file.parent().unwrap()).unwrap();
+    std::fs::write(&lock_file, b"installed\n").unwrap();
+
+    let pkg = af_models::Package {
+        name: "sonarr".into(),
+        label: "Sonarr".into(),
+        service_name: "sonarr".into(),
+        lock_file: "/install/.sonarr.lock".into(),
+        default_port: 8989,
+        status: "installed".into(),
+        ..Default::default()
+    };
+    let catalog = root.join("catalog.json");
+    let automation = root.join("automation.json");
+    std::fs::write(&catalog, serde_json::to_vec(&vec![pkg]).unwrap()).unwrap();
+    std::fs::write(&automation, "{}").unwrap();
+    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+
+    let remove_scripts = root.join("packages/package/remove");
+    std::fs::create_dir_all(&remove_scripts).unwrap();
+    std::fs::write(
+        remove_scripts.join("removepackage-sonarr"),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .unwrap();
+
+    let previous_directory = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+
+    let admin = progress_test_user("admin", None);
+    let response = dispatch_package_lifecycle_with_target(
+        "sonarr".into(),
+        "remove",
+        "uninstalling",
+        false,
+        None,
+        admin,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(10));
+        loop {
+            if let Some(outcome) = af_services::get_package_job_outcome("sonarr") {
+                if outcome.job_id == job_id {
+                    let _finished = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
+                    break outcome;
+                }
+            }
+            interval.tick().await;
+        }
+    })
+    .await
+    .expect("remove job must settle");
+
+    assert_eq!(
+        outcome.status, "completed",
+        "expected package remove to succeed, got: {:?}",
+        outcome
+    );
+
+    for removed in [
+        &sonarr_app_avail,
+        &sonarr_app_en,
+        &sonarr_ext_avail,
+        &sonarr_ext_en,
+        &sonarr_ssl_en,
+    ] {
+        assert!(
+            matches!(
+                std::fs::symlink_metadata(removed),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound
+            ),
+            "expected {} to be removed",
+            removed.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&legacy_avail).unwrap(),
+        "# legacy sonarr\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&radarr_app_avail).unwrap(),
+        "# managed radarr internal\n"
+    );
+    assert!(std::fs::symlink_metadata(&radarr_app_en).is_ok());
+
+    drop(connection);
+    std::env::set_current_dir(previous_directory).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn package_remove_reports_vhost_cleanup_failure_stage_and_preserves_victim() {
+    if crate::plugins::tests::run_plugin_test_in_subprocess() {
+        return;
+    }
+    let (root, connection) = lifecycle_status_fixture();
+    std::env::remove_var("AETHERFLOW_CONFIG_ROOT");
+    std::env::set_var("AETHERFLOW_HOSTS_FILE", root.join("etc/hosts"));
+    std::env::set_var("AETHERFLOW_LAN_IP", "127.0.0.1");
+    std::env::set_var(
+        "AETHERFLOW_RUNNER_SOCK",
+        short_test_socket_path(&format!(
+            "afr-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        )),
+    );
+    af_db::init_db().unwrap();
+
+    let hosts_file = root.join("etc/hosts");
+    std::fs::create_dir_all(hosts_file.parent().unwrap()).unwrap();
+    std::fs::write(&hosts_file, "127.0.0.1 localhost\n").unwrap();
+
+    let sites_avail = root.join("etc/apache2/sites-available");
+    let sites_en = root.join("etc/apache2/sites-enabled");
+    std::fs::create_dir_all(&sites_avail).unwrap();
+    std::fs::create_dir_all(&sites_en).unwrap();
+
+    // Plant a symlinked managed vhost in sites-available so remove_apache_app_vhost fails closed.
+    let victim = root.join("victim.conf");
+    std::fs::write(&victim, "keep-victim").unwrap();
+    std::os::unix::fs::symlink(&victim, sites_avail.join("aetherflow-app-sonarr.conf")).unwrap();
+
+    let lock_file = root.join("install/.sonarr.lock");
+    std::fs::create_dir_all(lock_file.parent().unwrap()).unwrap();
+    std::fs::write(&lock_file, b"installed\n").unwrap();
+
+    let pkg = af_models::Package {
+        name: "sonarr".into(),
+        label: "Sonarr".into(),
+        service_name: "sonarr".into(),
+        lock_file: "/install/.sonarr.lock".into(),
+        default_port: 8989,
+        status: "installed".into(),
+        ..Default::default()
+    };
+    let catalog = root.join("catalog.json");
+    let automation = root.join("automation.json");
+    std::fs::write(&catalog, serde_json::to_vec(&vec![pkg]).unwrap()).unwrap();
+    std::fs::write(&automation, "{}").unwrap();
+    std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+    std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+
+    let remove_scripts = root.join("packages/package/remove");
+    std::fs::create_dir_all(&remove_scripts).unwrap();
+    std::fs::write(
+        remove_scripts.join("removepackage-sonarr"),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .unwrap();
+
+    let previous_directory = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+
+    let admin = progress_test_user("admin", None);
+    let response = dispatch_package_lifecycle_with_target(
+        "sonarr".into(),
+        "remove",
+        "uninstalling",
+        false,
+        None,
+        admin,
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(10));
+        loop {
+            if let Some(outcome) = af_services::get_package_job_outcome("sonarr") {
+                if outcome.job_id == job_id {
+                    let _finished = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
+                    break outcome;
+                }
+            }
+            interval.tick().await;
+        }
+    })
+    .await
+    .expect("remove job must settle");
+
+    assert_eq!(outcome.status, "failed", "{:?}", outcome);
+    assert_eq!(
+        outcome.failed_stage.as_deref(),
+        Some("vhost_cleanup"),
+        "{:?}",
+        outcome
+    );
+    assert!(
+        outcome
+            .sanitized_summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("[STAGE:vhost_cleanup]"),
+        "expected [STAGE:vhost_cleanup] in sanitized_summary, got: {:?}",
+        outcome
+    );
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep-victim");
+
+    drop(connection);
+    std::env::set_current_dir(previous_directory).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}

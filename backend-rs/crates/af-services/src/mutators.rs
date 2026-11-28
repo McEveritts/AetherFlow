@@ -259,7 +259,8 @@ use network_vhost::startup_app_ingress_config;
 use network_vhost::sync_apache_app_vhost_with_tls;
 pub use network_vhost::{
     detect_lan_ip, detect_lan_ip_strict, provision_all_installed_app_subdomains,
-    reconcile_local_dns_domains, remove_dns_provider_domain, run_privileged_hosts_command,
+    reconcile_local_dns_domains, remove_apache_app_vhost, remove_apache_app_vhost_async,
+    remove_dns_provider_domain, run_privileged_hosts_command,
     run_privileged_hosts_command_with_provider, sync_apache_app_vhost, sync_apache_app_vhost_async,
     sync_local_dns_domains, sync_network_dns_providers, trigger_apache_cert_sync,
     update_dnsmasq_conf, update_dnsmasq_config, update_pihole_custom_list,

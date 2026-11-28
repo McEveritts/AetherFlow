@@ -209,8 +209,126 @@ CURRENT_SAN_DNS="$(openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName 2>/d
 cert_has_san() {
     grep -Fxiq -- "$1" <<< "$CURRENT_SAN_DNS"
 }
+
+trigger_runner_tls_resync() {
+    if [[ "${AF_CERTBOT_SYNC_FROM_RUNNER:-0}" == "1" ]]; then
+        return 0
+    fi
+    local runner_sock="${AETHERFLOW_RUNNER_SOCK:-/run/aetherflow/runner.sock}"
+    local runner_sock_dir
+    runner_sock_dir="$(dirname -- "$runner_sock")"
+    local apache_dir="${AETHERFLOW_APACHE_DIR:-/etc/apache2}"
+    local apache_enabled_dir="${apache_dir}/sites-enabled"
+    local apache_avail_dir="${apache_dir}/sites-available"
+    if [[ ! -e "$runner_sock" && ! -L "$runner_sock" ]]; then
+        return 0
+    fi
+    local caller_uid="${EUID:-$(id -u)}"
+    local dir_uid sock_uid
+    dir_uid="$(stat -c '%u' "$runner_sock_dir" 2>/dev/null || echo -1)"
+    sock_uid="$(stat -c '%u' "$runner_sock" 2>/dev/null || echo -1)"
+    local owner_ok=1
+    if [[ "$caller_uid" -eq 0 ]]; then
+        [[ "$dir_uid" == "0" && "$sock_uid" == "0" ]] || owner_ok=0
+    else
+        [[ ("$dir_uid" == "0" || "$dir_uid" == "$caller_uid") && ("$sock_uid" == "0" || "$sock_uid" == "$caller_uid") ]] || owner_ok=0
+    fi
+    if [[ -L "$runner_sock_dir" || ! -d "$runner_sock_dir" || -L "$runner_sock" || ! -S "$runner_sock" || "$owner_ok" -ne 1 ]] ||
+        (( (8#$(stat -c '%a' "$runner_sock_dir" 2>/dev/null || echo 777) & 0022) != 0 )) ||
+        (( (8#$(stat -c '%a' "$runner_sock" 2>/dev/null || echo 777) & 0002) != 0 )); then
+        echo "[af-certbot-sync] Refusing unsafe runner socket path: ${runner_sock}" >&2
+        return 0
+    fi
+    local needs_resync=0
+    if [[ "${NEED_EXPAND:-0}" -eq 1 ]]; then
+        needs_resync=1
+    elif [[ ! -L "$apache_dir" && -d "$apache_dir" && ! -L "$apache_enabled_dir" && -d "$apache_enabled_dir" ]]; then
+        local conf conf_name conf_target
+        for conf in "${apache_enabled_dir}"/aetherflow-ext-*.conf; do
+            [[ -e "$conf" || -L "$conf" ]] || continue
+            if [[ -L "$conf" ]]; then
+                conf_name="$(basename -- "$conf")"
+                conf_target=""
+                if command -v readlink >/dev/null 2>&1; then
+                    conf_target="$(readlink -- "$conf" 2>/dev/null || true)"
+                elif [[ -x /usr/bin/readlink ]]; then
+                    conf_target="$(/usr/bin/readlink -- "$conf" 2>/dev/null || true)"
+                elif [[ -x /bin/readlink ]]; then
+                    conf_target="$(/bin/readlink -- "$conf" 2>/dev/null || true)"
+                fi
+                if [[ "$conf_target" != "../sites-available/${conf_name}" && "$conf_target" != "${apache_avail_dir}/${conf_name}" ]]; then
+                    continue
+                fi
+                [[ ! -L "${apache_avail_dir}/${conf_name}" && -f "${apache_avail_dir}/${conf_name}" ]] || continue
+                if grep -Fq "TLS certificate provisioning pending" -- "${apache_avail_dir}/${conf_name}" 2>/dev/null; then
+                    needs_resync=1
+                    break
+                fi
+            elif [[ -f "$conf" ]]; then
+                if grep -Fq "TLS certificate provisioning pending" -- "$conf" 2>/dev/null; then
+                    needs_resync=1
+                    break
+                fi
+            fi
+        done
+    fi
+    if [[ "$needs_resync" -ne 1 ]]; then
+        return 0
+    fi
+    local resync_ok=0
+    if command -v curl >/dev/null 2>&1; then
+        if curl --silent --show-error --fail --max-time 60 --noproxy '*' \
+            --unix-socket "$runner_sock" \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{}' \
+            http://localhost/v1/ingress/resync-tls >/dev/null; then
+            resync_ok=1
+        fi
+    elif command -v python3 >/dev/null 2>&1; then
+        if python3 - "$runner_sock" <<'PYEOF'
+import os, socket, struct, sys
+sock_path = sys.argv[1]
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    s.settimeout(60.0)
+    s.connect(sock_path)
+    if hasattr(socket, "SO_PEERCRED"):
+        _pid, peer_uid, _gid = struct.unpack("iii", s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        euid = os.geteuid()
+        allowed_uids = (0,) if euid == 0 else (0, euid)
+        if peer_uid not in allowed_uids:
+            sys.exit(1)
+    s.sendall(
+        b"POST /v1/ingress/resync-tls HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 2\r\n"
+        b"Connection: close\r\n\r\n{}"
+    )
+    data = b""
+    while len(data) < 4096:
+        chunk = s.recv(1024)
+        if not chunk:
+            break
+        data += chunk
+status_line = data.split(b"\r\n", 1)[0].decode("ascii", "replace")
+parts = status_line.split(" ", 2)
+if len(parts) < 2 or not parts[1].isdigit() or not (200 <= int(parts[1]) < 300):
+    sys.exit(1)
+PYEOF
+        then
+            resync_ok=1
+        fi
+    fi
+    if [[ "$resync_ok" -ne 1 ]]; then
+        echo "[af-certbot-sync] Warning: failed to resync pending TLS Apache vhosts via runner" >&2
+    fi
+    return 0
+}
+
 if cert_has_san "*.${BASE_DOMAIN}"; then
     # Wildcard certificate already covers all subdomains
+    trigger_runner_tls_resync
     exit 0
 fi
 
@@ -269,3 +387,5 @@ if [[ "$NEED_EXPAND" -eq 1 ]]; then
     certbot certonly --webroot -w "${WEBROOT}" --cert-name "$BASE_DOMAIN" --expand --non-interactive --agree-tos "${CERT_ARGS[@]}"
     systemctl reload apache2
 fi
+
+trigger_runner_tls_resync

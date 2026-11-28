@@ -1497,7 +1497,6 @@ async fn legacy_stream_restores_sandbox_journal_on_failure_and_commits_on_succes
     drop((owner, conn));
     fs::remove_dir_all(root).unwrap();
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn filebot_post_sandbox_restart_waits_for_delayed_listener_and_consumes_common_sh_record() {
     use futures::StreamExt;
@@ -1681,7 +1680,6 @@ async fn filebot_post_sandbox_restart_waits_for_delayed_listener_and_consumes_co
     drop((owner, conn));
     fs::remove_dir_all(root).unwrap();
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn filebot_post_sandbox_restart_fails_clearly_when_service_dies_and_restores_only_dropin() {
     use futures::StreamExt;
@@ -1844,7 +1842,6 @@ async fn filebot_post_sandbox_restart_fails_clearly_when_service_dies_and_restor
     drop((owner, conn));
     fs::remove_dir_all(root).unwrap();
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn filebot_post_sandbox_restart_fails_clearly_when_listener_never_becomes_ready() {
     use futures::StreamExt;
@@ -1998,7 +1995,6 @@ async fn filebot_post_sandbox_restart_fails_clearly_when_listener_never_becomes_
     drop((owner, conn));
     fs::remove_dir_all(root).unwrap();
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_old_script_without_readiness_record_does_not_infer_http_from_port() {
     use futures::StreamExt;
@@ -2103,5 +2099,514 @@ async fn legacy_old_script_without_readiness_record_does_not_infer_http_from_por
     );
 
     drop((owner, conn));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coordinated_remove_cleans_managed_apache_vhosts_and_preserves_legacy_other_and_retained_ingress(
+) {
+    use futures::StreamExt;
+    let test = "lifecycle_tests::coordinated_remove_cleans_managed_apache_vhosts_and_preserves_legacy_other_and_retained_ingress";
+    if subprocess(test) {
+        return;
+    }
+
+    let root = fixture_root();
+    let config_dir = root.join("config");
+    let remove_scripts = root.join("packages/package/remove");
+    let fake_bin = root.join("fake-bin");
+    let install_dir = root.join("install");
+    let sites_avail = root.join("etc/apache2/sites-available");
+    let sites_en = root.join("etc/apache2/sites-enabled");
+    for dir in [
+        &config_dir,
+        &remove_scripts,
+        &fake_bin,
+        &install_dir,
+        &sites_avail,
+        &sites_en,
+    ] {
+        fs::create_dir_all(dir).unwrap();
+    }
+
+    let pkgs_cfg = config_dir.join("packages.json");
+    let auto_cfg = config_dir.join("package_automation.json");
+    fs::write(
+        &pkgs_cfg,
+        r#"[{"name":"fixture","label":"Fixture","description":"Remove vhost cleanup fixture","lock_file":"/install/.fixture.lock","category":"Media","service_type":"systemd","service_name":"fixture","default_port":18384}]"#,
+    )
+    .unwrap();
+    fs::write(&auto_cfg, r#"{}"#).unwrap();
+
+    executable(
+        &fake_bin.join("systemctl"),
+        "#!/bin/bash\ncase \"${1:-}\" in\n  is-active) printf 'inactive\\n'; exit 3 ;;\n  show) printf 'inactive\\n'; exit 0 ;;\nesac\nexit 0\n",
+    );
+    executable(
+        &remove_scripts.join("removepackage-fixture"),
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nrm -f {:?}\necho removed-fixture\n",
+            install_dir.join(".fixture.lock")
+        ),
+    );
+    fs::write(install_dir.join(".fixture.lock"), "installed\n").unwrap();
+
+    // Managed vhosts for fixture (regular files in sites-available + symlinks in sites-enabled)
+    let managed_names = [
+        "aetherflow-app-fixture.conf",
+        "aetherflow-ext-fixture.conf",
+        "aetherflow-ext-fixture-le-ssl.conf",
+    ];
+    for name in managed_names {
+        fs::write(
+            sites_avail.join(name),
+            format!("<VirtualHost *:80>\n# {name}\n</VirtualHost>\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(format!("../sites-available/{name}"), sites_en.join(name))
+            .unwrap();
+    }
+
+    // Legacy <app>.conf (must be preserved)
+    let legacy_avail = sites_avail.join("fixture.conf");
+    let legacy_en = sites_en.join("fixture.conf");
+    fs::write(&legacy_avail, "# legacy fixture vhost\n").unwrap();
+    std::os::unix::fs::symlink("../sites-available/fixture.conf", &legacy_en).unwrap();
+
+    // Another app's managed vhosts (must be preserved)
+    let other_avail = sites_avail.join("aetherflow-app-otherapp.conf");
+    let other_en = sites_en.join("aetherflow-app-otherapp.conf");
+    let other_ext_avail = sites_avail.join("aetherflow-ext-otherapp.conf");
+    let other_ext_en = sites_en.join("aetherflow-ext-otherapp.conf");
+    fs::write(&other_avail, "# otherapp internal\n").unwrap();
+    fs::write(&other_ext_avail, "# otherapp external\n").unwrap();
+    std::os::unix::fs::symlink("../sites-available/aetherflow-app-otherapp.conf", &other_en)
+        .unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-otherapp.conf",
+        &other_ext_en,
+    )
+    .unwrap();
+
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+            CREATE TABLE settings(id INTEGER PRIMARY KEY, base_domain TEXT);
+            INSERT INTO settings VALUES(1, 'example.test');
+            CREATE TABLE app_updates(package_name TEXT PRIMARY KEY);
+            INSERT INTO app_updates VALUES('fixture');
+            CREATE TABLE app_ingress_configs(app_name TEXT PRIMARY KEY, public_domain TEXT,
+                external_access_enabled BOOLEAN, listen_port INTEGER, tls_enabled BOOLEAN,
+                created_at TEXT, updated_at TEXT);
+            INSERT INTO app_ingress_configs
+                VALUES('fixture', 'fixture.example.test', 1, 18384, 1, 'now', 'now');",
+        )
+        .unwrap();
+        af_release::lifecycle::initialize_schema(&conn).unwrap();
+    }
+
+    let orig_path = env::var("PATH").unwrap_or_default();
+    env::set_current_dir(&root).unwrap();
+    env::set_var("PATH", format!("{}:{orig_path}", fake_bin.display()));
+    env::set_var("AETHERFLOW_SYSTEMCTL_BIN", fake_bin.join("systemctl"));
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", &pkgs_cfg);
+    env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &auto_cfg);
+    env::set_var("AETHERFLOW_FORCE_BASH_PACKAGES", "1");
+    env::remove_var("AETHERFLOW_APACHE_DIR");
+
+    let req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "remove".into(),
+        script_name: "removepackage-fixture".into(),
+        delete_data: false,
+        ..Default::default()
+    };
+    let output: String = tokio::time::timeout(
+        Duration::from_secs(10),
+        package_lifecycle::execute_coordinated_package_stream(req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+    assert!(!output.contains("__RUNNER_EXIT_ERROR__:"), "{output}");
+    let receipt_line = output
+        .lines()
+        .find_map(|line| line.strip_prefix(package_lifecycle::RECEIPT_MARKER))
+        .unwrap_or_else(|| panic!("expected lifecycle receipt marker in output: {output}"));
+    let receipt: package_lifecycle::LifecycleReceipt = serde_json::from_str(receipt_line).unwrap();
+    assert_eq!(receipt.status, "completed", "{output}");
+
+    // All 6 managed vhost paths for fixture must be removed
+    for name in managed_names {
+        assert!(
+            fs::symlink_metadata(sites_avail.join(name)).is_err(),
+            "sites-available/{name} must be removed on package remove"
+        );
+        assert!(
+            fs::symlink_metadata(sites_en.join(name)).is_err(),
+            "sites-enabled/{name} must be removed on package remove"
+        );
+    }
+
+    // Legacy <app>.conf and otherapp vhosts must be preserved untouched
+    assert_eq!(
+        fs::read_to_string(&legacy_avail).unwrap(),
+        "# legacy fixture vhost\n"
+    );
+    assert_eq!(
+        fs::read_link(&legacy_en).unwrap(),
+        PathBuf::from("../sites-available/fixture.conf")
+    );
+    assert_eq!(
+        fs::read_to_string(&other_avail).unwrap(),
+        "# otherapp internal\n"
+    );
+    assert_eq!(
+        fs::read_link(&other_en).unwrap(),
+        PathBuf::from("../sites-available/aetherflow-app-otherapp.conf")
+    );
+    assert_eq!(
+        fs::read_to_string(&other_ext_avail).unwrap(),
+        "# otherapp external\n"
+    );
+    assert_eq!(
+        fs::read_link(&other_ext_en).unwrap(),
+        PathBuf::from("../sites-available/aetherflow-ext-otherapp.conf")
+    );
+
+    // Non-purge remove must move ingress to retained_app_ingress_configs
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let active_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM app_ingress_configs WHERE app_name='fixture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_count, 0, "app_ingress_configs row must be cleared");
+        let retained_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM retained_app_ingress_configs WHERE app_name='fixture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            retained_count, 1,
+            "retained_app_ingress_configs must retain fixture ingress on non-purge remove"
+        );
+        let retained = af_db::load_lifecycle_ingress(&conn, "fixture")
+            .unwrap()
+            .expect("retained fixture ingress must load");
+        assert_eq!(retained.public_domain, "fixture.example.test");
+        assert_eq!(retained.listen_port, 18384);
+        assert!(retained.tls_enabled);
+    }
+
+    // Dangling managed symlinks in sites-enabled (without sites-available targets) must also be removed
+    let dangling_app = sites_en.join("aetherflow-app-fixture.conf");
+    let dangling_ssl = sites_en.join("aetherflow-ext-fixture-le-ssl.conf");
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-app-fixture.conf",
+        &dangling_app,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-fixture-le-ssl.conf",
+        &dangling_ssl,
+    )
+    .unwrap();
+    assert!(fs::symlink_metadata(&dangling_app).is_ok());
+    assert!(fs::symlink_metadata(&dangling_ssl).is_ok());
+
+    let dangling_req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "remove".into(),
+        script_name: "removepackage-fixture".into(),
+        delete_data: false,
+        ..Default::default()
+    };
+    let dangling_output: String = tokio::time::timeout(
+        Duration::from_secs(10),
+        package_lifecycle::execute_coordinated_package_stream(dangling_req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+    assert!(
+        !dangling_output.contains("__RUNNER_EXIT_ERROR__:"),
+        "{dangling_output}"
+    );
+    let dangling_receipt_line = dangling_output
+        .lines()
+        .find_map(|line| line.strip_prefix(package_lifecycle::RECEIPT_MARKER))
+        .unwrap_or_else(|| panic!("expected lifecycle receipt marker: {dangling_output}"));
+    let dangling_receipt: package_lifecycle::LifecycleReceipt =
+        serde_json::from_str(dangling_receipt_line).unwrap();
+    assert_eq!(dangling_receipt.status, "completed", "{dangling_output}");
+    assert!(
+        fs::symlink_metadata(&dangling_app).is_err(),
+        "dangling aetherflow-app symlink must be removed"
+    );
+    assert!(
+        fs::symlink_metadata(&dangling_ssl).is_err(),
+        "dangling aetherflow-ext-le-ssl symlink must be removed"
+    );
+    assert!(
+        fs::symlink_metadata(&legacy_en).is_ok() && fs::symlink_metadata(&other_en).is_ok(),
+        "legacy and otherapp vhosts must remain intact after dangling cleanup"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coordinated_update_with_managed_sites_enabled_symlinks_succeeds_and_rollback_restores_symlink_target(
+) {
+    use futures::StreamExt;
+    let test = "lifecycle_tests::coordinated_update_with_managed_sites_enabled_symlinks_succeeds_and_rollback_restores_symlink_target";
+    if subprocess(test) {
+        return;
+    }
+
+    let root = fixture_root();
+    let config_dir = root.join("config");
+    let update_scripts = root.join("packages/package/update");
+    let fake_bin = root.join("fake-bin");
+    let install_dir = root.join("install");
+    let opt_fixture = root.join("opt/fixture");
+    let var_fixture = root.join("var/lib/fixture");
+    let sites_avail = root.join("etc/apache2/sites-available");
+    let sites_en = root.join("etc/apache2/sites-enabled");
+    for dir in [
+        &config_dir,
+        &update_scripts,
+        &fake_bin,
+        &install_dir,
+        &opt_fixture,
+        &var_fixture,
+        &sites_avail,
+        &sites_en,
+    ] {
+        fs::create_dir_all(dir).unwrap();
+    }
+
+    let pkgs_cfg = config_dir.join("packages.json");
+    let auto_cfg = config_dir.join("package_automation.json");
+    fs::write(
+        &pkgs_cfg,
+        r#"[{"name":"fixture","label":"Fixture","description":"Update symlink fixture","lock_file":"/install/.fixture.lock","category":"Media","service_type":"systemd","service_name":"fixture","default_port":18384}]"#,
+    )
+    .unwrap();
+    fs::write(&auto_cfg, r#"{}"#).unwrap();
+
+    // Pre-existing installed state, systemd unit, version receipt, and executable runtime evidence
+    fs::write(install_dir.join(".fixture.lock"), "installed\n").unwrap();
+    let systemd_dir = root.join("etc/systemd/system");
+    fs::create_dir_all(&systemd_dir).unwrap();
+    fs::write(
+        systemd_dir.join("fixture.service"),
+        "[Unit]\nDescription=Fixture Service\n[Service]\nExecStart=/opt/fixture/fixture --port 18384\n",
+    )
+    .unwrap();
+    let version_file = var_fixture.join(".af-version");
+    fs::write(&version_file, "1.0.0\n").unwrap();
+    executable(&opt_fixture.join("fixture"), "#!/bin/sh\necho 1.0.0\n");
+
+    // Pre-existing managed Apache vhosts with sites-enabled symlinks
+    let app_avail = sites_avail.join("aetherflow-app-fixture.conf");
+    let app_en = sites_en.join("aetherflow-app-fixture.conf");
+    let ext_avail = sites_avail.join("aetherflow-ext-fixture.conf");
+    let ext_en = sites_en.join("aetherflow-ext-fixture.conf");
+    fs::write(
+        &app_avail,
+        "<VirtualHost *:80>\n    ServerName fixture.aether.local\n    ProxyPass / http://127.0.0.1:18384/\n    ProxyPassReverse / http://127.0.0.1:18384/\n</VirtualHost>\n",
+    )
+    .unwrap();
+    fs::write(
+        &ext_avail,
+        "<VirtualHost *:80>\n    ServerName fixture.example.test\n    ProxyPass / http://127.0.0.1:18384/\n    ProxyPassReverse / http://127.0.0.1:18384/\n</VirtualHost>\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("../sites-available/aetherflow-app-fixture.conf", &app_en).unwrap();
+    std::os::unix::fs::symlink("../sites-available/aetherflow-ext-fixture.conf", &ext_en).unwrap();
+
+    // Stateful fake systemctl tracking active/inactive across stop & start
+    let svc_state = root.join("svc-state");
+    fs::write(&svc_state, "active\n").unwrap();
+    executable(
+        &fake_bin.join("systemctl"),
+        &format!(
+            "#!/bin/bash\nSTATE_FILE={:?}\ncase \"${{1:-}}\" in\n  stop)\n    printf 'inactive\\n' > \"$STATE_FILE\"\n    exit 0 ;;\n  start|restart)\n    printf 'active\\n' > \"$STATE_FILE\"\n    exit 0 ;;\n  is-active)\n    st=$(cat \"$STATE_FILE\" 2>/dev/null || printf 'inactive')\n    printf '%s\\n' \"$st\"\n    [ \"$st\" = \"active\" ] && exit 0 || exit 3 ;;\n  show)\n    st=$(cat \"$STATE_FILE\" 2>/dev/null || printf 'inactive')\n    printf '%s\\n' \"$st\"\n    exit 0 ;;\nesac\nexit 0\n",
+            svc_state
+        ),
+    );
+
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+            CREATE TABLE settings(id INTEGER PRIMARY KEY, base_domain TEXT);
+            INSERT INTO settings VALUES(1, 'example.test');
+            CREATE TABLE app_updates(package_name TEXT PRIMARY KEY);
+            INSERT INTO app_updates VALUES('fixture');
+            CREATE TABLE app_ingress_configs(app_name TEXT PRIMARY KEY, public_domain TEXT,
+                external_access_enabled BOOLEAN, listen_port INTEGER, tls_enabled BOOLEAN,
+                created_at TEXT, updated_at TEXT);
+            INSERT INTO app_ingress_configs
+                VALUES('fixture', 'fixture.example.test', 1, 18384, 0, 'now', 'now');",
+        )
+        .unwrap();
+        af_release::lifecycle::initialize_schema(&conn).unwrap();
+    }
+
+    let orig_path = env::var("PATH").unwrap_or_default();
+    env::set_current_dir(&root).unwrap();
+    env::set_var("PATH", format!("{}:{orig_path}", fake_bin.display()));
+    env::set_var("AETHERFLOW_SYSTEMCTL_BIN", fake_bin.join("systemctl"));
+    env::set_var("AETHERFLOW_PACKAGES_CONFIG", &pkgs_cfg);
+    env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &auto_cfg);
+    env::set_var("AETHERFLOW_FORCE_BASH_PACKAGES", "1");
+    env::remove_var("AETHERFLOW_APACHE_DIR");
+
+    // 1. Successful update with pre-existing managed sites-enabled symlinks
+    let update_script = update_scripts.join("updatepackage-fixture");
+    executable(
+        &update_script,
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nprintf '2.0.0\\n' > {:?}\necho updated-fixture\n",
+            version_file
+        ),
+    );
+    let ok_req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "update".into(),
+        script_name: "updatepackage-fixture".into(),
+        expected_target_version: Some("2.0.0".into()),
+        ..Default::default()
+    };
+    let ok_output: String = tokio::time::timeout(
+        Duration::from_secs(10),
+        package_lifecycle::execute_coordinated_package_stream(ok_req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+    assert!(!ok_output.contains("__RUNNER_EXIT_ERROR__:"), "{ok_output}");
+    let ok_receipt_line = ok_output
+        .lines()
+        .find_map(|line| line.strip_prefix(package_lifecycle::RECEIPT_MARKER))
+        .unwrap_or_else(|| panic!("expected lifecycle receipt marker: {ok_output}"));
+    let ok_receipt: package_lifecycle::LifecycleReceipt =
+        serde_json::from_str(ok_receipt_line).unwrap();
+    assert_eq!(ok_receipt.status, "completed", "{ok_output}");
+    assert_eq!(fs::read_to_string(&version_file).unwrap().trim(), "2.0.0");
+    assert_eq!(
+        fs::read_link(&app_en).unwrap(),
+        PathBuf::from("../sites-available/aetherflow-app-fixture.conf")
+    );
+    assert_eq!(
+        fs::read_link(&ext_en).unwrap(),
+        PathBuf::from("../sites-available/aetherflow-ext-fixture.conf")
+    );
+
+    // 2. Failing update mutates sites-available and clobbers/deletes sites-enabled symlinks ->
+    //    rollback must restore original sites-available content and exact symlink targets!
+    let pre_fail_app_body = fs::read_to_string(&app_avail).unwrap();
+    let pre_fail_ext_body = fs::read_to_string(&ext_avail).unwrap();
+    executable(
+        &update_script,
+        &format!(
+            "#!/bin/bash\nset -euo pipefail\nprintf '# CORRUPTED APP VHOST\\n' > {:?}\nrm -f {:?}\nprintf '# CLOBBERED REGULAR FILE\\n' > {:?}\nrm -f {:?}\nprintf '3.0.0-broken\\n' > {:?}\nexit 1\n",
+            app_avail, app_en, app_en, ext_en, version_file
+        ),
+    );
+    let fail_req = PackageRunnerRequest {
+        package_id: "fixture".into(),
+        action: "update".into(),
+        script_name: "updatepackage-fixture".into(),
+        expected_target_version: Some("3.0.0".into()),
+        ..Default::default()
+    };
+    let fail_output: String = tokio::time::timeout(
+        Duration::from_secs(10),
+        package_lifecycle::execute_coordinated_package_stream(fail_req).collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(Result::unwrap)
+    .collect();
+    assert!(
+        !fail_output.contains("__RUNNER_EXIT_ERROR__:"),
+        "failing update should emit failed LifecycleReceipt rather than transport error: {fail_output}"
+    );
+    let fail_receipt_line = fail_output
+        .lines()
+        .find_map(|line| line.strip_prefix(package_lifecycle::RECEIPT_MARKER))
+        .unwrap_or_else(|| panic!("expected lifecycle receipt marker: {fail_output}"));
+    let fail_receipt: package_lifecycle::LifecycleReceipt =
+        serde_json::from_str(fail_receipt_line).unwrap();
+    assert_eq!(fail_receipt.status, "failed", "{fail_output}");
+
+    // Verify rollback restored exact prior vhost bodies, symlink types/targets, and version receipt
+    assert_eq!(
+        fs::read_to_string(&app_avail).unwrap(),
+        pre_fail_app_body,
+        "rollback must restore pre-op sites-available/aetherflow-app-fixture.conf"
+    );
+    assert_eq!(
+        fs::read_to_string(&ext_avail).unwrap(),
+        pre_fail_ext_body,
+        "rollback must restore pre-op sites-available/aetherflow-ext-fixture.conf"
+    );
+    assert!(
+        fs::symlink_metadata(&app_en)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "rollback must restore sites-enabled/aetherflow-app-fixture.conf as a symlink"
+    );
+    assert_eq!(
+        fs::read_link(&app_en).unwrap(),
+        PathBuf::from("../sites-available/aetherflow-app-fixture.conf")
+    );
+    assert!(
+        fs::symlink_metadata(&ext_en)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "rollback must restore deleted sites-enabled/aetherflow-ext-fixture.conf as a symlink"
+    );
+    assert_eq!(
+        fs::read_link(&ext_en).unwrap(),
+        PathBuf::from("../sites-available/aetherflow-ext-fixture.conf")
+    );
+    assert_eq!(
+        fs::read_to_string(&version_file).unwrap().trim(),
+        "2.0.0",
+        "rollback must restore pre-op .af-version"
+    );
+
     fs::remove_dir_all(root).unwrap();
 }

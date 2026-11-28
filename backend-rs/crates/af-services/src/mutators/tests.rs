@@ -960,3 +960,203 @@ async fn test_trigger_apache_cert_sync_uses_runner_socket() {
     }
     let _ = fs::remove_file(&sock_path);
 }
+
+#[tokio::test]
+async fn test_remove_apache_app_vhost_cleans_managed_files_and_dangling_symlinks_only() {
+    let _env_guard = TEST_ENV_LOCK.lock().await;
+    let dir = temp_test_dir("remove-apache-vhost");
+    let sites_avail = dir.join("etc/apache2/sites-available");
+    let sites_en = dir.join("etc/apache2/sites-enabled");
+    fs::create_dir_all(&sites_avail).unwrap();
+    fs::create_dir_all(&sites_en).unwrap();
+
+    // Managed vhosts for sonarr (regular files + active symlinks + dangling le-ssl symlink)
+    let sonarr_app_avail = sites_avail.join("aetherflow-app-sonarr.conf");
+    let sonarr_app_en = sites_en.join("aetherflow-app-sonarr.conf");
+    let sonarr_ext_avail = sites_avail.join("aetherflow-ext-sonarr.conf");
+    let sonarr_ext_en = sites_en.join("aetherflow-ext-sonarr.conf");
+    let sonarr_ssl_avail = sites_avail.join("aetherflow-ext-sonarr-le-ssl.conf");
+    let sonarr_ssl_en = sites_en.join("aetherflow-ext-sonarr-le-ssl.conf");
+
+    fs::write(&sonarr_app_avail, "<VirtualHost *:80></VirtualHost>\n").unwrap();
+    fs::write(&sonarr_ext_avail, "<VirtualHost *:80></VirtualHost>\n").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-app-sonarr.conf",
+            &sonarr_app_en,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-ext-sonarr.conf",
+            &sonarr_ext_en,
+        )
+        .unwrap();
+        // Dangling symlink (target does not exist in sites-available)
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-ext-sonarr-le-ssl.conf",
+            &sonarr_ssl_en,
+        )
+        .unwrap();
+    }
+
+    // Legacy sonarr.conf and another app's vhosts must be preserved
+    let legacy_avail = sites_avail.join("sonarr.conf");
+    let legacy_en = sites_en.join("sonarr.conf");
+    let radarr_app_avail = sites_avail.join("aetherflow-app-radarr.conf");
+    let radarr_app_en = sites_en.join("aetherflow-app-radarr.conf");
+    let radarr_ext_avail = sites_avail.join("aetherflow-ext-radarr.conf");
+    let radarr_ext_en = sites_en.join("aetherflow-ext-radarr.conf");
+
+    fs::write(&legacy_avail, "# legacy sonarr vhost\n").unwrap();
+    fs::write(&radarr_app_avail, "# radarr internal\n").unwrap();
+    fs::write(&radarr_ext_avail, "# radarr external\n").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("../sites-available/sonarr.conf", &legacy_en).unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-app-radarr.conf",
+            &radarr_app_en,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-ext-radarr.conf",
+            &radarr_ext_en,
+        )
+        .unwrap();
+    }
+
+    // Also stage an alias package ("transmission-daemon" -> "transmission")
+    let tx_avail = sites_avail.join("aetherflow-app-transmission.conf");
+    let tx_en = sites_en.join("aetherflow-app-transmission.conf");
+    fs::write(&tx_avail, "# transmission internal\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-app-transmission.conf",
+        &tx_en,
+    )
+    .unwrap();
+
+    let prev_fs_root = env::var_os("AETHERFLOW_FS_ROOT");
+    let prev_cfg_root = env::var_os("AETHERFLOW_CONFIG_ROOT");
+    env::set_var("AETHERFLOW_FS_ROOT", &dir);
+    env::remove_var("AETHERFLOW_CONFIG_ROOT");
+
+    let remove_sonarr = remove_apache_app_vhost("sonarr").await;
+    let remove_sonarr_again = remove_apache_app_vhost("sonarr").await;
+    let remove_tx_alias = remove_apache_app_vhost("transmission-daemon").await;
+    let remove_unknown = remove_apache_app_vhost("not-in-catalog-app").await;
+
+    // Dangling-symlink-only case (no sites-available file present)
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-sonarr-le-ssl.conf",
+        &sonarr_ssl_en,
+    )
+    .unwrap();
+    let remove_dangling_only = remove_apache_app_vhost("sonarr").await;
+
+    // Missing apache2 dirs under isolated AETHERFLOW_FS_ROOT returns Ok(()) cleanly
+    let empty_dir = temp_test_dir("remove-apache-vhost-empty");
+    env::set_var("AETHERFLOW_FS_ROOT", &empty_dir);
+    let remove_no_dirs = remove_apache_app_vhost("sonarr").await;
+
+    for (key, prev) in [
+        ("AETHERFLOW_FS_ROOT", prev_fs_root),
+        ("AETHERFLOW_CONFIG_ROOT", prev_cfg_root),
+    ] {
+        match prev {
+            Some(v) => env::set_var(key, v),
+            None => env::remove_var(key),
+        }
+    }
+
+    remove_sonarr.unwrap();
+    remove_sonarr_again.unwrap();
+    remove_tx_alias.unwrap();
+    remove_unknown.unwrap();
+    remove_dangling_only.unwrap();
+    remove_no_dirs.unwrap();
+
+    for removed in [
+        &sonarr_app_avail,
+        &sonarr_app_en,
+        &sonarr_ext_avail,
+        &sonarr_ext_en,
+        &sonarr_ssl_avail,
+        &sonarr_ssl_en,
+        &tx_avail,
+        &tx_en,
+    ] {
+        assert!(
+            matches!(
+                fs::symlink_metadata(removed),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound
+            ),
+            "expected {} to be removed",
+            removed.display()
+        );
+    }
+
+    assert_eq!(
+        fs::read_to_string(&legacy_avail).unwrap(),
+        "# legacy sonarr vhost\n"
+    );
+    assert!(fs::symlink_metadata(&legacy_en).is_ok());
+    assert_eq!(
+        fs::read_to_string(&radarr_app_avail).unwrap(),
+        "# radarr internal\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&radarr_ext_avail).unwrap(),
+        "# radarr external\n"
+    );
+    assert!(fs::symlink_metadata(&radarr_app_en).is_ok());
+    assert!(fs::symlink_metadata(&radarr_ext_en).is_ok());
+
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_remove_apache_app_vhost_async_cleans_managed_vhosts() {
+    let _env_guard = TEST_ENV_LOCK.lock().await;
+    let dir = env::temp_dir().join(format!("af-rm-vhost-test-{}", uuid::Uuid::new_v4()));
+    let sites_avail = dir.join("etc/apache2/sites-available");
+    let sites_en = dir.join("etc/apache2/sites-enabled");
+    fs::create_dir_all(&sites_avail).unwrap();
+    fs::create_dir_all(&sites_en).unwrap();
+
+    for name in [
+        "aetherflow-app-nextcloud.conf",
+        "aetherflow-ext-nextcloud.conf",
+        "aetherflow-app-sonarr.conf",
+    ] {
+        fs::write(
+            sites_avail.join(name),
+            b"<VirtualHost *:80></VirtualHost>\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(format!("../sites-available/{name}"), sites_en.join(name))
+            .unwrap();
+    }
+
+    let prev_root = env::var_os("AETHERFLOW_CONFIG_ROOT");
+    env::set_var("AETHERFLOW_CONFIG_ROOT", &dir);
+
+    let removed = remove_apache_app_vhost_async("nextcloud").await.unwrap();
+    assert!(removed);
+    assert!(!sites_avail.join("aetherflow-app-nextcloud.conf").exists());
+    assert!(!sites_avail.join("aetherflow-ext-nextcloud.conf").exists());
+    assert!(fs::symlink_metadata(sites_en.join("aetherflow-app-nextcloud.conf")).is_err());
+    assert!(fs::symlink_metadata(sites_en.join("aetherflow-ext-nextcloud.conf")).is_err());
+    assert!(sites_avail.join("aetherflow-app-sonarr.conf").is_file());
+    assert!(fs::symlink_metadata(sites_en.join("aetherflow-app-sonarr.conf")).is_ok());
+
+    match prev_root {
+        Some(v) => env::set_var("AETHERFLOW_CONFIG_ROOT", v),
+        None => env::remove_var("AETHERFLOW_CONFIG_ROOT"),
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

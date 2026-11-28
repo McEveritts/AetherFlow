@@ -411,6 +411,87 @@ fn test_snapshot_blueprint_targets_symlink_or_oversized_fails_closed() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn test_snapshot_blueprint_targets_accepts_managed_apache_sites_enabled_symlinks_and_rejects_escape(
+) {
+    let temp_dir =
+        std::env::temp_dir().join(format!("af-test-apache-sym-{}", uuid::Uuid::new_v4()));
+    let mut env_cfg = crate::PackageExecutionEnv::default();
+    env_cfg.fs_root = Some(temp_dir.clone());
+
+    let sites_avail = temp_dir.join("etc/apache2/sites-available");
+    let sites_en = temp_dir.join("etc/apache2/sites-enabled");
+    std::fs::create_dir_all(&sites_avail).unwrap();
+    std::fs::create_dir_all(&sites_en).unwrap();
+
+    let app_avail = sites_avail.join("aetherflow-app-nextcloud.conf");
+    let ext_avail = sites_avail.join("aetherflow-ext-nextcloud.conf");
+    std::fs::write(&app_avail, b"<VirtualHost *:80></VirtualHost>\n").unwrap();
+    std::fs::write(&ext_avail, b"<VirtualHost *:443></VirtualHost>\n").unwrap();
+
+    let app_en = sites_en.join("aetherflow-app-nextcloud.conf");
+    let ext_en = sites_en.join("aetherflow-ext-nextcloud.conf");
+    std::os::unix::fs::symlink("../sites-available/aetherflow-app-nextcloud.conf", &app_en)
+        .unwrap();
+    std::os::unix::fs::symlink("../sites-available/aetherflow-ext-nextcloud.conf", &ext_en)
+        .unwrap();
+
+    // 1. Legitimate Apache sites-enabled symlinks must be accepted and skipped
+    // (preserving them across blueprint restoration while snapshotting sites-available).
+    let snaps = snapshot_blueprint_targets("nextcloud", &env_cfg)
+        .expect("managed Apache sites-enabled symlinks must not fail snapshot capture");
+    assert!(
+        snaps
+            .iter()
+            .any(|s| s.path == app_avail && s.state.is_some()),
+        "sites-available app vhost must be snapshotted"
+    );
+    assert!(
+        snaps
+            .iter()
+            .any(|s| s.path == ext_avail && s.state.is_some()),
+        "sites-available ext vhost must be snapshotted"
+    );
+    assert!(
+        !snaps.iter().any(|s| s.path == app_en || s.path == ext_en),
+        "managed sites-enabled symlinks must be skipped so rollback does not unlink them"
+    );
+    restore_candidate_receipts(&snaps).unwrap();
+    assert!(
+        std::fs::symlink_metadata(&app_en)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "sites-enabled app symlink must remain intact after restore"
+    );
+
+    // 2. A symlink pointing to a different filename inside sites-available must fail closed.
+    std::fs::remove_file(&app_en).unwrap();
+    std::os::unix::fs::symlink("../sites-available/aetherflow-ext-nextcloud.conf", &app_en)
+        .unwrap();
+    let mismatch_err = snapshot_blueprint_targets("nextcloud", &env_cfg)
+        .expect_err("mismatched sites-enabled symlink target must fail closed");
+    assert!(
+        mismatch_err.to_ascii_lowercase().contains("symlink"),
+        "unexpected error: {mismatch_err}"
+    );
+
+    // 3. A symlink escaping outside sites-available must fail closed.
+    let victim = temp_dir.join("victim.conf");
+    std::fs::write(&victim, b"secret").unwrap();
+    std::fs::remove_file(&app_en).unwrap();
+    std::os::unix::fs::symlink(&victim, &app_en).unwrap();
+    let escape_err = snapshot_blueprint_targets("nextcloud", &env_cfg)
+        .expect_err("escaping sites-enabled symlink must fail closed");
+    assert!(
+        escape_err.to_ascii_lowercase().contains("symlink"),
+        "unexpected error: {escape_err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 #[test]
 fn test_restore_preserves_exact_permissions_and_ownership() {
     let temp_dir = std::env::temp_dir().join(format!("af-test-perms-{}", uuid::Uuid::new_v4()));
@@ -885,4 +966,265 @@ fn test_wave25_sanitize_shell_escapes_glued_suffixes_and_unicode_keys() {
     assert!(!closer_out.contains("SENTINEL"), "{closer_out}");
     serde_json::from_str::<serde_json::Value>(&closer_out)
         .unwrap_or_else(|e| panic!("closer JSON broken ({e}): {closer_out}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_snapshot_blueprint_targets_allows_managed_apache_sites_enabled_symlinks_and_snapshots_regular_files(
+) {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "af-test-bp-apache-alias-ok-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut env_cfg = crate::PackageExecutionEnv::default();
+    env_cfg.fs_root = Some(temp_dir.clone());
+
+    let sites_avail = temp_dir.join("etc/apache2/sites-available");
+    let sites_en = temp_dir.join("etc/apache2/sites-enabled");
+    std::fs::create_dir_all(&sites_avail).unwrap();
+    std::fs::create_dir_all(&sites_en).unwrap();
+
+    let managed = [
+        ("aetherflow-app-sonarr.conf", b"# app vhost\n".as_slice()),
+        ("aetherflow-ext-sonarr.conf", b"# ext vhost\n".as_slice()),
+        (
+            "aetherflow-ext-sonarr-le-ssl.conf",
+            b"# ssl vhost\n".as_slice(),
+        ),
+        ("sonarr.conf", b"# legacy vhost\n".as_slice()),
+    ];
+    for (name, body) in managed {
+        std::fs::write(sites_avail.join(name), body).unwrap();
+    }
+
+    // Relative ../sites-available/<same-name> symlinks and absolute <fs_root>/etc/apache2/sites-available/<same-name> symlink
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-app-sonarr.conf",
+        sites_en.join("aetherflow-app-sonarr.conf"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-sonarr.conf",
+        sites_en.join("aetherflow-ext-sonarr.conf"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        sites_avail.join("aetherflow-ext-sonarr-le-ssl.conf"),
+        sites_en.join("aetherflow-ext-sonarr-le-ssl.conf"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/sonarr.conf",
+        sites_en.join("sonarr.conf"),
+    )
+    .unwrap();
+
+    let snaps = snapshot_blueprint_targets("sonarr", &env_cfg)
+        .expect("managed Apache sites-enabled symlink aliases must be allowed");
+
+    // Regular files in sites-available/ must still be snapshotted with exact bytes
+    for (name, expected_body) in managed {
+        let avail_path = sites_avail.join(name);
+        let avail_snap = snaps
+            .iter()
+            .find(|s| s.path == avail_path)
+            .unwrap_or_else(|| panic!("expected sites-available snapshot for {name}"));
+        assert_eq!(avail_snap.bytes(), Some(expected_body));
+
+        let en_path = sites_en.join(name);
+        assert!(
+            snaps.iter().all(|s| s.path != en_path),
+            "managed symlink in sites-enabled ({name}) must be skipped from regular file snapshots"
+        );
+    }
+
+    // Regular files in sites-enabled/ must still be snapshotted normally
+    let regular_en = sites_en.join("aetherflow-app-sonarr.conf");
+    std::fs::remove_file(&regular_en).unwrap();
+    std::fs::write(&regular_en, b"# regular enabled vhost\n").unwrap();
+
+    let snaps_with_regular = snapshot_blueprint_targets("sonarr", &env_cfg)
+        .expect("regular file in sites-enabled must snapshot normally");
+    let regular_snap = snaps_with_regular
+        .iter()
+        .find(|s| s.path == regular_en)
+        .expect("regular file in sites-enabled must be included in blueprint snapshots");
+    assert_eq!(
+        regular_snap.bytes(),
+        Some(b"# regular enabled vhost\n".as_slice())
+    );
+
+    // Dangling managed symlink (target missing in sites-available/) must also be tolerated
+    std::fs::remove_file(sites_avail.join("aetherflow-ext-sonarr-le-ssl.conf")).unwrap();
+    let snaps_dangling = snapshot_blueprint_targets("sonarr", &env_cfg)
+        .expect("dangling managed Apache sites-enabled alias must not fail preflight");
+    let absent_avail = snaps_dangling
+        .iter()
+        .find(|s| s.path == sites_avail.join("aetherflow-ext-sonarr-le-ssl.conf"))
+        .expect("missing sites-available target must be tracked as absent");
+    assert_eq!(absent_avail.state, None);
+    assert!(
+        snaps_dangling
+            .iter()
+            .all(|s| s.path != sites_en.join("aetherflow-ext-sonarr-le-ssl.conf")),
+        "dangling managed symlink in sites-enabled must be skipped"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_snapshot_blueprint_targets_apache_symlink_security_invariants_fail_closed() {
+    // 1. sites-enabled/aetherflow-app-<app>.conf pointing to ../sites-available/other.conf -> Err
+    {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "af-test-bp-apache-wrong-target-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut env_cfg = crate::PackageExecutionEnv::default();
+        env_cfg.fs_root = Some(temp_dir.clone());
+
+        let sites_avail = temp_dir.join("etc/apache2/sites-available");
+        let sites_en = temp_dir.join("etc/apache2/sites-enabled");
+        std::fs::create_dir_all(&sites_avail).unwrap();
+        std::fs::create_dir_all(&sites_en).unwrap();
+        std::fs::write(sites_avail.join("other.conf"), b"# other\n").unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/other.conf",
+            sites_en.join("aetherflow-app-sonarr.conf"),
+        )
+        .unwrap();
+
+        let err = snapshot_blueprint_targets("sonarr", &env_cfg)
+            .expect_err("sites-enabled symlink targeting another file name must fail closed");
+        assert!(
+            err.to_ascii_lowercase().contains("symlink"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // 2. sites-enabled/aetherflow-app-<app>.conf pointing to external absolute or relative traversal file -> Err
+    for relative_traversal in [false, true] {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "af-test-bp-apache-ext-target-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut env_cfg = crate::PackageExecutionEnv::default();
+        env_cfg.fs_root = Some(temp_dir.clone());
+
+        let sites_avail = temp_dir.join("etc/apache2/sites-available");
+        let sites_en = temp_dir.join("etc/apache2/sites-enabled");
+        std::fs::create_dir_all(&sites_avail).unwrap();
+        std::fs::create_dir_all(&sites_en).unwrap();
+        let victim = temp_dir.join("etc/victim.txt");
+        std::fs::write(&victim, b"secret\n").unwrap();
+        if relative_traversal {
+            std::os::unix::fs::symlink(
+                "../../victim.txt",
+                sites_en.join("aetherflow-app-sonarr.conf"),
+            )
+            .unwrap();
+        } else {
+            std::os::unix::fs::symlink(&victim, sites_en.join("aetherflow-app-sonarr.conf"))
+                .unwrap();
+        }
+
+        let err = snapshot_blueprint_targets("sonarr", &env_cfg)
+            .expect_err("sites-enabled symlink targeting external path must fail closed");
+        assert!(
+            err.to_ascii_lowercase().contains("symlink"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // 3. sites-available/aetherflow-app-<app>.conf itself being a symlink -> Err
+    {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "af-test-bp-apache-avail-sym-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut env_cfg = crate::PackageExecutionEnv::default();
+        env_cfg.fs_root = Some(temp_dir.clone());
+
+        let sites_avail = temp_dir.join("etc/apache2/sites-available");
+        let sites_en = temp_dir.join("etc/apache2/sites-enabled");
+        std::fs::create_dir_all(&sites_avail).unwrap();
+        std::fs::create_dir_all(&sites_en).unwrap();
+        let victim = temp_dir.join("victim.conf");
+        std::fs::write(&victim, b"secret\n").unwrap();
+        std::os::unix::fs::symlink(&victim, sites_avail.join("aetherflow-app-sonarr.conf"))
+            .unwrap();
+
+        let err = snapshot_blueprint_targets("sonarr", &env_cfg)
+            .expect_err("sites-available symlink must fail closed");
+        assert!(
+            err.to_ascii_lowercase().contains("symlink"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // 4. sites-enabled directory itself being a symlink -> Err
+    {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "af-test-bp-apache-en-dir-sym-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut env_cfg = crate::PackageExecutionEnv::default();
+        env_cfg.fs_root = Some(temp_dir.clone());
+
+        let apache_dir = temp_dir.join("etc/apache2");
+        let sites_avail = apache_dir.join("sites-available");
+        let real_en = temp_dir.join("redirected-sites-enabled");
+        std::fs::create_dir_all(&sites_avail).unwrap();
+        std::fs::create_dir_all(&real_en).unwrap();
+        std::fs::write(sites_avail.join("aetherflow-app-sonarr.conf"), b"# app\n").unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-app-sonarr.conf",
+            real_en.join("aetherflow-app-sonarr.conf"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real_en, apache_dir.join("sites-enabled")).unwrap();
+
+        let err = snapshot_blueprint_targets("sonarr", &env_cfg)
+            .expect_err("symlinked sites-enabled directory must fail closed");
+        assert!(
+            err.to_ascii_lowercase().contains("symlink"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // 5. sites-available directory itself being a symlink -> Err
+    {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "af-test-bp-apache-avail-dir-sym-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut env_cfg = crate::PackageExecutionEnv::default();
+        env_cfg.fs_root = Some(temp_dir.clone());
+
+        let apache_dir = temp_dir.join("etc/apache2");
+        let real_avail = temp_dir.join("redirected-sites-available");
+        let sites_en = apache_dir.join("sites-enabled");
+        std::fs::create_dir_all(&real_avail).unwrap();
+        std::fs::create_dir_all(&sites_en).unwrap();
+        std::os::unix::fs::symlink(&real_avail, apache_dir.join("sites-available")).unwrap();
+        std::os::unix::fs::symlink(
+            "../sites-available/aetherflow-app-sonarr.conf",
+            sites_en.join("aetherflow-app-sonarr.conf"),
+        )
+        .unwrap();
+
+        let err = snapshot_blueprint_targets("sonarr", &env_cfg)
+            .expect_err("symlinked sites-available directory must fail closed");
+        assert!(
+            err.to_ascii_lowercase().contains("symlink"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

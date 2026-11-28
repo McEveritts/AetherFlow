@@ -646,45 +646,50 @@ impl CoordinatedOperation {
 
         let receipt_snapshots = receipt_snapshots.to_vec();
         let blueprint_snapshots = blueprint_snapshots.to_vec();
-        let restoration = tokio::task::spawn_blocking(move || {
-            rollback_operation_state_with_runtime(
-                &receipt_snapshots,
-                &blueprint_snapshots,
-                if incomplete_rollback {
-                    None
-                } else {
-                    runtime_snapshot.as_mut()
-                },
-            )?;
-            let vhosts_changed = if incomplete_rollback || vhost_backups.is_empty() {
-                false
-            } else {
-                crate::restore_app_vhost_backups(&vhost_backups).map_err(|e| e.to_string())?
-            };
-            Ok::<bool, String>(vhosts_changed)
+        let (restoration, vhosts_changed) = match tokio::task::spawn_blocking(move || {
+            let mut vhosts_changed = false;
+            let res = (|| -> Result<(), String> {
+                // Restore vhost backups before runtime and blueprint snapshots because
+                // PackageRuntimeSnapshot::capture also includes Apache vhosts; restoring
+                // vhost_backups first ensures sites-available/sites-enabled drift is
+                // detected for reload_apache_after_rollback_if_live.
+                if !incomplete_rollback && !vhost_backups.is_empty() {
+                    vhosts_changed = crate::restore_app_vhost_backups(&vhost_backups)
+                        .map_err(|e| e.to_string())?;
+                }
+                rollback_operation_state_with_runtime(
+                    &receipt_snapshots,
+                    &blueprint_snapshots,
+                    if incomplete_rollback {
+                        None
+                    } else {
+                        runtime_snapshot.as_mut()
+                    },
+                )?;
+                Ok(())
+            })();
+            (res, vhosts_changed)
         })
         .await
-        .map_err(|err| format!("Snapshot restore worker failed: {err}"))
-        .and_then(|result| result);
+        {
+            Ok(pair) => pair,
+            Err(err) => (Err(format!("Snapshot restore worker failed: {err}")), false),
+        };
+        if vhosts_changed {
+            crate::reload_apache_after_rollback_if_live(fs_root.as_deref()).await;
+        }
         let mut snapshot_restore_failed = false;
-        match restoration {
-            Ok(vhosts_changed) => {
-                if vhosts_changed {
-                    crate::reload_apache_after_rollback_if_live(fs_root.as_deref()).await;
-                }
-            }
-            Err(restore_err) => {
-                tracing::error!(
-                    package = %package_id,
-                    error = %restore_err,
-                    "Failed to restore candidate receipts, blueprints, and package runtime"
-                );
-                snapshot_restore_failed = true;
-                if let Some(ref mut existing) = receipt_restore_error {
-                    existing.push_str(&format!("; {}", restore_err));
-                } else {
-                    *receipt_restore_error = Some(restore_err);
-                }
+        if let Err(restore_err) = restoration {
+            tracing::error!(
+                package = %package_id,
+                error = %restore_err,
+                "Failed to restore candidate receipts, blueprints, and package runtime"
+            );
+            snapshot_restore_failed = true;
+            if let Some(ref mut existing) = receipt_restore_error {
+                existing.push_str(&format!("; {}", restore_err));
+            } else {
+                *receipt_restore_error = Some(restore_err);
             }
         }
 
@@ -1211,33 +1216,92 @@ impl CoordinatedOperation {
                     self.request.delete_data,
                     base_domain,
                 )?;
+                if self.request.action == "remove" {
+                    let fs_root = self.effective_fs_root();
+                    let apache_dir = match fs_root.as_deref() {
+                        Some(root) => root.join("etc/apache2"),
+                        None => {
+                            crate::resolve_provider_dir("AETHERFLOW_APACHE_DIR", "/etc/apache2")
+                        }
+                    };
+                    let clean_app =
+                        af_models::resolve_package_lock_name(&self.request.package_id).to_string();
+                    let probe_apache_dir = apache_dir.clone();
+                    let probe_clean_app = clean_app.clone();
+                    let has_managed_vhost = tokio::task::spawn_blocking(move || {
+                        let has_apache_dirs =
+                            ["sites-available", "sites-enabled"]
+                                .into_iter()
+                                .any(|subdir| {
+                                    !matches!(
+                                        std::fs::symlink_metadata(probe_apache_dir.join(subdir)),
+                                        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+                                    )
+                                });
+                        if !has_apache_dirs
+                            || crate::get_runner_package_definition(&probe_clean_app).is_none()
+                        {
+                            return false;
+                        }
+                        let managed_vhosts = [
+                            format!("aetherflow-app-{probe_clean_app}.conf"),
+                            format!("aetherflow-ext-{probe_clean_app}.conf"),
+                            format!("aetherflow-ext-{probe_clean_app}-le-ssl.conf"),
+                        ];
+                        ["sites-available", "sites-enabled"]
+                            .into_iter()
+                            .any(|subdir| {
+                                let dir = probe_apache_dir.join(subdir);
+                                managed_vhosts.iter().any(|name| {
+                                    !matches!(
+                                        std::fs::symlink_metadata(dir.join(name)),
+                                        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+                                    )
+                                })
+                            })
+                    })
+                    .await
+                    .map_err(|err| anyhow::anyhow!("vhost removal probe worker failed: {err}"))?;
+                    if has_managed_vhost {
+                        failure = "configuration";
+                        let vhost_req = af_models::RunnerApacheVhostRequest {
+                            app_name: clean_app,
+                            remove_only: true,
+                            reload_apache: fs_root.is_none(),
+                            ..Default::default()
+                        };
+                        crate::sync_apache_vhost_local(&vhost_req, &apache_dir).await?;
+                    }
+                }
                 post_commit_ingress = planned_ingress;
                 Ok(())
             }
             .await;
             if let Err(error) = post_commit {
                 execution = Err(error);
-                Self::restore_and_restart_units_with_runtime_and_vhosts(
-                    backend,
-                    &lifecycle_job_id,
-                    &package_id,
-                    &rollback_quiesce_units,
-                    &stopped,
-                    &receipt_snapshots,
-                    &blueprint_snapshots,
-                    &mut receipt_restore_error,
-                    &mut restart_failures,
-                    incomplete_rollback,
-                    true,
-                    runtime_snapshot.take(),
-                    std::mem::take(&mut vhost_backups),
-                    pre_op_env.fs_root.clone(),
-                )
-                .await;
-                rollback_ran = true;
-                rollback_restart_failures = restart_failures.clone();
-                if !restart_failures.is_empty() {
-                    restore_failed = true;
+                if self.request.action != "remove" {
+                    Self::restore_and_restart_units_with_runtime_and_vhosts(
+                        backend,
+                        &lifecycle_job_id,
+                        &package_id,
+                        &rollback_quiesce_units,
+                        &stopped,
+                        &receipt_snapshots,
+                        &blueprint_snapshots,
+                        &mut receipt_restore_error,
+                        &mut restart_failures,
+                        incomplete_rollback,
+                        true,
+                        runtime_snapshot.take(),
+                        std::mem::take(&mut vhost_backups),
+                        pre_op_env.fs_root.clone(),
+                    )
+                    .await;
+                    rollback_ran = true;
+                    rollback_restart_failures = restart_failures.clone();
+                    if !restart_failures.is_empty() {
+                        restore_failed = true;
+                    }
                 }
             } else if self.effective_fs_root().is_none()
                 && post_commit_ingress.as_ref().is_some_and(|cfg| {

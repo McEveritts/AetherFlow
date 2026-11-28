@@ -641,6 +641,80 @@ pub(super) async fn sync_apache_app_vhost_with_tls(
     Ok(())
 }
 
+async fn remove_apache_app_vhost_inner(app_name: &str) -> anyhow::Result<bool> {
+    let app_name_owned = app_name.to_owned();
+    let Some((clean_app, apache_dir)) = tokio::task::spawn_blocking(move || {
+        let clean_app = af_models::resolve_package_lock_name(&app_name_owned);
+        af_runner::get_runner_package_definition(clean_app)?;
+        let apache_dir = resolve_config_path("/etc/apache2");
+        let avail_dir = apache_dir.join("sites-available");
+        let enabled_dir = apache_dir.join("sites-enabled");
+        if !avail_dir.exists()
+            && !enabled_dir.exists()
+            && (apache_dir != Path::new("/etc/apache2")
+                || matches!(
+                    fs::symlink_metadata(&apache_dir),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound
+                ))
+        {
+            return None;
+        }
+
+        let managed_names = [
+            format!("aetherflow-app-{clean_app}.conf"),
+            format!("aetherflow-ext-{clean_app}.conf"),
+            format!("aetherflow-ext-{clean_app}-le-ssl.conf"),
+        ];
+        let has_managed_or_unreadable = managed_names.iter().any(|name| {
+            [avail_dir.join(name), enabled_dir.join(name)]
+                .iter()
+                .any(|path| {
+                    !matches!(
+                        fs::symlink_metadata(path),
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound
+                    )
+                })
+        });
+        if !has_managed_or_unreadable {
+            return None;
+        }
+        Some((clean_app.to_string(), apache_dir))
+    })
+    .await?
+    else {
+        return Ok(false);
+    };
+
+    let req = af_models::RunnerApacheVhostRequest {
+        app_name: clean_app,
+        remove_only: true,
+        reload_apache: apache_dir == Path::new("/etc/apache2"),
+        ..Default::default()
+    };
+
+    if apache_dir == Path::new("/etc/apache2")
+        && (unsafe { libc::geteuid() } != 0 || af_runner::is_runner_available())
+    {
+        af_runner::sync_apache_vhost_via_runner(&req).await?;
+    } else {
+        af_runner::sync_apache_vhost_local(&req, &apache_dir).await?;
+    }
+    Ok(true)
+}
+
+/// Removes AetherFlow-managed Apache vhost files and symlinks (`aetherflow-app-<app>.conf`,
+/// `aetherflow-ext-<app>.conf`, `aetherflow-ext-<app>-le-ssl.conf`) for `app_name` during package
+/// removal, preserving legacy `<app>.conf` and other applications' vhosts.
+pub async fn remove_apache_app_vhost(app_name: &str) -> anyhow::Result<()> {
+    remove_apache_app_vhost_inner(app_name).await.map(|_| ())
+}
+
+pub async fn remove_apache_app_vhost_async(app_name: &str) -> Result<bool, String> {
+    remove_apache_app_vhost_inner(app_name)
+        .await
+        .map_err(|err| err.to_string())
+}
+
 /// Triggers certificate synchronization via the privileged runner `/v1/certbot-sync`,
 /// falling back to `/usr/local/bin/af-certbot-sync` only when running directly as root.
 pub async fn trigger_apache_cert_sync() {

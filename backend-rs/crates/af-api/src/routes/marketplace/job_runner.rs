@@ -10,8 +10,9 @@ use super::receipts::{snapshot_candidate_receipts, ReceiptSnapshotEntry};
 #[cfg(test)]
 use super::rollback::CANDIDATE_QUIESCE_RECORDER;
 use super::rollback::{
-    finalize_post_script_lifecycle_with, handle_post_certification_finalization_failure_ext_with,
-    is_incomplete_rollback_error, quiesce_and_restore_candidate_receipts_and_runtime_ext,
+    finalize_post_script_lifecycle_with,
+    handle_post_certification_finalization_failure_ext_with_vhosts, is_incomplete_rollback_error,
+    quiesce_and_restore_candidate_receipts_and_runtime_with_vhosts,
     should_rollback_post_certification_failure, RunnerLifecycleSnapshotHandle,
 };
 use std::env;
@@ -128,6 +129,9 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
         std::sync::Mutex<Vec<af_runner::package_lifecycle::FileSnapshot>>,
     > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let blueprint_snapshots_slot = captured_blueprint_snapshots.clone();
+    let captured_vhost_backups: std::sync::Arc<std::sync::Mutex<Vec<af_runner::VhostBackup>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let vhost_backups_slot = captured_vhost_backups.clone();
     let captured_runtime_snapshot: std::sync::Arc<
         std::sync::Mutex<Option<af_runner::package_lifecycle::PackageRuntimeSnapshot>>,
     > = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -182,6 +186,7 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
                 let runner_target = expected_target_for_runner.clone();
                 let snapshots_slot = snapshots_slot.clone();
                 let blueprint_snapshots_slot = blueprint_snapshots_slot.clone();
+                let vhost_backups_slot = vhost_backups_slot.clone();
                 let runtime_snapshot_slot = runtime_snapshot_slot.clone();
                 let runner_snapshot_slot = runner_snapshot_slot.clone();
                 async move {
@@ -256,6 +261,28 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
                                 }
                                 Err(err) => {
                                     return Err(anyhow::anyhow!("Preparation: {err}"));
+                                }
+                            }
+                            let vhost_pkg = clean_id.clone();
+                            let vhost_fs_root = env_cfg.fs_root.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                af_runner::snapshot_app_vhost_backups(
+                                    &vhost_pkg,
+                                    vhost_fs_root.as_deref(),
+                                )
+                            })
+                            .await
+                            {
+                                Ok(Ok(vh_backups)) => {
+                                    *vhost_backups_slot.lock().unwrap() = vh_backups;
+                                }
+                                Ok(Err(err)) => {
+                                    return Err(anyhow::anyhow!("Preparation: {err}"));
+                                }
+                                Err(err) => {
+                                    return Err(anyhow::anyhow!(
+                                        "Preparation: vhost snapshot worker failed: {err}"
+                                    ));
                                 }
                             }
                             match af_runner::package_lifecycle::PackageRuntimeSnapshot::capture(
@@ -423,6 +450,7 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
 
     let receipt_snapshots = captured_receipt_snapshots.lock().unwrap().clone();
     let blueprint_snapshots = captured_blueprint_snapshots.lock().unwrap().clone();
+    let vhost_backups = std::mem::take(&mut *captured_vhost_backups.lock().unwrap());
     let mut runtime_snapshot = captured_runtime_snapshot.lock().unwrap().take();
     let mut runner_snapshot = captured_runner_snapshot.lock().unwrap().take();
 
@@ -441,11 +469,13 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
         }
         let (receipt_restore_error, restart_failures) =
             if matches!(action, "install" | "reinstall" | "update") {
-                quiesce_and_restore_candidate_receipts_and_runtime_ext(
+                quiesce_and_restore_candidate_receipts_and_runtime_with_vhosts(
                     &clean_id,
                     &stopped_units,
                     &receipt_snapshots,
                     &blueprint_snapshots,
+                    &vhost_backups,
+                    fs_root_override.as_deref().map(std::path::Path::new),
                     refuse_restart,
                     if refuse_restart {
                         None
@@ -567,11 +597,13 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
             let snapshot_captured =
                 runner_snapshot.as_ref().is_some_and(|rs| rs.active) || runtime_snapshot.is_some();
             let (receipt_restore_error, post_restore_failures) =
-                quiesce_and_restore_candidate_receipts_and_runtime_ext(
+                quiesce_and_restore_candidate_receipts_and_runtime_with_vhosts(
                     &clean_id,
                     &stopped_units,
                     &receipt_snapshots,
                     &blueprint_snapshots,
+                    &vhost_backups,
+                    fs_root_override.as_deref().map(std::path::Path::new),
                     false,
                     runtime_snapshot.as_mut(),
                     runner_snapshot.as_mut(),
@@ -665,11 +697,13 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
             let snapshot_captured =
                 runner_snapshot.as_ref().is_some_and(|rs| rs.active) || runtime_snapshot.is_some();
             let (receipt_restore_error, post_restore_failures) =
-                quiesce_and_restore_candidate_receipts_and_runtime_ext(
+                quiesce_and_restore_candidate_receipts_and_runtime_with_vhosts(
                     &clean_id,
                     &stopped_units,
                     &receipt_snapshots,
                     &blueprint_snapshots,
+                    &vhost_backups,
+                    fs_root_override.as_deref().map(std::path::Path::new),
                     false,
                     runtime_snapshot.as_mut(),
                     runner_snapshot.as_mut(),
@@ -795,13 +829,15 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
             let rollback_attempted =
                 should_rollback_post_certification_failure(action, required_err.kind);
             let (required_err, receipt_restore_error, post_restore_failures) =
-                handle_post_certification_finalization_failure_ext_with(
+                handle_post_certification_finalization_failure_ext_with_vhosts(
                     action,
                     required_err,
                     &clean_id,
                     &stopped_units,
                     &receipt_snapshots,
                     &blueprint_snapshots,
+                    &vhost_backups,
+                    fs_root_override.as_deref().map(std::path::Path::new),
                     false,
                     runtime_snapshot.as_mut(),
                     runner_snapshot.as_mut(),
@@ -934,6 +970,33 @@ async fn run_package_lifecycle_job(ctx: PackageLifecycleJobContext) {
                 &format!(
                     "Package removed but reinstall settings could not be retained: {}",
                     error
+                ),
+                &started_at,
+                &job_id,
+                None,
+                None,
+                &stopped_units,
+            );
+            return;
+        }
+        if let Err(vhost_err) = af_services::mutators::remove_apache_app_vhost(&clean_id).await {
+            if let Some(ref mut rs) = runner_snapshot {
+                rs.discard(false).await;
+            }
+            if runtime_snapshot.is_some() {
+                let _ = tokio::task::spawn_blocking(move || drop(runtime_snapshot)).await;
+            }
+
+            af_services::clear_service_status_cache();
+            af_services::mutators::clear_app_runtime_meta_cache();
+            finish_package_lifecycle(
+                &clean_id,
+                action,
+                Some(af_services::PackageJobFailure::Configuration),
+                92,
+                &format!(
+                    "[STAGE:vhost_cleanup] Package removed but Apache vhost cleanup failed: {}",
+                    vhost_err
                 ),
                 &started_at,
                 &job_id,

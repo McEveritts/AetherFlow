@@ -547,6 +547,7 @@ pub fn build_runner_router() -> Router {
         )
         .route("/v1/ingress/vhost", post(handle_ingress_vhost))
         .route("/v1/certbot-sync", post(handle_certbot_sync))
+        .route("/v1/ingress/resync-tls", post(handle_resync_tls_vhosts))
         .route("/v1/plugins/start", post(plugins::handle_plugin_start))
         .route("/v1/plugins/stop", post(plugins::handle_plugin_stop))
         .route("/v1/plugins/status", post(plugins::handle_plugin_status))
@@ -819,13 +820,14 @@ mod ingress_vhost;
 use ingress_vhost::{apply_ingress_vhost_with_hooks, execute_certbot_sync_with_candidates};
 #[allow(unused_imports)]
 pub(crate) use ingress_vhost::{
-    enable_managed_apache_modules, reload_apache_after_rollback_if_live, restore_app_vhost_backups,
-    snapshot_app_vhost_backups, validate_ingress_vhost_request, PrevEnabledVhostState, VhostBackup,
+    enable_managed_apache_modules, validate_ingress_vhost_request, PrevEnabledVhostState,
 };
-use ingress_vhost::{handle_certbot_sync, handle_ingress_vhost};
+use ingress_vhost::{handle_certbot_sync, handle_ingress_vhost, handle_resync_tls_vhosts};
 pub use ingress_vhost::{
-    sync_apache_vhost_local, sync_apache_vhost_via_runner, sync_certbot_and_managed_ingress,
-    trigger_certbot_sync_via_runner,
+    reload_apache_after_rollback_if_live, restore_app_vhost_backups, resync_managed_tls_vhosts,
+    snapshot_app_vhost_backups, sync_apache_vhost_local, sync_apache_vhost_via_runner,
+    sync_certbot_and_managed_ingress, trigger_certbot_sync_via_runner,
+    trigger_resync_tls_vhosts_via_runner, VhostBackup,
 };
 
 mod network_quota_handlers;

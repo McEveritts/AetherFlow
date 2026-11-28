@@ -2792,6 +2792,564 @@ async fn ingress_vhost_router_end_to_end_via_runner_socket() {
     let _ = fs::remove_dir_all(&scratch);
 }
 
+#[tokio::test]
+async fn remove_only_absent_vhosts_skips_configtest_and_reload() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let scratch = env::temp_dir().join(format!("af-vhost-remove-noop-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(scratch.join("sites-available")).unwrap();
+    fs::create_dir_all(scratch.join("sites-enabled")).unwrap();
+
+    let configtests = Arc::new(AtomicUsize::new(0));
+    let reloads = Arc::new(AtomicUsize::new(0));
+    let req = RunnerApacheVhostRequest {
+        app_name: "nextcloud".to_string(),
+        remove_only: true,
+        reload_apache: true,
+        ..Default::default()
+    };
+    let ct = Arc::clone(&configtests);
+    let rl = Arc::clone(&reloads);
+    let out = apply_ingress_vhost_with_hooks(
+        &req,
+        &scratch,
+        move || {
+            ct.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+        move || {
+            rl.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("aetherflow-app-nextcloud.conf=disabled"));
+    assert_eq!(configtests.load(Ordering::SeqCst), 0);
+    assert_eq!(reloads.load(Ordering::SeqCst), 0);
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+#[cfg(unix)]
+fn create_test_tls_cert(dir: &Path, san: &str) {
+    fs::create_dir_all(dir).unwrap();
+    let out = std::process::Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-256",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=example.test",
+            "-addext",
+            &format!("subjectAltName={san}"),
+            "-keyout",
+        ])
+        .arg(dir.join("privkey.pem"))
+        .arg("-out")
+        .arg(dir.join("fullchain.pem"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "openssl req failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn certbot_sync_passes_from_runner_env_to_child_script() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = env::temp_dir().join(format!("af-certbot-env-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&scratch).unwrap();
+
+    let script = scratch.join("af-certbot-sync");
+    fs::write(
+        &script,
+        "#!/bin/sh\necho \"AF_CERTBOT_SYNC_FROM_RUNNER=${AF_CERTBOT_SYNC_FROM_RUNNER:-unset}\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out =
+        execute_certbot_sync_with_candidates(&[script.as_path()], false, Duration::from_secs(5))
+            .await
+            .unwrap();
+    assert_eq!(out, "AF_CERTBOT_SYNC_FROM_RUNNER=1");
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resync_tls_upgrades_ready_pending_skips_unready_active_and_unknown_apps() {
+    let _env_guard = ENV_TEST_MUTEX.lock().await;
+    let saved_vars: Vec<(&str, Option<std::ffi::OsString>)> = [
+        "AF_DB_PATH",
+        "AETHERFLOW_RELEASE_ROOT",
+        "AETHERFLOW_RELEASE_CONF",
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_INSTALL_ROOT",
+    ]
+    .into_iter()
+    .map(|k| (k, env::var_os(k)))
+    .collect();
+    for (k, _) in &saved_vars {
+        env::remove_var(k);
+    }
+
+    let root = env::temp_dir().join(format!("af-resync-tls-unit-{}", uuid::Uuid::new_v4()));
+    let apache_dir = root.join("etc/apache2");
+    let avail = apache_dir.join("sites-available");
+    let enabled = apache_dir.join("sites-enabled");
+    fs::create_dir_all(&avail).unwrap();
+    fs::create_dir_all(&enabled).unwrap();
+
+    // Seed isolated state DB with settings + app_ingress_configs.
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let db_path = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE settings (id INTEGER PRIMARY KEY, base_domain TEXT);
+         INSERT INTO settings (id, base_domain) VALUES (1, 'example.test');
+         CREATE TABLE app_ingress_configs (
+             app_name TEXT PRIMARY KEY,
+             public_domain TEXT NOT NULL DEFAULT '',
+             listen_port INTEGER NOT NULL DEFAULT 0,
+             external_access_enabled INTEGER NOT NULL DEFAULT 0,
+             tls_enabled INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT INTO app_ingress_configs VALUES
+             ('aaa-nonexistent', 'aaa.example.test', 9999, 1, 1),
+             ('jellyfin', 'jellyfin.example.test', 8096, 1, 1),
+             ('radarr', 'radarr.example.test', 7878, 1, 1),
+             ('sonarr', 'sonarr.example.test', 8989, 1, 1);",
+    )
+    .unwrap();
+    drop(conn);
+
+    // Real self-signed cert covering example.test + sonarr.example.test (NOT radarr.example.test).
+    create_test_tls_cert(
+        &root.join("etc/letsencrypt/live/example.test"),
+        "DNS:example.test,DNS:sonarr.example.test",
+    );
+
+    // sonarr: pending 503 external vhost + active internal vhost (which must be preserved).
+    let sonarr_int = "<VirtualHost *:80>\n    ServerName sonarr.aether.local\n</VirtualHost>\n";
+    let sonarr_pending = "<VirtualHost *:80>\n    ServerName sonarr.example.test\n    RewriteEngine On\n    RewriteRule ^ - [R=503,L]\n    ErrorDocument 503 \"TLS certificate provisioning pending\"\n</VirtualHost>\n";
+    fs::write(avail.join("aetherflow-app-sonarr.conf"), sonarr_int).unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-app-sonarr.conf",
+        enabled.join("aetherflow-app-sonarr.conf"),
+    )
+    .unwrap();
+    fs::write(avail.join("aetherflow-ext-sonarr.conf"), sonarr_pending).unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-sonarr.conf",
+        enabled.join("aetherflow-ext-sonarr.conf"),
+    )
+    .unwrap();
+
+    // radarr: pending 503 external vhost whose SAN is NOT in cert -> must stay untouched.
+    let radarr_pending = "# sentinel-pending-radarr\n<VirtualHost *:80>\n    ServerName radarr.example.test\n    RewriteRule ^ - [R=503,L]\n    ErrorDocument 503 \"TLS certificate provisioning pending\"\n</VirtualHost>\n";
+    fs::write(avail.join("aetherflow-ext-radarr.conf"), radarr_pending).unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-radarr.conf",
+        enabled.join("aetherflow-ext-radarr.conf"),
+    )
+    .unwrap();
+
+    // jellyfin: already active :443 vhost with custom sentinel -> must be skipped untouched.
+    let jellyfin_active = "# sentinel-active-jellyfin\n<VirtualHost *:443>\n    ServerName jellyfin.example.test\n    SSLEngine On\n</VirtualHost>\n";
+    fs::write(avail.join("aetherflow-ext-jellyfin.conf"), jellyfin_active).unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-jellyfin.conf",
+        enabled.join("aetherflow-ext-jellyfin.conf"),
+    )
+    .unwrap();
+
+    // aaa-nonexistent: even with a pending file present, unknown catalog app must warn & skip without aborting sonarr.
+    fs::write(
+        avail.join("aetherflow-ext-aaa-nonexistent.conf"),
+        "<VirtualHost *:80>\n    ErrorDocument 503 \"TLS certificate provisioning pending\"\n</VirtualHost>\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-aaa-nonexistent.conf",
+        enabled.join("aetherflow-ext-aaa-nonexistent.conf"),
+    )
+    .unwrap();
+
+    let summary = resync_managed_tls_vhosts(&apache_dir, Some(&root))
+        .await
+        .unwrap();
+    assert_eq!(summary, "resynced 1 TLS vhost(s)");
+
+    // sonarr upgraded from 503 pending to active :443 HTTPS; internal vhost kept.
+    let sonarr_after = fs::read_to_string(avail.join("aetherflow-ext-sonarr.conf")).unwrap();
+    assert!(
+        !sonarr_after.contains("TLS certificate provisioning pending"),
+        "expected sonarr pending 503 replaced, got:\n{sonarr_after}"
+    );
+    assert!(
+        sonarr_after.contains("<VirtualHost *:443>"),
+        "{sonarr_after}"
+    );
+    assert!(sonarr_after.contains("SSLEngine On"), "{sonarr_after}");
+    assert!(
+        sonarr_after
+            .contains("SSLCertificateFile /etc/letsencrypt/live/example.test/fullchain.pem"),
+        "{sonarr_after}"
+    );
+    assert!(
+        enabled.join("aetherflow-app-sonarr.conf").is_file(),
+        "sonarr internal vhost must remain enabled after TLS resync"
+    );
+
+    // radarr (no SAN) and jellyfin (already active) must remain byte-identical.
+    assert_eq!(
+        fs::read_to_string(avail.join("aetherflow-ext-radarr.conf")).unwrap(),
+        radarr_pending
+    );
+    assert_eq!(
+        fs::read_to_string(avail.join("aetherflow-ext-jellyfin.conf")).unwrap(),
+        jellyfin_active
+    );
+
+    // Second run must be a no-op (sonarr is no longer pending).
+    let second = resync_managed_tls_vhosts(&apache_dir, Some(&root))
+        .await
+        .unwrap();
+    assert_eq!(second, "resynced 0 TLS vhost(s)");
+
+    for (k, prev) in saved_vars {
+        match prev {
+            Some(v) => env::set_var(k, v),
+            None => env::remove_var(k),
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resync_tls_route_end_to_end_via_runner_socket() {
+    let _env_guard = ENV_TEST_MUTEX.lock().await;
+    let saved_vars: Vec<(&str, Option<std::ffi::OsString>)> = [
+        "AETHERFLOW_RUNNER_SOCK",
+        "AETHERFLOW_APACHE_DIR",
+        "AF_DB_PATH",
+        "AETHERFLOW_RELEASE_ROOT",
+        "AETHERFLOW_RELEASE_CONF",
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_INSTALL_ROOT",
+    ]
+    .into_iter()
+    .map(|k| (k, env::var_os(k)))
+    .collect();
+    for (k, _) in &saved_vars {
+        env::remove_var(k);
+    }
+
+    let root = PathBuf::from("/tmp").join(format!(
+        "af-resync-e2e-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..10]
+    ));
+    let apache_dir = root.join("etc/apache2");
+    let avail = apache_dir.join("sites-available");
+    let enabled = apache_dir.join("sites-enabled");
+    fs::create_dir_all(&avail).unwrap();
+    fs::create_dir_all(&enabled).unwrap();
+
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let db_path = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE settings (id INTEGER PRIMARY KEY, base_domain TEXT);
+         INSERT INTO settings (id, base_domain) VALUES (1, 'example.test');
+         CREATE TABLE app_ingress_configs (
+             app_name TEXT PRIMARY KEY,
+             public_domain TEXT NOT NULL DEFAULT '',
+             listen_port INTEGER NOT NULL DEFAULT 0,
+             external_access_enabled INTEGER NOT NULL DEFAULT 0,
+             tls_enabled INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT INTO app_ingress_configs VALUES
+             ('sonarr', 'sonarr.example.test', 8989, 1, 1);",
+    )
+    .unwrap();
+    drop(conn);
+
+    create_test_tls_cert(
+        &root.join("etc/letsencrypt/live/example.test"),
+        "DNS:example.test,DNS:sonarr.example.test",
+    );
+
+    fs::write(
+        avail.join("aetherflow-ext-sonarr.conf"),
+        "<VirtualHost *:80>\n    ServerName sonarr.example.test\n    RewriteRule ^ - [R=503,L]\n    ErrorDocument 503 \"TLS certificate provisioning pending\"\n</VirtualHost>\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-sonarr.conf",
+        enabled.join("aetherflow-ext-sonarr.conf"),
+    )
+    .unwrap();
+
+    let sock_path = root.join("runner.sock");
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+    env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+    env::set_var("AETHERFLOW_APACHE_DIR", &apache_dir);
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve_runner_connections(
+        listener,
+        build_runner_router(),
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+
+    let resp = trigger_resync_tls_vhosts_via_runner().await.unwrap();
+    assert!(resp.success, "{}", resp.error);
+    assert_eq!(resp.output, "resynced 1 TLS vhost(s)");
+
+    let sonarr_after = fs::read_to_string(avail.join("aetherflow-ext-sonarr.conf")).unwrap();
+    assert!(
+        sonarr_after.contains("<VirtualHost *:443>"),
+        "{sonarr_after}"
+    );
+    assert!(sonarr_after.contains("SSLEngine On"), "{sonarr_after}");
+    assert!(!sonarr_after.contains("TLS certificate provisioning pending"));
+
+    let _ = shutdown_tx.send(());
+    let _ = server.await;
+    for (k, prev) in saved_vars {
+        match prev {
+            Some(v) => env::set_var(k, v),
+            None => env::remove_var(k),
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resync_tls_vhosts_aggregates_partial_errors_propagates_500_and_handles_regular_enabled_file(
+) {
+    let _env_guard = ENV_TEST_MUTEX.lock().await;
+    let env_keys = [
+        "AETHERFLOW_RUNNER_SOCK",
+        "AETHERFLOW_APACHE_DIR",
+        "AETHERFLOW_FS_ROOT",
+        "AETHERFLOW_RELEASE_ROOT",
+        "AETHERFLOW_DB_PATH",
+        "AF_DB_PATH",
+        "DB_PATH",
+        "DATA_DIR",
+    ];
+    let saved_vars: Vec<(&str, Option<std::ffi::OsString>)> =
+        env_keys.iter().map(|k| (*k, env::var_os(k))).collect();
+    for k in env_keys {
+        env::remove_var(k);
+    }
+
+    let root = PathBuf::from("/tmp").join(format!(
+        "af-resync-err-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..10]
+    ));
+    let apache_dir = root.join("etc/apache2");
+    let avail = apache_dir.join("sites-available");
+    let enabled = apache_dir.join("sites-enabled");
+    fs::create_dir_all(&avail).unwrap();
+    fs::create_dir_all(&enabled).unwrap();
+
+    let cfg = af_release::ReleaseConfig::for_root(&root);
+    let db_path = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE settings (id INTEGER PRIMARY KEY, base_domain TEXT);
+         INSERT INTO settings (id, base_domain) VALUES (1, 'example.test');
+         CREATE TABLE app_ingress_configs (
+             app_name TEXT PRIMARY KEY,
+             public_domain TEXT NOT NULL DEFAULT '',
+             external_access_enabled INTEGER NOT NULL DEFAULT 0,
+             tls_enabled INTEGER NOT NULL DEFAULT 1,
+             listen_port INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT INTO app_ingress_configs VALUES ('lidarr', 'lidarr.example.test', 1, 1, 8686);
+         INSERT INTO app_ingress_configs VALUES ('radarr', 'radarr.example.test', 1, 1, 7878);
+         INSERT INTO app_ingress_configs VALUES ('sonarr', 'sonarr.example.test', 1, 1, 8989);",
+    )
+    .unwrap();
+    drop(conn);
+
+    create_test_tls_cert(
+        &root.join("etc/letsencrypt/live/example.test"),
+        "DNS:example.test,DNS:lidarr.example.test,DNS:radarr.example.test,DNS:sonarr.example.test",
+    );
+
+    let pending_body = |domain: &str| {
+        format!(
+            "<VirtualHost *:80>\n    ServerName {domain}\n    RewriteRule ^ - [R=503,L]\n    ErrorDocument 503 \"TLS certificate provisioning pending\"\n</VirtualHost>\n"
+        )
+    };
+
+    // lidarr: regular file directly in sites-enabled (no sites-available file) -> upgraded via fallback.
+    fs::write(
+        enabled.join("aetherflow-ext-lidarr.conf"),
+        pending_body("lidarr.example.test"),
+    )
+    .unwrap();
+
+    // radarr: invalid UTF-8 in sites-available -> records error without aborting sonarr.
+    fs::write(avail.join("aetherflow-ext-radarr.conf"), [0xff, 0xfe, 0x00]).unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-radarr.conf",
+        enabled.join("aetherflow-ext-radarr.conf"),
+    )
+    .unwrap();
+
+    // sonarr: standard symlinked pending vhost -> still upgraded despite radarr failing earlier.
+    fs::write(
+        avail.join("aetherflow-ext-sonarr.conf"),
+        pending_body("sonarr.example.test"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-sonarr.conf",
+        enabled.join("aetherflow-ext-sonarr.conf"),
+    )
+    .unwrap();
+
+    let sock_path = root.join("runner.sock");
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+    env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+    env::set_var("AETHERFLOW_APACHE_DIR", &apache_dir);
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve_runner_connections(
+        listener,
+        build_runner_router(),
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+
+    let err = trigger_resync_tls_vhosts_via_runner().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("resynced 2 TLS vhost(s) with 1 error(s)") && msg.contains("radarr"),
+        "expected partial-failure summary with radarr error, got: {msg}"
+    );
+
+    let lidarr_after = fs::read_to_string(avail.join("aetherflow-ext-lidarr.conf")).unwrap();
+    assert!(lidarr_after.contains("SSLEngine On"), "{lidarr_after}");
+    let sonarr_after = fs::read_to_string(avail.join("aetherflow-ext-sonarr.conf")).unwrap();
+    assert!(sonarr_after.contains("SSLEngine On"), "{sonarr_after}");
+
+    let _ = shutdown_tx.send(());
+    let _ = server.await;
+    for (k, prev) in saved_vars {
+        match prev {
+            Some(v) => env::set_var(k, v),
+            None => env::remove_var(k),
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remove_only_ignores_symlinked_legacy_vhost_and_cleans_dangling_le_ssl_symlink() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let scratch = env::temp_dir().join(format!("af-rm-edges-{}", uuid::Uuid::new_v4()));
+    let avail = scratch.join("sites-available");
+    let enabled = scratch.join("sites-enabled");
+    fs::create_dir_all(&avail).unwrap();
+    fs::create_dir_all(&enabled).unwrap();
+
+    let victim = scratch.join("victim.conf");
+    fs::write(&victim, "keep-legacy").unwrap();
+    std::os::unix::fs::symlink(&victim, avail.join("sonarr.conf")).unwrap();
+
+    let req = RunnerApacheVhostRequest {
+        app_name: "sonarr".into(),
+        remove_only: true,
+        reload_apache: true,
+        ..Default::default()
+    };
+
+    // 1. Only symlinked legacy sonarr.conf present -> short-circuits without failing or running configtest.
+    let tests_run = AtomicUsize::new(0);
+    let reloads_run = AtomicUsize::new(0);
+    apply_ingress_vhost_with_hooks(
+        &req,
+        &scratch,
+        || {
+            tests_run.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+        || {
+            reloads_run.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(tests_run.load(Ordering::SeqCst), 0);
+    assert_eq!(reloads_run.load(Ordering::SeqCst), 0);
+    assert!(avail.join("sonarr.conf").symlink_metadata().is_ok());
+
+    // 2. Dangling managed le-ssl symlink in sites-enabled -> must NOT short-circuit, removes it & reloads.
+    let dangling_ssl = enabled.join("aetherflow-ext-sonarr-le-ssl.conf");
+    std::os::unix::fs::symlink(
+        "../sites-available/aetherflow-ext-sonarr-le-ssl.conf",
+        &dangling_ssl,
+    )
+    .unwrap();
+    apply_ingress_vhost_with_hooks(
+        &req,
+        &scratch,
+        || {
+            tests_run.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+        || {
+            reloads_run.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(tests_run.load(Ordering::SeqCst), 1);
+    assert_eq!(reloads_run.load(Ordering::SeqCst), 1);
+    assert!(dangling_ssl.symlink_metadata().is_err());
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep-legacy");
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires a privileged systemd test host"]

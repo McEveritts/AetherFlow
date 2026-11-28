@@ -54,22 +54,85 @@ fn read_regular_file_nofollow(path: &Path) -> anyhow::Result<Option<(Vec<u8>, u3
 }
 
 fn snapshot_enabled_vhost(path: &Path) -> anyhow::Result<PrevEnabledVhostState> {
-    match fs::symlink_metadata(path) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let enabled_dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("enabled vhost path has no parent: {}", path.display()))?;
+    let file_name = confined_file_name(path)?;
+    let Some(dir) = job_receipts::ReceiptDirectory::open_existing(enabled_dir).map_err(|err| {
+        anyhow::anyhow!(
+            "refusing unsafe enabled vhost directory {}: {err}",
+            enabled_dir.display()
+        )
+    })?
+    else {
+        return Ok(PrevEnabledVhostState::Missing);
+    };
+    if unsafe { libc::geteuid() } == 0 {
+        dir.verify_owners(&[0]).map_err(|err| {
+            anyhow::anyhow!(
+                "refusing untrusted enabled vhost directory {}: {err}",
+                enabled_dir.display()
+            )
+        })?;
+    }
+    let entry = match job_receipts::entry_at(dir.file(), file_name) {
+        Ok(stat) => stat,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Ok(PrevEnabledVhostState::Missing)
+            return Ok(PrevEnabledVhostState::Missing);
         }
-        Err(err) => Err(err.into()),
-        Ok(meta) => {
-            if meta.file_type().is_symlink() {
-                Ok(PrevEnabledVhostState::Symlink(fs::read_link(path)?))
-            } else if meta.is_file() {
-                let (bytes, mode) = read_regular_file_nofollow(path)?
-                    .ok_or_else(|| anyhow::anyhow!("vhost disappeared during snapshot"))?;
-                Ok(PrevEnabledVhostState::RegularFile(bytes, mode))
-            } else {
-                anyhow::bail!("refusing non-regular enabled vhost path {}", path.display());
-            }
+        Err(err) => return Err(err.into()),
+    };
+    let file_type = entry.st_mode & libc::S_IFMT;
+    if file_type == libc::S_IFLNK {
+        let name_c = job_receipts::c_name(file_name)?;
+        let mut buf = vec![0u8; 4096];
+        let n = unsafe {
+            libc::readlinkat(
+                dir.file().as_raw_fd(),
+                name_c.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+            )
+        };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error().into());
         }
+        let n = n as usize;
+        if n == 0 || n >= buf.len() {
+            anyhow::bail!(
+                "refusing oversized enabled vhost symlink {}",
+                path.display()
+            );
+        }
+        let target = PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..n]));
+        let file_name_str = file_name
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid enabled vhost filename {}", path.display()))?;
+        let apache_dir = enabled_dir.parent().ok_or_else(|| {
+            anyhow::anyhow!("enabled vhost dir has no parent {}", enabled_dir.display())
+        })?;
+        let rel_expected = PathBuf::from(format!("../sites-available/{file_name_str}"));
+        let abs_expected = apache_dir.join("sites-available").join(file_name_str);
+        if target.as_os_str() != rel_expected.as_os_str()
+            && target.as_os_str() != abs_expected.as_os_str()
+        {
+            anyhow::bail!(
+                "refusing unsafe enabled vhost symlink {} -> {}",
+                path.display(),
+                target.display()
+            );
+        }
+        Ok(PrevEnabledVhostState::Symlink(target))
+    } else if file_type == libc::S_IFREG {
+        let (bytes, mode) = read_regular_file_nofollow(path)?
+            .ok_or_else(|| anyhow::anyhow!("vhost disappeared during snapshot"))?;
+        Ok(PrevEnabledVhostState::RegularFile(bytes, mode))
+    } else {
+        anyhow::bail!("refusing non-regular enabled vhost path {}", path.display());
     }
 }
 
@@ -233,7 +296,7 @@ pub(crate) fn validate_ingress_vhost_request(req: &RunnerApacheVhostRequest) -> 
 }
 
 #[derive(Debug)]
-pub(crate) struct VhostBackup {
+pub struct VhostBackup {
     avail_path: PathBuf,
     enabled_path: PathBuf,
     prev_avail: Option<(Vec<u8>, u32)>,
@@ -254,25 +317,23 @@ fn resolve_lifecycle_apache_dir(fs_root: Option<&Path>) -> PathBuf {
     }
 }
 
-pub(crate) fn snapshot_app_vhost_backups(
+pub fn snapshot_app_vhost_backups(
     app_name: &str,
     fs_root: Option<&Path>,
 ) -> anyhow::Result<Vec<VhostBackup>> {
+    let app_name = af_models::resolve_package_lock_name(app_name);
     if !SAFE_INGRESS_APP_NAME.is_match(app_name) {
         return Ok(Vec::new());
     }
     let apache_dir = resolve_lifecycle_apache_dir(fs_root);
     let avail_dir = apache_dir.join("sites-available");
     let enabled_dir = apache_dir.join("sites-enabled");
-    if apache_dir.exists() {
-        ensure_non_symlink_dir(&apache_dir, false)?;
-    }
-    if avail_dir.exists() {
-        ensure_non_symlink_dir(&avail_dir, false)?;
-    }
-    if enabled_dir.exists() {
-        ensure_non_symlink_dir(&enabled_dir, false)?;
-    }
+    ensure_non_symlink_dir(&apache_dir, false)?;
+    ensure_non_symlink_dir(&avail_dir, false)?;
+    ensure_non_symlink_dir(&enabled_dir, false)?;
+    let _ = job_receipts::ReceiptDirectory::open_existing(&apache_dir)?;
+    let avail_present = job_receipts::ReceiptDirectory::open_existing(&avail_dir)?.is_some();
+    let enabled_present = job_receipts::ReceiptDirectory::open_existing(&enabled_dir)?.is_some();
     let names = [
         format!("aetherflow-app-{app_name}.conf"),
         format!("aetherflow-ext-{app_name}.conf"),
@@ -283,12 +344,12 @@ pub(crate) fn snapshot_app_vhost_backups(
     for name in names {
         let avail_path = avail_dir.join(&name);
         let enabled_path = enabled_dir.join(&name);
-        let prev_avail = if avail_dir.exists() {
+        let prev_avail = if avail_present {
             read_regular_file_nofollow(&avail_path)?
         } else {
             None
         };
-        let prev_enabled = if enabled_dir.exists() {
+        let prev_enabled = if enabled_present {
             snapshot_enabled_vhost(&enabled_path)?
         } else {
             PrevEnabledVhostState::Missing
@@ -303,25 +364,44 @@ pub(crate) fn snapshot_app_vhost_backups(
     Ok(backups)
 }
 
-pub(crate) fn restore_app_vhost_backups(backups: &[VhostBackup]) -> anyhow::Result<bool> {
+pub fn restore_app_vhost_backups(backups: &[VhostBackup]) -> anyhow::Result<bool> {
     if backups.is_empty() {
         return Ok(false);
     }
+    let mut validated_dirs = HashSet::new();
+    for backup in backups {
+        for dir in [backup.avail_path.parent(), backup.enabled_path.parent()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(apache_dir) = dir.parent() {
+                if validated_dirs.insert(apache_dir.to_path_buf()) {
+                    ensure_non_symlink_dir(apache_dir, false)?;
+                    let _ = job_receipts::ReceiptDirectory::open_existing(apache_dir)?;
+                }
+            }
+            if validated_dirs.insert(dir.to_path_buf()) {
+                ensure_non_symlink_dir(dir, false)?;
+                let _ = job_receipts::ReceiptDirectory::open_existing(dir)?;
+            }
+        }
+    }
     let mut changed = false;
     for backup in backups {
-        let curr_avail = if backup.avail_path.parent().is_some_and(Path::exists) {
-            read_regular_file_nofollow(&backup.avail_path)?
-        } else {
-            None
+        let curr_avail = match backup.avail_path.parent() {
+            Some(dir) if job_receipts::ReceiptDirectory::open_existing(dir)?.is_some() => {
+                read_regular_file_nofollow(&backup.avail_path)?
+            }
+            _ => None,
         };
-        let curr_enabled = if backup.enabled_path.parent().is_some_and(Path::exists) {
-            snapshot_enabled_vhost(&backup.enabled_path)?
-        } else {
-            PrevEnabledVhostState::Missing
+        let curr_enabled = match backup.enabled_path.parent() {
+            Some(dir) if job_receipts::ReceiptDirectory::open_existing(dir)?.is_some() => {
+                snapshot_enabled_vhost(&backup.enabled_path)?
+            }
+            _ => PrevEnabledVhostState::Missing,
         };
         if curr_avail != backup.prev_avail || curr_enabled != backup.prev_enabled {
             changed = true;
-            break;
         }
     }
     if !changed {
@@ -331,7 +411,7 @@ pub(crate) fn restore_app_vhost_backups(backups: &[VhostBackup]) -> anyhow::Resu
     Ok(true)
 }
 
-pub(crate) async fn reload_apache_after_rollback_if_live(fs_root: Option<&Path>) {
+pub async fn reload_apache_after_rollback_if_live(fs_root: Option<&Path>) {
     if fs_root.is_none()
         && env::var_os("AETHERFLOW_APACHE_DIR").is_none()
         && env::var_os("AETHERFLOW_SYSTEMD_ROOT").is_none()
@@ -537,8 +617,9 @@ where
         &ssl_conf_name,
         &legacy_conf_name,
     ];
-    let mut backups = Vec::with_capacity(targets.len());
-    for name in targets {
+    let target_count = if any_enabled { targets.len() } else { 3 };
+    let mut backups = Vec::with_capacity(target_count);
+    for &name in &targets[..target_count] {
         let avail_path = avail_dir.join(name);
         let enabled_path = enabled_dir.join(name);
         let prev_avail = read_regular_file_nofollow(&avail_path)?;
@@ -549,6 +630,18 @@ where
             prev_avail,
             prev_enabled,
         });
+    }
+
+    if req.remove_only
+        && backups
+            .iter()
+            .take(3)
+            .all(|b| b.prev_avail.is_none() && b.prev_enabled == PrevEnabledVhostState::Missing)
+    {
+        return Ok(format!(
+            "synced apache vhosts ({}=disabled, {}=disabled)",
+            int_conf_name, ext_conf_name
+        ));
     }
 
     let contents = |index: usize| -> anyhow::Result<Vec<&str>> {
@@ -872,7 +965,9 @@ pub(crate) async fn execute_certbot_sync_with_candidates(
     })?;
 
     let mut cmd = Command::new(bin);
-    cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
+    cmd.env("AF_CERTBOT_SYNC_FROM_RUNNER", "1")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
     let out = tokio::time::timeout(timeout, cmd.output())
         .await
         .map_err(|_| anyhow::anyhow!("af-certbot-sync timed out after {}s", timeout.as_secs()))?
@@ -899,6 +994,245 @@ pub(crate) async fn execute_certbot_sync_with_candidates(
     })
 }
 
+pub async fn resync_managed_tls_vhosts(
+    apache_dir: &Path,
+    fs_root: Option<&Path>,
+) -> anyhow::Result<String> {
+    static RESYNC_TLS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _lock = RESYNC_TLS_LOCK.lock().await;
+
+    let effective_fs_root: Option<&Path> = fs_root.or_else(|| {
+        if apache_dir.ends_with("etc/apache2") && apache_dir != Path::new("/etc/apache2") {
+            apache_dir.parent().and_then(Path::parent)
+        } else {
+            None
+        }
+    });
+
+    let apache_dir_owned = apache_dir.to_path_buf();
+    let db_root = effective_fs_root.map(Path::to_path_buf);
+    let scan_result = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<Option<(Vec<RunnerApacheVhostRequest>, Vec<String>)>> {
+            ensure_non_symlink_dir(&apache_dir_owned, false)?;
+            let avail_dir = apache_dir_owned.join("sites-available");
+            let active = apache_dir_owned.join("sites-enabled");
+            ensure_non_symlink_dir(&avail_dir, false)?;
+            ensure_non_symlink_dir(&active, false)?;
+            let _ = job_receipts::ReceiptDirectory::open_existing(&apache_dir_owned)?;
+            let _ = job_receipts::ReceiptDirectory::open_existing(&avail_dir)?;
+            if job_receipts::ReceiptDirectory::open_existing(&active)?.is_none() {
+                return Ok(None);
+            }
+
+            let conn = open_runner_state_database(db_root.as_deref())?;
+            let mut stmt = conn.prepare(
+                "SELECT app_name, public_domain, listen_port FROM app_ingress_configs \
+                 WHERE external_access_enabled = 1 AND tls_enabled = 1 AND public_domain <> '' AND listen_port > 0 \
+                 ORDER BY app_name",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i32>(2)?,
+                ))
+            })?;
+            let configs: Vec<(String, String, i32)> = rows.collect::<Result<_, _>>()?;
+            drop(stmt);
+            drop(conn);
+
+            let known_packages: HashSet<String> = load_runner_package_definitions_in_root(None)
+                .map(|iter| iter.map(|pkg| pkg.name).collect())
+                .unwrap_or_default();
+            let mut tls_ready_cache: HashMap<String, bool> = HashMap::new();
+            let mut ready_requests: Vec<RunnerApacheVhostRequest> = Vec::new();
+            let mut scan_errors: Vec<String> = Vec::new();
+
+            for (raw_app_name, raw_domain, listen_port) in configs {
+                let clean_app = af_models::resolve_package_lock_name(&raw_app_name);
+                let domain = raw_domain.trim();
+                if !SAFE_INGRESS_APP_NAME.is_match(clean_app)
+                    || !known_packages.contains(clean_app)
+                    || domain.is_empty()
+                {
+                    tracing::warn!(
+                        raw_app = %raw_app_name,
+                        clean_app = %clean_app,
+                        domain = %domain,
+                        "Skipping invalid or unknown app during managed TLS vhost resync"
+                    );
+                    continue;
+                }
+
+                let ext_conf_name = format!("aetherflow-ext-{clean_app}.conf");
+                let ext_enabled = active.join(&ext_conf_name);
+                let ext_avail = avail_dir.join(&ext_conf_name);
+                let ext_enabled_state = match snapshot_enabled_vhost(&ext_enabled) {
+                    Ok(PrevEnabledVhostState::Missing) => continue,
+                    Ok(state) => state,
+                    Err(err) => {
+                        tracing::warn!(
+                            app = %clean_app,
+                            path = %ext_enabled.display(),
+                            error = %err,
+                            "Refusing unsafe enabled Apache vhost during managed TLS resync"
+                        );
+                        scan_errors.push(format!("{clean_app}: {err}"));
+                        continue;
+                    }
+                };
+
+                let existing_bytes = match ext_enabled_state {
+                    PrevEnabledVhostState::Missing => continue,
+                    PrevEnabledVhostState::Symlink(_) => match read_regular_file_nofollow(&ext_avail)
+                    {
+                        Ok(Some((bytes, _))) => Some(bytes),
+                        Ok(None) => None,
+                        Err(err) => {
+                            tracing::warn!(
+                                app = %clean_app,
+                                path = %ext_avail.display(),
+                                error = %err,
+                                "Failed to read available Apache vhost during managed TLS resync"
+                            );
+                            scan_errors.push(format!("{clean_app}: {err}"));
+                            continue;
+                        }
+                    },
+                    PrevEnabledVhostState::RegularFile(enabled_bytes, _) => {
+                        match read_regular_file_nofollow(&ext_avail) {
+                            Ok(Some((bytes, _))) => Some(bytes),
+                            Ok(None) => Some(enabled_bytes),
+                            Err(err) => {
+                                tracing::warn!(
+                                    app = %clean_app,
+                                    path = %ext_avail.display(),
+                                    error = %err,
+                                    "Failed to read available Apache vhost during managed TLS resync"
+                                );
+                                scan_errors.push(format!("{clean_app}: {err}"));
+                                continue;
+                            }
+                        }
+                    }
+                };
+                let Some(existing_bytes) = existing_bytes else {
+                    continue;
+                };
+                let existing_text = match std::str::from_utf8(&existing_bytes) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        tracing::warn!(
+                            app = %clean_app,
+                            error = %err,
+                            "External Apache vhost is not valid UTF-8 during managed TLS resync"
+                        );
+                        scan_errors.push(format!(
+                            "{clean_app}: invalid UTF-8 in external Apache vhost: {err}"
+                        ));
+                        continue;
+                    }
+                };
+
+                if !existing_text.contains("TLS certificate provisioning pending") {
+                    continue;
+                }
+
+                let domain_key = domain.to_ascii_lowercase();
+                let tls_ready = *tls_ready_cache.entry(domain_key).or_insert_with(|| {
+                    package_executor::check_domain_tls_ready(domain, db_root.as_deref())
+                });
+                if !tls_ready {
+                    continue;
+                }
+
+                let app_conf_name = format!("aetherflow-app-{clean_app}.conf");
+                let app_enabled = active.join(&app_conf_name);
+                let app_avail = avail_dir.join(&app_conf_name);
+                let has_internal_vhost = match snapshot_enabled_vhost(&app_enabled) {
+                    Ok(PrevEnabledVhostState::Missing) => false,
+                    Ok(PrevEnabledVhostState::RegularFile(..)) => true,
+                    Ok(PrevEnabledVhostState::Symlink(_)) => {
+                        match read_regular_file_nofollow(&app_avail) {
+                            Ok(Some(_)) => true,
+                            Ok(None) => false,
+                            Err(err) => {
+                                scan_errors.push(format!("{clean_app}: {err}"));
+                                continue;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        scan_errors.push(format!("{clean_app}: {err}"));
+                        continue;
+                    }
+                };
+
+                let req = RunnerApacheVhostRequest {
+                    app_name: clean_app.to_string(),
+                    internal_domain: has_internal_vhost
+                        .then(|| format!("{clean_app}.aether.local")),
+                    public_domain: Some(domain.to_string()),
+                    listen_port,
+                    external_access_enabled: true,
+                    tls_enabled: true,
+                    reload_apache: true,
+                    remove_only: false,
+                };
+
+                if let Err(msg) = validate_ingress_vhost_request(&req) {
+                    tracing::warn!(
+                        app = %clean_app,
+                        domain = %domain,
+                        error = %msg,
+                        "Invalid ingress vhost request during managed TLS resync"
+                    );
+                    scan_errors.push(format!("{clean_app}: {msg}"));
+                    continue;
+                }
+
+                ready_requests.push(req);
+            }
+
+            Ok(Some((ready_requests, scan_errors)))
+        },
+    )
+    .await??;
+
+    let Some((ready_requests, mut errors)) = scan_result else {
+        return Ok("no sites-enabled directory".to_string());
+    };
+    let mut updated_apps: Vec<String> = Vec::new();
+
+    for req in ready_requests {
+        let clean_app = req.app_name.clone();
+        let domain = req.public_domain.as_deref().unwrap_or("");
+        match sync_apache_vhost_local(&req, apache_dir).await {
+            Ok(_) => updated_apps.push(clean_app),
+            Err(err) => {
+                tracing::warn!(
+                    app = %clean_app,
+                    domain = %domain,
+                    error = %err,
+                    "Failed to resync pending TLS Apache vhost"
+                );
+                errors.push(format!("{clean_app}: {err}"));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "resynced {} TLS vhost(s) with {} error(s): {}",
+            updated_apps.len(),
+            errors.len(),
+            errors.join("; ")
+        ));
+    }
+
+    Ok(format!("resynced {} TLS vhost(s)", updated_apps.len()))
+}
+
 pub async fn sync_certbot_and_managed_ingress() -> anyhow::Result<String> {
     static CERTBOT_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _lock = CERTBOT_SYNC_LOCK.lock().await;
@@ -909,44 +1243,43 @@ pub async fn sync_certbot_and_managed_ingress() -> anyhow::Result<String> {
     let output =
         execute_certbot_sync_with_candidates(&candidates, true, Duration::from_secs(120)).await?;
     let apache_dir = resolve_provider_dir("AETHERFLOW_APACHE_DIR", "/etc/apache2");
-    let active = apache_dir.join("sites-enabled");
-    if !active.is_dir() {
-        return Ok(output);
-    }
-    let configs = tokio::task::spawn_blocking(|| -> anyhow::Result<Vec<(String, String, i32)>> {
-        let conn = open_runner_state_database(None)?;
-        let mut stmt = conn.prepare(
-            "SELECT app_name, public_domain, listen_port FROM app_ingress_configs \
-             WHERE external_access_enabled = 1 AND tls_enabled = 1 AND public_domain <> '' AND listen_port > 0",
-        )?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }).await??;
-    for (app_name, domain, listen_port) in configs {
-        if !SAFE_INGRESS_APP_NAME.is_match(&app_name)
-            || !active
-                .join(format!("aetherflow-ext-{app_name}.conf"))
-                .is_file()
-        {
-            continue;
-        }
-        let req = RunnerApacheVhostRequest {
-            internal_domain: active
-                .join(format!("aetherflow-app-{app_name}.conf"))
-                .is_file()
-                .then(|| format!("{app_name}.aether.local")),
-            app_name,
-            public_domain: Some(domain),
-            listen_port,
-            external_access_enabled: true,
-            tls_enabled: true,
-            reload_apache: true,
-            ..Default::default()
-        };
-        validate_ingress_vhost_request(&req).map_err(anyhow::Error::msg)?;
-        sync_apache_vhost_local(&req, &apache_dir).await?;
-    }
+    resync_managed_tls_vhosts(&apache_dir, None).await?;
     Ok(output)
+}
+
+pub(crate) async fn handle_resync_tls_vhosts() -> (StatusCode, Json<RunnerResponse>) {
+    let apache_dir = resolve_provider_dir("AETHERFLOW_APACHE_DIR", "/etc/apache2");
+    match resync_managed_tls_vhosts(&apache_dir, None).await {
+        Ok(output) => (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output,
+                error: String::new(),
+            }),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: err.to_string(),
+            }),
+        ),
+    }
+}
+
+pub async fn trigger_resync_tls_vhosts_via_runner() -> anyhow::Result<RunnerResponse> {
+    let result = post_runner_json(
+        "/v1/ingress/resync-tls",
+        &json!({}),
+        Duration::from_secs(60),
+    )
+    .await?;
+    if !result.success {
+        anyhow::bail!("runner ingress tls resync error: {}", result.error);
+    }
+    Ok(result)
 }
 
 pub(crate) async fn handle_certbot_sync() -> (StatusCode, Json<RunnerResponse>) {

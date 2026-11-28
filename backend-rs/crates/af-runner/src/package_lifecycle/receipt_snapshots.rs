@@ -138,6 +138,107 @@ impl From<(PathBuf, Option<Vec<u8>>)> for FileSnapshot {
     }
 }
 
+fn is_managed_apache_sites_enabled_alias(
+    package_id: &str,
+    path: &Path,
+    fs_root: Option<&Path>,
+) -> bool {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let clean_app: String = af_models::resolve_package_lock_name(package_id)
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if clean_app.is_empty() {
+        return false;
+    }
+    let rebase = |logical: &str| -> PathBuf {
+        match fs_root {
+            Some(root) => root.join(logical.trim_start_matches('/')),
+            None => PathBuf::from(logical),
+        }
+    };
+    let sites_enabled_dir = rebase("/etc/apache2/sites-enabled");
+    let sites_available_dir = rebase("/etc/apache2/sites-available");
+    if path.parent() != Some(sites_enabled_dir.as_path()) {
+        return false;
+    }
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let is_managed_name = file_name == format!("aetherflow-app-{clean_app}.conf")
+        || file_name == format!("aetherflow-ext-{clean_app}.conf")
+        || file_name == format!("aetherflow-ext-{clean_app}-le-ssl.conf")
+        || file_name == format!("{clean_app}.conf");
+    if !is_managed_name {
+        return false;
+    }
+    let Ok(enabled_dir_fd) = open_dir_nofollow_stepwise_inner(&sites_enabled_dir) else {
+        return false;
+    };
+    let Ok(file_cstr) = CString::new(file_name.as_bytes()) else {
+        return false;
+    };
+    let mut link_st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fstatat(
+            enabled_dir_fd.as_raw_fd(),
+            file_cstr.as_ptr(),
+            &mut link_st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+        || (link_st.st_mode & libc::S_IFMT) != libc::S_IFLNK
+    {
+        return false;
+    }
+    let mut link_buf = vec![0u8; 4096];
+    let n = unsafe {
+        libc::readlinkat(
+            enabled_dir_fd.as_raw_fd(),
+            file_cstr.as_ptr(),
+            link_buf.as_mut_ptr() as *mut libc::c_char,
+            link_buf.len(),
+        )
+    };
+    if n <= 0 || (n as usize) >= link_buf.len() {
+        return false;
+    }
+    let link_target = std::ffi::OsStr::from_bytes(&link_buf[..n as usize]);
+    let abs_expected = sites_available_dir.join(file_name);
+    if verify_no_symlink_ancestors_with_root(&abs_expected, fs_root).is_err() {
+        return false;
+    }
+    match open_dir_nofollow_stepwise_inner(&sites_available_dir) {
+        Ok(avail_dir_fd) => {
+            let mut target_st: libc::stat = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                libc::fstatat(
+                    avail_dir_fd.as_raw_fd(),
+                    file_cstr.as_ptr(),
+                    &mut target_st,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if rc == 0 {
+                if (target_st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+                    return false;
+                }
+            } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+                return false;
+            }
+        }
+        Err(err) if err.is_not_found() => {}
+        Err(_) => return false,
+    }
+    let rel_expected = PathBuf::from(format!("../sites-available/{file_name}"));
+    link_target == rel_expected.as_os_str() || link_target == abs_expected.as_os_str()
+}
+
 pub fn snapshot_blueprint_targets(
     package_id: &str,
     env_cfg: &crate::PackageExecutionEnv,
@@ -159,6 +260,9 @@ pub fn snapshot_blueprint_targets(
             continue;
         }
         verify_no_symlink_ancestors_with_root(&path, env_cfg.fs_root.as_deref())?;
+        if is_managed_apache_sites_enabled_alias(package_id, &path, env_cfg.fs_root.as_deref()) {
+            continue;
+        }
         let state = read_file_entry_bounded_nofollow(&path, 1024 * 1024)?;
         snaps.push(FileSnapshot { path, state });
     }

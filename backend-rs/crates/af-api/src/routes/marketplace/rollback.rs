@@ -1,7 +1,7 @@
 use super::lifecycle::{is_restart_eligible_unit, PackageLifecycleFailure};
 use super::receipts::{restore_candidate_receipts, ReceiptSnapshotEntry};
 use af_models::AppIngressConfig;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(in crate::routes) async fn finalize_post_script_lifecycle_with<
     ApplyFut,
@@ -186,7 +186,7 @@ impl Drop for RunnerLifecycleSnapshotHandle {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_ext_with<
+pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_ext_with_vhosts<
     ControlFn,
     ControlFut,
     StatusFn,
@@ -196,6 +196,8 @@ pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_ext_with<
     restart_units: &[String],
     receipt_snapshots: &[(PathBuf, Option<ReceiptSnapshotEntry>)],
     blueprint_snapshots: &[af_runner::package_lifecycle::FileSnapshot],
+    vhost_backups: &[af_runner::VhostBackup],
+    fs_root: Option<&Path>,
     refuse_restart: bool,
     mut runtime_snapshot: Option<&mut af_runner::package_lifecycle::PackageRuntimeSnapshot>,
     mut runner_snapshot: Option<&mut RunnerLifecycleSnapshotHandle>,
@@ -296,9 +298,38 @@ where
         }
         None
     } else {
+        // Restore vhost backups before runtime and blueprint snapshots because
+        // PackageRuntimeSnapshot::capture also snapshots collect_blueprint_target_paths
+        // (including sites-available and sites-enabled vhosts); running rt.restore()
+        // first would erase drift before restore_app_vhost_backups() can detect it
+        // for reload_apache_after_rollback_if_live.
+        let vhosts_changed = if !vhost_backups.is_empty() {
+            match af_runner::restore_app_vhost_backups(vhost_backups) {
+                Ok(changed) => changed,
+                Err(vhost_err) => {
+                    if let Some(ref mut rt) = runtime_snapshot {
+                        rt.preserve_on_drop = true;
+                    }
+                    if af_services::should_pre_stop_on_update(clean_id) && !restart_units.is_empty()
+                    {
+                        restart_failures.push(
+                            "Refusing to restart pre-stopped service after receipt restoration failure"
+                                .to_string(),
+                        );
+                    }
+                    return (Some(vhost_err.to_string()), restart_failures);
+                }
+            }
+        } else {
+            false
+        };
+
         // Step 2: Restore runtime snapshot if present
         if let Some(ref mut rt) = runtime_snapshot {
             if let Err(rt_err) = rt.restore() {
+                if vhosts_changed {
+                    af_runner::reload_apache_after_rollback_if_live(fs_root).await;
+                }
                 if af_services::should_pre_stop_on_update(clean_id) && !restart_units.is_empty() {
                     restart_failures.push(
                         "Refusing to restart pre-stopped service after runtime restoration failure"
@@ -313,6 +344,9 @@ where
             if let Err(bp_err) =
                 af_runner::package_lifecycle::restore_candidate_receipts(blueprint_snapshots)
             {
+                if vhosts_changed {
+                    af_runner::reload_apache_after_rollback_if_live(fs_root).await;
+                }
                 if af_services::should_pre_stop_on_update(clean_id) && !restart_units.is_empty() {
                     restart_failures.push(
                         "Refusing to restart pre-stopped service after receipt restoration failure"
@@ -321,6 +355,10 @@ where
                 }
                 return (Some(bp_err), restart_failures);
             }
+        }
+
+        if vhosts_changed {
+            af_runner::reload_apache_after_rollback_if_live(fs_root).await;
         }
 
         // Step 3: Restore candidate receipts
@@ -363,6 +401,45 @@ where
     }
 
     (receipt_restore_error, restart_failures)
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_ext_with<
+    ControlFn,
+    ControlFut,
+    StatusFn,
+>(
+    clean_id: &str,
+    quiesce_units: &[String],
+    restart_units: &[String],
+    receipt_snapshots: &[(PathBuf, Option<ReceiptSnapshotEntry>)],
+    blueprint_snapshots: &[af_runner::package_lifecycle::FileSnapshot],
+    refuse_restart: bool,
+    runtime_snapshot: Option<&mut af_runner::package_lifecycle::PackageRuntimeSnapshot>,
+    runner_snapshot: Option<&mut RunnerLifecycleSnapshotHandle>,
+    control_unit: ControlFn,
+    query_status: StatusFn,
+) -> (Option<String>, Vec<String>)
+where
+    ControlFn: FnMut(String, &'static str) -> ControlFut,
+    ControlFut: std::future::Future<Output = anyhow::Result<()>>,
+    StatusFn: Fn(&str) -> String,
+{
+    quiesce_and_restore_candidate_receipts_and_runtime_ext_with_vhosts(
+        clean_id,
+        quiesce_units,
+        restart_units,
+        receipt_snapshots,
+        blueprint_snapshots,
+        &[],
+        None,
+        refuse_restart,
+        runtime_snapshot,
+        runner_snapshot,
+        control_unit,
+        query_status,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -435,11 +512,13 @@ pub(in crate::routes) static CANDIDATE_QUIESCE_RECORDER: std::sync::Mutex<Option
     std::sync::Mutex::new(None);
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_ext(
+pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_with_vhosts(
     clean_id: &str,
     stopped_units: &[String],
     receipt_snapshots: &[(PathBuf, Option<ReceiptSnapshotEntry>)],
     blueprint_snapshots: &[af_runner::package_lifecycle::FileSnapshot],
+    vhost_backups: &[af_runner::VhostBackup],
+    fs_root: Option<&Path>,
     refuse_restart: bool,
     runtime_snapshot: Option<&mut af_runner::package_lifecycle::PackageRuntimeSnapshot>,
     runner_snapshot: Option<&mut RunnerLifecycleSnapshotHandle>,
@@ -457,12 +536,14 @@ pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_ext(
         .filter(|u| is_restart_eligible_unit(u))
         .cloned()
         .collect();
-    quiesce_and_restore_candidate_receipts_and_runtime_ext_with(
+    quiesce_and_restore_candidate_receipts_and_runtime_ext_with_vhosts(
         clean_id,
         &quiesce_units,
         &restart_units,
         receipt_snapshots,
         blueprint_snapshots,
+        vhost_backups,
+        fs_root,
         refuse_restart,
         runtime_snapshot,
         runner_snapshot,
@@ -492,6 +573,30 @@ pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_ext(
             }
             af_services::get_systemd_unit_info(unit).0
         },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+pub(crate) async fn quiesce_and_restore_candidate_receipts_and_runtime_ext(
+    clean_id: &str,
+    stopped_units: &[String],
+    receipt_snapshots: &[(PathBuf, Option<ReceiptSnapshotEntry>)],
+    blueprint_snapshots: &[af_runner::package_lifecycle::FileSnapshot],
+    refuse_restart: bool,
+    runtime_snapshot: Option<&mut af_runner::package_lifecycle::PackageRuntimeSnapshot>,
+    runner_snapshot: Option<&mut RunnerLifecycleSnapshotHandle>,
+) -> (Option<String>, Vec<String>) {
+    quiesce_and_restore_candidate_receipts_and_runtime_with_vhosts(
+        clean_id,
+        stopped_units,
+        receipt_snapshots,
+        blueprint_snapshots,
+        &[],
+        None,
+        refuse_restart,
+        runtime_snapshot,
+        runner_snapshot,
     )
     .await
 }
@@ -547,7 +652,7 @@ pub(crate) fn should_rollback_post_certification_failure(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_post_certification_finalization_failure_ext_with<
+pub(crate) async fn handle_post_certification_finalization_failure_ext_with_vhosts<
     ControlFn,
     ControlFut,
     StatusFn,
@@ -558,6 +663,8 @@ pub(crate) async fn handle_post_certification_finalization_failure_ext_with<
     stopped_units: &[String],
     receipt_snapshots: &[(PathBuf, Option<ReceiptSnapshotEntry>)],
     blueprint_snapshots: &[af_runner::package_lifecycle::FileSnapshot],
+    vhost_backups: &[af_runner::VhostBackup],
+    fs_root: Option<&Path>,
     refuse_restart: bool,
     runtime_snapshot: Option<&mut af_runner::package_lifecycle::PackageRuntimeSnapshot>,
     runner_snapshot: Option<&mut RunnerLifecycleSnapshotHandle>,
@@ -584,12 +691,14 @@ where
             .cloned()
             .collect();
         let (receipt_restore_error, restart_failures) =
-            quiesce_and_restore_candidate_receipts_and_runtime_ext_with(
+            quiesce_and_restore_candidate_receipts_and_runtime_ext_with_vhosts(
                 clean_id,
                 &quiesce_units,
                 &restart_units,
                 receipt_snapshots,
                 blueprint_snapshots,
+                vhost_backups,
+                fs_root,
                 refuse_restart,
                 runtime_snapshot,
                 runner_snapshot,
@@ -617,6 +726,47 @@ where
     } else {
         (required_err, None, Vec::new())
     }
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+pub(crate) async fn handle_post_certification_finalization_failure_ext_with<
+    ControlFn,
+    ControlFut,
+    StatusFn,
+>(
+    action: &str,
+    required_err: PackageLifecycleFailure,
+    clean_id: &str,
+    stopped_units: &[String],
+    receipt_snapshots: &[(PathBuf, Option<ReceiptSnapshotEntry>)],
+    blueprint_snapshots: &[af_runner::package_lifecycle::FileSnapshot],
+    refuse_restart: bool,
+    runtime_snapshot: Option<&mut af_runner::package_lifecycle::PackageRuntimeSnapshot>,
+    runner_snapshot: Option<&mut RunnerLifecycleSnapshotHandle>,
+    control_unit: ControlFn,
+    query_status: StatusFn,
+) -> (PackageLifecycleFailure, Option<String>, Vec<String>)
+where
+    ControlFn: FnMut(String, &'static str) -> ControlFut,
+    ControlFut: std::future::Future<Output = anyhow::Result<()>>,
+    StatusFn: Fn(&str) -> String,
+{
+    handle_post_certification_finalization_failure_ext_with_vhosts(
+        action,
+        required_err,
+        clean_id,
+        stopped_units,
+        receipt_snapshots,
+        blueprint_snapshots,
+        &[],
+        None,
+        refuse_restart,
+        runtime_snapshot,
+        runner_snapshot,
+        control_unit,
+        query_status,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -655,4 +805,148 @@ where
         query_status,
     )
     .await
+}
+
+#[cfg(test)]
+mod vhost_rollback_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn non_runner_rollback_restores_vhosts_and_refuses_restart_on_vhost_restore_error() {
+        let root = std::env::temp_dir().join(format!("af-api-vhost-rb-{}", uuid::Uuid::new_v4()));
+        let sites_avail = root.join("etc/apache2/sites-available");
+        let sites_en = root.join("etc/apache2/sites-enabled");
+        std::fs::create_dir_all(&sites_avail).unwrap();
+        std::fs::create_dir_all(&sites_en).unwrap();
+
+        let app_avail = sites_avail.join("aetherflow-app-sonarr.conf");
+        let app_en = sites_en.join("aetherflow-app-sonarr.conf");
+        let ext_avail = sites_avail.join("aetherflow-ext-sonarr.conf");
+        let ext_en = sites_en.join("aetherflow-ext-sonarr.conf");
+
+        std::fs::write(&app_avail, b"ProxyPass / http://127.0.0.1:18989/\n").unwrap();
+        std::fs::write(&ext_avail, b"ProxyPass / http://127.0.0.1:18989/\n").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("../sites-available/aetherflow-app-sonarr.conf", &app_en)
+                .unwrap();
+            std::os::unix::fs::symlink("../sites-available/aetherflow-ext-sonarr.conf", &ext_en)
+                .unwrap();
+        }
+
+        let vhost_backups = af_runner::snapshot_app_vhost_backups("sonarr", Some(&root)).unwrap();
+
+        // Mutate vhosts: rewrite app_avail, delete ext_avail and ext_en symlink
+        std::fs::write(&app_avail, b"ProxyPass / http://127.0.0.1:28989/\n").unwrap();
+        std::fs::remove_file(&ext_avail).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&ext_en).unwrap();
+
+        let actions = Arc::new(Mutex::new(Vec::<String>::new()));
+        let actions_ref = Arc::clone(&actions);
+        let units = vec!["sonarr".to_string()];
+        let (restore_err, restart_failures) =
+            quiesce_and_restore_candidate_receipts_and_runtime_ext_with_vhosts(
+                "sonarr",
+                &units,
+                &units,
+                &[],
+                &[],
+                &vhost_backups,
+                Some(&root),
+                false,
+                None,
+                None,
+                move |unit, act| {
+                    let rec = Arc::clone(&actions_ref);
+                    async move {
+                        rec.lock().unwrap().push(format!("{act} {unit}"));
+                        Ok(())
+                    }
+                },
+                |_| "running".to_string(),
+            )
+            .await;
+
+        assert!(restore_err.is_none(), "unexpected error: {:?}", restore_err);
+        assert!(
+            restart_failures.is_empty(),
+            "unexpected restart failures: {:?}",
+            restart_failures
+        );
+        assert_eq!(
+            std::fs::read_to_string(&app_avail).unwrap(),
+            "ProxyPass / http://127.0.0.1:18989/\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ext_avail).unwrap(),
+            "ProxyPass / http://127.0.0.1:18989/\n"
+        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::read_link(&ext_en).unwrap(),
+                PathBuf::from("../sites-available/aetherflow-ext-sonarr.conf")
+            );
+        }
+        assert_eq!(
+            *actions.lock().unwrap(),
+            vec!["stop sonarr".to_string(), "start sonarr".to_string()]
+        );
+
+        // Error case: replacing sites-available file with a symlink causes restore_app_vhost_backups
+        // to fail and must refuse to restart pre-stopped units.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&app_avail).unwrap();
+            let decoy = root.join("decoy.conf");
+            std::fs::write(&decoy, b"decoy\n").unwrap();
+            std::os::unix::fs::symlink(&decoy, &app_avail).unwrap();
+
+            actions.lock().unwrap().clear();
+            let actions_err_ref = Arc::clone(&actions);
+            let (err_res, err_restarts) =
+                quiesce_and_restore_candidate_receipts_and_runtime_ext_with_vhosts(
+                    "sonarr",
+                    &units,
+                    &units,
+                    &[],
+                    &[],
+                    &vhost_backups,
+                    Some(&root),
+                    false,
+                    None,
+                    None,
+                    move |unit, act| {
+                        let rec = Arc::clone(&actions_err_ref);
+                        async move {
+                            rec.lock().unwrap().push(format!("{act} {unit}"));
+                            Ok(())
+                        }
+                    },
+                    |_| "running".to_string(),
+                )
+                .await;
+
+            assert!(
+                err_res.is_some(),
+                "expected vhost restore error when sites-available target is a symlink"
+            );
+            assert!(
+                err_restarts
+                    .iter()
+                    .any(|msg| msg.contains("Refusing to restart pre-stopped service")),
+                "expected restart refusal on vhost restore failure, got: {:?}",
+                err_restarts
+            );
+            assert_eq!(
+                *actions.lock().unwrap(),
+                vec!["stop sonarr".to_string()],
+                "must NOT start sonarr after vhost restore failure"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -1140,6 +1140,294 @@ write_lock() { printf 'installed\\n' > "$TEST_ROOT/install/.$1.lock"; INSTALL_CO
             self.assertIn("librespeed.aether.local", hosts_after)
             self.assertNotIn("core.aether.local", hosts_after)
 
+    def test_af_certbot_sync_triggers_runner_resync_tls_when_pending_or_expanded(self) -> None:
+        import socket
+        import sqlite3
+        import threading
+
+        tmp_parent = (
+            RESOLVED_TMP_ROOT
+            if len(f"{RESOLVED_TMP_ROOT}/af-cb-12345678/run/aetherflow/runner.sock") < 95
+            else "/tmp"
+        )
+        with tempfile.TemporaryDirectory(prefix="af-cb-", dir=tmp_parent) as tmp:
+            root = Path(tmp)
+            for rel in (
+                "bin",
+                "etc/aetherflow",
+                "etc/apache2/sites-available",
+                "etc/apache2/sites-enabled",
+                "etc/letsencrypt/live/box.example.com",
+                "install",
+                "run/aetherflow",
+                "var/lib/aetherflow",
+                "var/www/aetherflow-default",
+            ):
+                (root / rel).mkdir(parents=True, exist_ok=True)
+            (root / "run/aetherflow").chmod(0o750)
+            (root / "etc/hosts").write_text("127.0.0.1\tlocalhost\n", encoding="utf-8")
+
+            stat_wrapper = root / "bin/stat"
+            stat_wrapper.write_text(
+                "#!/bin/sh\n"
+                'if [ "${1:-}" = "-c" ] && [ "${2:-}" = "%u" ]; then echo 0; exit 0; fi\n'
+                'if [ "${1:-}" = "-Lc" ] && [ "${2:-}" = "%a %U:%G" ]; then echo "660 root:aetherflow"; exit 0; fi\n'
+                'exec /usr/bin/stat "$@"\n',
+                encoding="utf-8",
+            )
+            stat_wrapper.chmod(0o755)
+
+            certbot_log = root / "certbot.jsonl"
+            mock_certbot = root / "bin/certbot"
+            mock_certbot.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "with pathlib.Path(os.environ['CERTBOT_LOG']).open('a', encoding='utf-8') as fh:\n"
+                "    fh.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "sys.exit(0)\n",
+                encoding="utf-8",
+            )
+            mock_certbot.chmod(0o755)
+
+            mock_systemctl = root / "bin/systemctl"
+            mock_systemctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mock_systemctl.chmod(0o755)
+
+            mock_dig = root / "bin/dig"
+            mock_dig.write_text(
+                "#!/bin/sh\n"
+                'if [ "${MOCK_DIG_RESOLVE:-0}" = "1" ]; then echo "203.0.113.10"; fi\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            mock_dig.chmod(0o755)
+
+            db_path = root / "var/lib/aetherflow/aetherflow.sqlite"
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE settings (id INTEGER PRIMARY KEY, base_domain TEXT)")
+            conn.execute("INSERT INTO settings (id, base_domain) VALUES (1, 'box.example.com')")
+            conn.execute(
+                "CREATE TABLE app_ingress_configs ("
+                "app_name TEXT PRIMARY KEY, "
+                "public_domain TEXT NOT NULL DEFAULT '', "
+                "listen_port INTEGER NOT NULL DEFAULT 0, "
+                "external_access_enabled INTEGER NOT NULL DEFAULT 0, "
+                "tls_enabled INTEGER NOT NULL DEFAULT 0)"
+            )
+            conn.execute(
+                "INSERT INTO app_ingress_configs VALUES ('sonarr', 'sonarr.box.example.com', 8989, 1, 1)"
+            )
+            conn.commit()
+            conn.close()
+
+            cert_dir = root / "etc/letsencrypt/live/box.example.com"
+
+            def write_cert(san: str) -> None:
+                subprocess.run(
+                    [
+                        "openssl",
+                        "req",
+                        "-x509",
+                        "-newkey",
+                        "ec",
+                        "-pkeyopt",
+                        "ec_paramgen_curve:P-256",
+                        "-nodes",
+                        "-days",
+                        "1",
+                        "-subj",
+                        "/CN=box.example.com",
+                        "-addext",
+                        f"subjectAltName={san}",
+                        "-keyout",
+                        str(cert_dir / "privkey.pem"),
+                        "-out",
+                        str(cert_dir / "fullchain.pem"),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+
+            src = (ROOT / "packages/system/af-certbot-sync").read_text(encoding="utf-8")
+            rebased = replace_paths_once(
+                src,
+                [(pfx, str(root) + pfx) for pfx in ("/opt", "/etc/", "/run/", "/var/", "/install", "/srv/")],
+            )
+            script = root / "af-certbot-sync.sh"
+            script.write_text(rebased, encoding="utf-8")
+            script.chmod(0o755)
+
+            sock_path = root / "run/aetherflow/runner.sock"
+            os.chmod(sock_path.parent, 0o750)
+            received_requests: list[str] = []
+            server_errors: list[str] = []
+            stop_server = threading.Event()
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                srv.bind(str(sock_path))
+                os.chmod(sock_path, 0o660)
+                srv.listen(8)
+                srv.settimeout(0.1)
+            except BaseException:
+                srv.close()
+                raise
+
+            def serve() -> None:
+                while not stop_server.is_set():
+                    try:
+                        client, _ = srv.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    with client:
+                        client.settimeout(2.0)
+                        try:
+                            raw = client.recv(4096).decode("utf-8", "replace")
+                            first_line = raw.splitlines()[0] if raw else ""
+                            received_requests.append(first_line)
+                            body = b'{"success":true,"output":"resynced 1 TLS vhost(s)","error":""}'
+                            client.sendall(
+                                b"HTTP/1.1 200 OK\r\n"
+                                b"Content-Type: application/json\r\n"
+                                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                                + b"Connection: close\r\n\r\n"
+                                + body
+                            )
+                        except OSError as exc:
+                            server_errors.append(str(exc))
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+
+            ext_avail = root / "etc/apache2/sites-available/aetherflow-ext-sonarr.conf"
+            ext_enabled = root / "etc/apache2/sites-enabled/aetherflow-ext-sonarr.conf"
+            ext_enabled.symlink_to("../sites-available/aetherflow-ext-sonarr.conf")
+
+            pending_vhost = (
+                "<VirtualHost *:80>\n"
+                "    ServerName sonarr.box.example.com\n"
+                '    ErrorDocument 503 "TLS certificate provisioning pending"\n'
+                "</VirtualHost>\n"
+            )
+            active_vhost = (
+                "<VirtualHost *:443>\n"
+                "    ServerName sonarr.box.example.com\n"
+                "    SSLEngine On\n"
+                "</VirtualHost>\n"
+            )
+
+            base_env = {
+                **os.environ,
+                "PATH": f"{root}/bin:/usr/bin:/bin",
+                "CERTBOT_LOG": str(certbot_log),
+                "MOCK_DIG_RESOLVE": "0",
+            }
+            for key in (
+                "AF_CERTBOT_SYNC_FROM_RUNNER",
+                "AETHERFLOW_RUNNER_SOCK",
+                "AETHERFLOW_APACHE_DIR",
+                "AF_DB_PATH",
+                "DB_PATH",
+                "AETHERFLOW_DB_PATH",
+                "DATA_DIR",
+            ):
+                base_env.pop(key, None)
+
+            try:
+                # 1. Wildcard cert + pending vhost -> triggers POST /v1/ingress/resync-tls without running certbot.
+                write_cert("DNS:box.example.com,DNS:*.box.example.com")
+                ext_avail.write_text(pending_vhost, encoding="utf-8")
+                res = subprocess.run(["bash", str(script)], env=base_env, capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual(received_requests, ["POST /v1/ingress/resync-tls HTTP/1.1"])
+                self.assertFalse(certbot_log.exists())
+
+                # 2. Wildcard cert + pending vhost + AF_CERTBOT_SYNC_FROM_RUNNER=1 -> skips callback to avoid recursion.
+                received_requests.clear()
+                res_rec = subprocess.run(
+                    ["bash", str(script)],
+                    env={**base_env, "AF_CERTBOT_SYNC_FROM_RUNNER": "1"},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res_rec.returncode, 0, res_rec.stdout + res_rec.stderr)
+                self.assertEqual(received_requests, [])
+
+                # 3. Non-wildcard cert already covering subdomain + pending vhost -> triggers POST /v1/ingress/resync-tls.
+                received_requests.clear()
+                write_cert("DNS:box.example.com,DNS:sonarr.box.example.com")
+                ext_avail.write_text(pending_vhost, encoding="utf-8")
+                res_non_wc = subprocess.run(["bash", str(script)], env=base_env, capture_output=True, text=True)
+                self.assertEqual(res_non_wc.returncode, 0, res_non_wc.stdout + res_non_wc.stderr)
+                self.assertEqual(received_requests, ["POST /v1/ingress/resync-tls HTTP/1.1"])
+                self.assertFalse(certbot_log.exists())
+
+                # 4. Non-wildcard cert + active (non-pending) vhost + no expansion -> skips POST /v1/ingress/resync-tls.
+                received_requests.clear()
+                ext_avail.write_text(active_vhost, encoding="utf-8")
+                res_noop = subprocess.run(["bash", str(script)], env=base_env, capture_output=True, text=True)
+                self.assertEqual(res_noop.returncode, 0, res_noop.stdout + res_noop.stderr)
+                self.assertEqual(received_requests, [])
+
+                # 5. Non-wildcard cert missing subdomain + DNS resolves -> expands certbot AND triggers POST /v1/ingress/resync-tls.
+                received_requests.clear()
+                write_cert("DNS:box.example.com")
+                res_expand = subprocess.run(
+                    ["bash", str(script)],
+                    env={**base_env, "MOCK_DIG_RESOLVE": "1"},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res_expand.returncode, 0, res_expand.stdout + res_expand.stderr)
+                self.assertTrue(certbot_log.exists(), "Expected certbot expansion invocation")
+                self.assertEqual(received_requests, ["POST /v1/ingress/resync-tls HTTP/1.1"])
+
+                # 6. Python3 Unix socket fallback when curl is absent from PATH still triggers POST /v1/ingress/resync-tls.
+                received_requests.clear()
+                nocurl_bin = root / "bin-nocurl"
+                nocurl_bin.mkdir(exist_ok=True)
+                for tool in (
+                    "awk", "basename", "bash", "cat", "chmod", "cut", "dirname",
+                    "env", "flock", "grep", "id", "mkdir", "mktemp", "mv",
+                    "openssl", "python3", "readlink", "rm", "sed", "sh", "sort",
+                    "sqlite3", "stat", "tail", "tr",
+                ):
+                    src_tool = shutil.which(tool)
+                    if src_tool:
+                        dst_tool = nocurl_bin / tool
+                        if not dst_tool.exists():
+                            dst_tool.symlink_to(src_tool)
+                write_cert("DNS:box.example.com,DNS:*.box.example.com")
+                ext_avail.write_text(pending_vhost, encoding="utf-8")
+                res_py = subprocess.run(
+                    ["/bin/bash", str(script)],
+                    env={**base_env, "PATH": f"{root}/bin:{nocurl_bin}"},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res_py.returncode, 0, res_py.stdout + res_py.stderr)
+                self.assertEqual(received_requests, ["POST /v1/ingress/resync-tls HTTP/1.1"])
+
+                # 7. Symlinked runner socket path must be refused without sending POST.
+                received_requests.clear()
+                symlink_sock = root / "run/aetherflow/symlink.sock"
+                symlink_sock.symlink_to(sock_path)
+                res_sym = subprocess.run(
+                    ["bash", str(script)],
+                    env={**base_env, "AETHERFLOW_RUNNER_SOCK": str(symlink_sock)},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res_sym.returncode, 0, res_sym.stdout + res_sym.stderr)
+                self.assertEqual(received_requests, [])
+                self.assertIn("Refusing unsafe runner socket path", res_sym.stderr)
+                self.assertEqual(server_errors, [])
+            finally:
+                stop_server.set()
+                srv.close()
+                thread.join(timeout=2.0)
+
     def test_scripts_and_sdk_scaffolder_are_zero_go(self) -> None:
         sdk_script = (ROOT / "scripts/create-plugin-sdk.sh").read_text(encoding="utf-8")
         self.assertIn("rust", sdk_script)

@@ -341,13 +341,16 @@ pub async fn restore_admitted_lifecycle_snapshot(
         } = entry;
         let mut vhosts_reverted = false;
         let res = (|| -> Result<(), String> {
+            // Restore vhost backups before runtime and blueprint snapshots because
+            // PackageRuntimeSnapshot::capture also snapshots Apache vhosts; running
+            // restore_app_vhost_backups first detects drift for Apache reload.
+            vhosts_reverted =
+                crate::restore_app_vhost_backups(&vhost_backups).map_err(|e| e.to_string())?;
             rollback_operation_state_with_runtime(
                 &receipt_snapshots,
                 &blueprint_snapshots,
                 Some(&mut runtime_snapshot),
             )?;
-            vhosts_reverted =
-                crate::restore_app_vhost_backups(&vhost_backups).map_err(|e| e.to_string())?;
             Ok(())
         })();
         let res = match res {
@@ -364,25 +367,26 @@ pub async fn restore_admitted_lifecycle_snapshot(
     .await
     .context("Runner lifecycle snapshot restore worker failed")?;
 
-    if restore_res.is_ok() {
-        if fs_root.is_none() && std::env::var_os("AETHERFLOW_SYSTEMD_ROOT").is_none() {
-            let systemctl_bin = std::env::var("AETHERFLOW_SYSTEMCTL_BIN")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "systemctl".to_string());
-            let _ = tokio::time::timeout(
-                Duration::from_secs(15),
-                tokio::process::Command::new(systemctl_bin)
-                    .arg("daemon-reload")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await;
-        }
-        if vhosts_changed {
-            crate::reload_apache_after_rollback_if_live(fs_root.as_deref()).await;
-        }
+    if restore_res.is_ok()
+        && fs_root.is_none()
+        && std::env::var_os("AETHERFLOW_SYSTEMD_ROOT").is_none()
+    {
+        let systemctl_bin = std::env::var("AETHERFLOW_SYSTEMCTL_BIN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "systemctl".to_string());
+        let _ = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio::process::Command::new(systemctl_bin)
+                .arg("daemon-reload")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+    }
+    if vhosts_changed {
+        crate::reload_apache_after_rollback_if_live(fs_root.as_deref()).await;
     }
     drop(guard);
     restore_res.map_err(anyhow::Error::msg)
