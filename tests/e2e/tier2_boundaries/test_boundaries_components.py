@@ -297,7 +297,18 @@ class TestB23TopologyEmptyServicesList(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         topology = inspector.read_file(TOPOLOGY_UI_RS)
-        self.assert_true(bool(topology and "nodes.get()" in topology), "B23: AppTopologyMap must handle empty services cleanly")
+        topo_core = inspector.read_file(TOPOLOGY_CORE_RS)
+        self.assert_true(
+            bool(
+                topology
+                and "compute_tiered_topology_layout(&services.get(), &links.get())" in topology
+                and topo_core
+                and "if services.is_empty() {" in topo_core
+                and "width: MIN_CANVAS_WIDTH," in topo_core
+                and "nodes: Vec::new()," in topo_core
+            ),
+            "B23: AppTopologyMap must handle empty services cleanly",
+        )
 
 
 class TestB23TopologyNodeCollisionAvoidance(TestCase):
@@ -319,7 +330,12 @@ class TestB23TopologyResizeRecalculates(TestCase):
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         topology = inspector.read_file(TOPOLOGY_UI_RS)
         self.assert_true(
-            bool(topology and 'viewBox="0 0 800 400"' in topology and "Reset view" in topology),
+            bool(
+                topology
+                and 'format!("0 0 {} {}", current.width, current.height)' in topology
+                and 'preserveAspectRatio="xMidYMid meet"' in topology
+                and 'ui_t("Reset view")' in topology
+            ),
             "B23: Topology map must use responsive SVG viewBox and reset controls",
         )
 
