@@ -400,22 +400,29 @@ pub fn modify_hosts_file_at_path(
     write_hosts_file_atomically(hosts_path, &out).map_err(RunnerError::from)
 }
 
+pub(crate) fn resolve_hosts_file_path() -> PathBuf {
+    for key in ["AF_HOSTS_FILE", "AETHERFLOW_HOSTS_FILE"] {
+        if let Ok(val) = env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+    }
+    PathBuf::from("/etc/hosts")
+}
+
 pub fn update_hosts_file(domains: &[String], ip: &str) -> Result<(), RunnerError> {
     let validated_ip = validate_hosts_ip(ip)?;
     let canonical_ip = validated_ip.to_string();
-    let hosts_path = env::var("AF_HOSTS_FILE")
-        .or_else(|_| env::var("AETHERFLOW_HOSTS_FILE"))
-        .unwrap_or_else(|_| "/etc/hosts".to_string());
-    let path = Path::new(&hosts_path);
-    let lock_path = resolve_hosts_lock_path(path);
-    update_hosts_file_with_ip_at_path(path, &lock_path, domains, &canonical_ip, false)
+    let path = resolve_hosts_file_path();
+    let lock_path = resolve_hosts_lock_path(&path);
+    update_hosts_file_with_ip_at_path(&path, &lock_path, domains, &canonical_ip, false)
 }
 
 pub fn update_hosts_file_local(domains: &[String], remove: bool) -> anyhow::Result<()> {
-    let hosts_path = env::var("AF_HOSTS_FILE")
-        .or_else(|_| env::var("AETHERFLOW_HOSTS_FILE"))
-        .unwrap_or_else(|_| "/etc/hosts".to_string());
-    update_hosts_file_at_path(Path::new(&hosts_path), domains, remove)
+    let path = resolve_hosts_file_path();
+    update_hosts_file_at_path(&path, domains, remove)
 }
 
 pub fn update_hosts_file_with_ip_at_path(
@@ -479,12 +486,9 @@ pub fn reconcile_hosts_file_at_path(
 pub fn reconcile_hosts_file(domains: &[String], ip: &str) -> Result<(), RunnerError> {
     let validated_ip = validate_hosts_ip(ip)?;
     let canonical_ip = validated_ip.to_string();
-    let hosts_path = env::var("AF_HOSTS_FILE")
-        .or_else(|_| env::var("AETHERFLOW_HOSTS_FILE"))
-        .unwrap_or_else(|_| "/etc/hosts".to_string());
-    let path = Path::new(&hosts_path);
-    let lock_path = resolve_hosts_lock_path(path);
-    reconcile_hosts_file_at_path(path, &lock_path, domains, &canonical_ip)
+    let path = resolve_hosts_file_path();
+    let lock_path = resolve_hosts_lock_path(&path);
+    reconcile_hosts_file_at_path(&path, &lock_path, domains, &canonical_ip)
 }
 
 pub fn sync_dns_provider_files(ip: &str, domains: &[String]) -> anyhow::Result<()> {
@@ -508,6 +512,28 @@ pub(crate) fn resolve_provider_dir(env_var: &str, default_path: &str) -> PathBuf
         }
     }
     PathBuf::from(default_path)
+}
+
+pub(crate) fn resolve_provider_dir_for_root(
+    env_var: &str,
+    default_path: &str,
+    fs_root: Option<&Path>,
+) -> PathBuf {
+    if let Some(root) = fs_root {
+        if let Ok(dir) = env::var(env_var) {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                if let Ok(confined) =
+                    af_models::validate_path_within_isolated_root(Path::new(trimmed), root, env_var)
+                {
+                    return confined;
+                }
+            }
+        }
+        let rel = default_path.trim_start_matches(['/', '\\']);
+        return root.join(rel);
+    }
+    resolve_provider_dir(env_var, default_path)
 }
 
 fn render_dnsmasq_content(
@@ -740,10 +766,11 @@ pub fn remove_pihole_custom_list_content(existing: &str, domains_to_remove: &[St
     result
 }
 
-pub fn sync_dns_provider_files_with_mode(
+pub fn sync_dns_provider_files_for_root(
     ip: &str,
     domains: &[String],
     is_reconcile: bool,
+    fs_root: Option<&Path>,
 ) -> anyhow::Result<()> {
     let validated_ip = validate_hosts_ip(ip)?;
     let canonical_ip = validated_ip.to_string();
@@ -753,7 +780,8 @@ pub fn sync_dns_provider_files_with_mode(
             "invalid DNS provider domain"
         );
     }
-    let dnsmasq_dir = resolve_provider_dir("AETHERFLOW_DNSMASQ_DIR", "/etc/dnsmasq.d");
+    let dnsmasq_dir =
+        resolve_provider_dir_for_root("AETHERFLOW_DNSMASQ_DIR", "/etc/dnsmasq.d", fs_root);
     if dns_provider_directory_exists(&dnsmasq_dir, false)? {
         for conf_name in [
             "aetherflow-local-dns.conf",
@@ -779,7 +807,7 @@ pub fn sync_dns_provider_files_with_mode(
         }
     }
 
-    let pihole_dir = resolve_provider_dir("AETHERFLOW_PIHOLE_DIR", "/etc/pihole");
+    let pihole_dir = resolve_provider_dir_for_root("AETHERFLOW_PIHOLE_DIR", "/etc/pihole", fs_root);
     if dns_provider_directory_exists(&pihole_dir, true)? {
         let custom_list = pihole_dir.join("custom.list");
         let existing = match read_dns_provider_text(&custom_list, true) {
@@ -797,8 +825,23 @@ pub fn sync_dns_provider_files_with_mode(
             reconcile_pihole_custom_list_content(&existing, &canonical_ip, domains, is_reconcile);
         write_dns_provider_text(&custom_list, &payload, true)?;
     }
-    sync_adguard_dns(&canonical_ip, domains, is_reconcile)?;
+    adguard_dns::sync_for_root(
+        domains,
+        adguard_dns::Change::Update {
+            ip: &canonical_ip,
+            reconcile: is_reconcile,
+        },
+        fs_root,
+    )?;
     Ok(())
+}
+
+pub fn sync_dns_provider_files_with_mode(
+    ip: &str,
+    domains: &[String],
+    is_reconcile: bool,
+) -> anyhow::Result<()> {
+    sync_dns_provider_files_for_root(ip, domains, is_reconcile, None)
 }
 
 pub fn sync_adguard_dns(ip: &str, domains: &[String], reconcile: bool) -> anyhow::Result<()> {
@@ -962,5 +1005,43 @@ pub fn run_hosts_cli(args: &[String]) -> anyhow::Result<String> {
             "unknown hosts action {:?}, expected reconcile, update, or remove",
             other
         ),
+    }
+}
+
+#[cfg(test)]
+mod isolated_root_dns_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn resolve_provider_dir_for_root_confines_overrides_within_fs_root() {
+        let _lock = crate::ENV_TEST_MUTEX.blocking_lock();
+        let root = std::env::temp_dir().join(format!("af-hdns-root-{}", Uuid::new_v4()));
+        let inside = root.join("custom/dnsmasq.d");
+        let outside = std::env::temp_dir().join(format!("af-hdns-out-{}", Uuid::new_v4()));
+        let prev = env::var_os("AETHERFLOW_DNSMASQ_DIR");
+
+        env::set_var("AETHERFLOW_DNSMASQ_DIR", &inside);
+        assert_eq!(
+            resolve_provider_dir_for_root("AETHERFLOW_DNSMASQ_DIR", "/etc/dnsmasq.d", Some(&root)),
+            inside
+        );
+
+        env::set_var("AETHERFLOW_DNSMASQ_DIR", &outside);
+        assert_eq!(
+            resolve_provider_dir_for_root("AETHERFLOW_DNSMASQ_DIR", "/etc/dnsmasq.d", Some(&root)),
+            root.join("etc/dnsmasq.d")
+        );
+
+        env::set_var("AETHERFLOW_DNSMASQ_DIR", root.join("../escape"));
+        assert_eq!(
+            resolve_provider_dir_for_root("AETHERFLOW_DNSMASQ_DIR", "/etc/dnsmasq.d", Some(&root)),
+            root.join("etc/dnsmasq.d")
+        );
+
+        match prev {
+            Some(v) => env::set_var("AETHERFLOW_DNSMASQ_DIR", v),
+            None => env::remove_var("AETHERFLOW_DNSMASQ_DIR"),
+        }
     }
 }

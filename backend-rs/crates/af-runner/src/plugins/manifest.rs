@@ -250,6 +250,14 @@ fn check_trusted_ownership(path: &Path) -> Result<std::fs::Metadata, PluginRunne
     }
     let file_uid = meta.uid();
     let euid = unsafe { libc::geteuid() };
+    if euid == 0 && (mode & 0o020) != 0 && meta.gid() != 0 {
+        return Err(PluginRunnerError::InvalidRequest(format!(
+            "Insecure group-writable permissions (mode {:o}, gid={}) on '{}' (must not be writable by non-root group)",
+            mode & 0o777,
+            meta.gid(),
+            path.display()
+        )));
+    }
     if file_uid != 0 && file_uid != euid {
         return Err(PluginRunnerError::InvalidRequest(format!(
             "Untrusted owner uid={} on '{}' (must be root or runner uid={})",

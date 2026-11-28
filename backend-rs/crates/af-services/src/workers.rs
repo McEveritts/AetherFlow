@@ -2,7 +2,7 @@
 //!
 //! Provides four background tasks and on-demand package update utilities:
 //! 1. [`start_metrics_recorder`] — 60-second system metrics snapshotter & hourly 90-day retention pruner.
-//! 2. [`start_heal_worker`] — `af-heal` systemd service watchdog with exponential backoff (`10s * 2^attempt`, max 3 retries) and notifications.
+//! 2. [`start_heal_worker`] — `af-heal` systemd service watchdog with exponential backoff (`10s * 2^attempt`, max 3 retries), pending-action approval queuing (default `AF_HEAL_AUTO_APPROVE=false`), and admin notifications.
 //! 3. [`start_smart_backup_scheduler`] — 30-minute scheduled SQLite online backup (`VACUUM INTO` + `.sha256` sidecar).
 //! 4. [`start_app_update_watcher`] & [`refresh_all_package_updates`] / [`refresh_package_update_by_id`] / [`get_package_update_map`] —
 //!    upstream GitHub / apt / git-tag release checker and thread-safe update cache.
@@ -281,9 +281,10 @@ static HEAL_STATES: Lazy<Mutex<HashMap<String, ServiceHealState>>> =
 /// Checks critical managed systemd services (`apache2`, `aetherflow-runner`, plus any
 /// installed systemd apps whose lockfile exists in `/install/`), tracks failure counts
 /// and exponential backoff (`10s * 2^attempt`, max 3 retries before marking `exhausted`
-/// until the service recovers), attempts [`crate::control_service(unit, "restart")`],
-/// and records a warning/error notification into `notifications` (`user_id = 1`) on
-/// auto-heal restart or retry exhaustion.
+/// until the service recovers). When `AF_HEAL_AUTO_APPROVE` is `false` (default), queues
+/// deduplicated restart requests in `pending_actions` (capped at 50 pending entries); when
+/// `AF_HEAL_AUTO_APPROVE=true` (`1` / `true`), dispatches [`af_runner::dispatch_heal_restart`].
+/// Delivers warning/error notifications to all admin users via [`notify_all_admin_users`].
 pub fn start_heal_worker(interval_secs: u64) {
     if HEAL_WORKER_ACTIVE.swap(true, Ordering::SeqCst) {
         return;
@@ -458,10 +459,29 @@ fn collect_heal_poll_units() -> anyhow::Result<Option<HealPollInventory>> {
     Ok(Some(collect_monitored_systemd_units()?))
 }
 
-fn is_heal_auto_approve_enabled() -> bool {
-    env::var("AF_HEAL_AUTO_APPROVE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+fn parse_heal_auto_approve(raw: Option<&str>) -> bool {
+    raw.map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
         .unwrap_or(false)
+}
+
+fn is_heal_auto_approve_enabled() -> bool {
+    parse_heal_auto_approve(env::var("AF_HEAL_AUTO_APPROVE").ok().as_deref())
+}
+
+#[cfg(test)]
+mod heal_worker_unit_tests {
+    use super::*;
+
+    #[test]
+    fn heal_auto_approve_defaults_to_false_and_requires_explicit_opt_in() {
+        assert!(!parse_heal_auto_approve(None));
+        assert!(!parse_heal_auto_approve(Some("")));
+        assert!(!parse_heal_auto_approve(Some("false")));
+        assert!(!parse_heal_auto_approve(Some("0")));
+        assert!(parse_heal_auto_approve(Some("true")));
+        assert!(parse_heal_auto_approve(Some("TRUE")));
+        assert!(parse_heal_auto_approve(Some(" 1 ")));
+    }
 }
 
 fn notify_all_admin_users(level: &str, title: &str, message: &str) {

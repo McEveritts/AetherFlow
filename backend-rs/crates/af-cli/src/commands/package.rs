@@ -529,3 +529,127 @@ pub(crate) fn execute_package_command(
         }
     }
 }
+
+#[cfg(test)]
+mod package_cmd_tests {
+    use super::*;
+    use crate::client::PackageExecutionReceipt;
+    use af_models::{
+        PackageRunnerRequest, QuotaRunnerRequest, RunnerResponse, SandboxRunnerRequest,
+        SelfUpdateRequest, SystemctlRequest,
+    };
+    use af_runner::HostsUpdateRequest;
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    #[derive(Default)]
+    struct RecordingTransport {
+        package_calls: Mutex<Vec<PackageRunnerRequest>>,
+        hosts_calls: Mutex<Vec<HostsUpdateRequest>>,
+    }
+
+    impl RunnerClientTransport for RecordingTransport {
+        fn check_health(&self) -> CliResult<RunnerResponse> {
+            Ok(RunnerResponse {
+                success: true,
+                output: "ok".into(),
+                error: String::new(),
+            })
+        }
+
+        fn execute_package(
+            &self,
+            req: &PackageRunnerRequest,
+        ) -> CliResult<PackageExecutionReceipt> {
+            self.package_calls.lock().unwrap().push(req.clone());
+            Ok(PackageExecutionReceipt {
+                lifecycle: None,
+                action: req.action.clone(),
+                package_id: req.package_id.clone(),
+                script_name: req.script_name.clone(),
+                app_port: req.app_port,
+                last_progress_percent: Some(100),
+                log_lines: Vec::new(),
+                total_log_lines: 0,
+                truncated_log_lines: 0,
+            })
+        }
+
+        fn cancel_package(&self, _req: &SandboxRunnerRequest) -> CliResult<RunnerResponse> {
+            unreachable!()
+        }
+
+        fn execute_systemctl(&self, _req: &SystemctlRequest) -> CliResult<RunnerResponse> {
+            unreachable!()
+        }
+
+        fn execute_quota(&self, _req: &QuotaRunnerRequest) -> CliResult<RunnerResponse> {
+            unreachable!()
+        }
+
+        fn execute_sandbox(&self, _req: &SandboxRunnerRequest) -> CliResult<RunnerResponse> {
+            unreachable!()
+        }
+
+        fn execute_self_update(&self, _req: &SelfUpdateRequest) -> CliResult<RunnerResponse> {
+            unreachable!()
+        }
+
+        fn execute_hosts(&self, req: &HostsUpdateRequest) -> CliResult<RunnerResponse> {
+            self.hosts_calls.lock().unwrap().push(req.clone());
+            Ok(RunnerResponse {
+                success: true,
+                output: "ok".into(),
+                error: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn cli_install_and_remove_delegate_single_lifecycle_stream_without_duplicate_hosts_ipc() {
+        let root = std::env::temp_dir().join(format!("af-cli-pkg-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("install")).unwrap();
+        let global = GlobalOptions {
+            json: true,
+            root: Some(root.clone()),
+            ..Default::default()
+        };
+        let transport = RecordingTransport::default();
+
+        execute_package_command(
+            &global,
+            &PackageCommand::Install {
+                packages: vec!["sonarr".into()],
+                port: Some(8989),
+            },
+            &transport,
+        )
+        .unwrap();
+
+        std::fs::write(root.join("install/.sonarr.lock"), "installed\n").unwrap();
+        execute_package_command(
+            &global,
+            &PackageCommand::Remove {
+                packages: vec!["sonarr".into()],
+                purge: false,
+            },
+            &transport,
+        )
+        .unwrap();
+
+        let pkg_calls = transport.package_calls.lock().unwrap();
+        assert_eq!(pkg_calls.len(), 2);
+        assert_eq!(pkg_calls[0].action, "install");
+        assert_eq!(pkg_calls[0].package_id, "sonarr");
+        assert!(pkg_calls[0].lifecycle_job_id.is_empty());
+        assert_eq!(pkg_calls[1].action, "remove");
+        assert_eq!(pkg_calls[1].package_id, "sonarr");
+        assert!(pkg_calls[1].lifecycle_job_id.is_empty());
+        assert!(
+            transport.hosts_calls.lock().unwrap().is_empty(),
+            "CLI must not duplicate /v1/hosts DNS reconciliation outside af-runner coordinator"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

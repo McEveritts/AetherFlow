@@ -216,9 +216,21 @@ fn update_config(
 }
 
 pub(crate) fn sync(domains: &[String], change: Change<'_>) -> Result<()> {
-    let path = crate::resolve_runner_fs_path(CONFIG);
+    sync_for_root(domains, change, None)
+}
+
+pub(crate) fn sync_for_root(
+    domains: &[String],
+    change: Change<'_>,
+    fs_root: Option<&Path>,
+) -> Result<()> {
+    let path = match fs_root {
+        Some(root) => root.join(CONFIG.trim_start_matches(['/', '\\'])),
+        None => crate::resolve_runner_fs_path(CONFIG),
+    };
+    let allow_systemctl_reload = fs_root.is_none() && path == Path::new(CONFIG);
     update_config(&path, domains, change, || {
-        if path == Path::new(CONFIG) {
+        if allow_systemctl_reload {
             let status = std::process::Command::new("/usr/bin/systemctl")
                 .args(["reload-or-restart", "adguardhome.service"])
                 .status()

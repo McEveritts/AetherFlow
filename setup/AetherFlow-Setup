@@ -2142,6 +2142,11 @@ export RELEASE_CHANNEL
 # State Initialization
 ################################################################################
 
+# Acquire exclusive lockfile and register cleanup trap BEFORE touching state,
+# loading seed files, or allocating installer scratch directories.
+_acquire_lock
+_setup_lock_trap
+
 _init_state
 _load_env_seed_file
 
@@ -2151,10 +2156,6 @@ if [[ -z "${AF_SETUP_SCRATCH_DIR:-}" ]]; then
     chmod 0700 "${AF_SETUP_SCRATCH_DIR}"
     export AF_SETUP_SCRATCH_DIR
 fi
-
-# Acquire exclusive lockfile — prevents concurrent installer instances
-_acquire_lock
-_setup_lock_trap
 
 # Handle --fresh
 if [[ "${FRESH_INSTALL}" == "true" ]]; then

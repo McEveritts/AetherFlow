@@ -493,7 +493,7 @@ function _apacheconf() {
 		mv "${apache_etc}/sites-enabled/000-default.conf" "${apache_etc}/" >>"${outto}" 2>&1
 	fi
 	\cp -f "${local_setup}templates/default-ssl.conf.template" "${apache_etc}/sites-enabled/default-ssl.conf"
-	_af_configure_default_ssl_vhost_server_names "${apache_etc}/sites-enabled/default-ssl.conf"
+	_af_configure_default_ssl_vhost_server_names "${apache_etc}/sites-enabled/default-ssl.conf" || return 1
 	if [[ ! -s "${basic_htpasswd}" && -n "${username:-}" && -n "${passwd:-}" ]] && type _write_apache_htpasswd_files &>/dev/null; then
 		_write_apache_htpasswd_files "${username}" "${passwd}" "${REALM:-Welcome to AetherFlow}" || true
 	fi
@@ -540,6 +540,10 @@ function _apacheconf() {
 		# ensure opcache module is activated (only if phpenmod exists)
 		if command -v phpenmod >/dev/null 2>&1; then
 			phpenmod -v "${_php_ver}" opcache >>"${outto}" 2>&1 || true
+		fi
+		if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
+			systemctl enable "php${_php_ver}-fpm" >>"${outto}" 2>&1 || true
+			systemctl restart "php${_php_ver}-fpm" >>"${outto}" 2>&1 || true
 		fi
 	fi
 
@@ -593,9 +597,11 @@ function _af_configure_default_ssl_vhost_server_names() {
 	if ! grep -Eq '^[[:space:]]*ServerName[[:space:]]+_[[:space:]]*$' "${conf_path}"; then
 		return 0
 	fi
+	local conf_dir
+	conf_dir="$(dirname "${conf_path}")"
 	local tmp_conf
-	tmp_conf="$(mktemp "${conf_path}.af.XXXXXX")"
-	awk -v dom="${candidate}" '
+	tmp_conf="$(mktemp "${conf_dir}/.default-ssl.conf.af.XXXXXX")" || return 1
+	if ! awk -v dom="${candidate}" '
 		/^[[:space:]]*ServerName[[:space:]]+_[[:space:]]*$/ {
 			match($0, /^[[:space:]]*/)
 			indent = substr($0, 1, RLENGTH)
@@ -604,9 +610,14 @@ function _af_configure_default_ssl_vhost_server_names() {
 			next
 		}
 		{ print }
-	' "${conf_path}" >"${tmp_conf}"
-	chmod 0644 "${tmp_conf}"
-	mv -f "${tmp_conf}" "${conf_path}"
+	' "${conf_path}" >"${tmp_conf}" || [[ ! -s "${tmp_conf}" ]]; then
+		rm -f -- "${tmp_conf}"
+		return 1
+	fi
+	if ! chmod 0644 "${tmp_conf}" || ! mv -fT -- "${tmp_conf}" "${conf_path}"; then
+		rm -f -- "${tmp_conf}"
+		return 1
+	fi
 }
 
 function _af_snakeoil_cert_subject() {

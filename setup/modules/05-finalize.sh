@@ -15,20 +15,20 @@ function _af_vsftpd_sync_tls_directives() {
 
 	if LC_ALL=C grep -aFq "ssl_tlsv11" "${vsftpd_bin}" 2>/dev/null && LC_ALL=C grep -aFq "ssl_tlsv12" "${vsftpd_bin}" 2>/dev/null; then
 		if ! LC_ALL=C grep -aFq "ssl_tlsv13" "${vsftpd_bin}" 2>/dev/null; then
-			sed -i '/^ssl_tlsv13=/d' "${conf_path}"
+			sed -i '/^ssl_tlsv13=/d' "${conf_path}" || return 1
 		fi
 	elif LC_ALL=C grep -aFq "ssl_tlsv1_1" "${vsftpd_bin}" 2>/dev/null && LC_ALL=C grep -aFq "ssl_tlsv1_2" "${vsftpd_bin}" 2>/dev/null; then
 		sed -i \
 			-e 's/^ssl_tlsv11=/ssl_tlsv1_1=/' \
 			-e 's/^ssl_tlsv12=/ssl_tlsv1_2=/' \
-			"${conf_path}"
+			"${conf_path}" || return 1
 		if LC_ALL=C grep -aFq "ssl_tlsv1_3" "${vsftpd_bin}" 2>/dev/null; then
-			sed -i 's/^ssl_tlsv13=/ssl_tlsv1_3=/' "${conf_path}"
+			sed -i 's/^ssl_tlsv13=/ssl_tlsv1_3=/' "${conf_path}" || return 1
 		else
-			sed -i '/^ssl_tlsv13=/d' "${conf_path}"
+			sed -i '/^ssl_tlsv13=/d' "${conf_path}" || return 1
 		fi
 	else
-		sed -i -e '/^ssl_tlsv11=/d' -e '/^ssl_tlsv12=/d' -e '/^ssl_tlsv13=/d' "${conf_path}"
+		sed -i -e '/^ssl_tlsv11=/d' -e '/^ssl_tlsv12=/d' -e '/^ssl_tlsv13=/d' "${conf_path}" || return 1
 	fi
 }
 
@@ -101,18 +101,6 @@ function _ftpdconfig() {
 		chmod 0600 /etc/ssl/private/vsftpd.pem
 	fi
 
-	local tmp_conf
-	tmp_conf="$(mktemp "${conf_dir}/.vsftpd.conf.af.XXXXXX")" || return 1
-	if ! \cp -f "${local_setup}templates/vsftpd.conf.template" "${tmp_conf}" || ! chmod 0644 "${tmp_conf}" || ! mv -fT -- "${tmp_conf}" "${vsftpd_conf}"; then
-		rm -f -- "${tmp_conf}"
-		return 1
-	fi
-	_af_vsftpd_sync_tls_directives "${vsftpd_conf}" "${vsftpd_bin}"
-
-	# Enabling passive mode (firewall rules for 21/tcp and 10090:10100/tcp are
-	# managed centrally by _setup_firewall so UFW detection is not bypassed).
-	sed -i 's/^\(pasv_min_port=\).*/\110090/' "${vsftpd_conf}"
-	sed -i 's/^\(pasv_max_port=\).*/\110100/' "${vsftpd_conf}"
 	local passive_ip="${IP:-}"
 	if [[ -z "${passive_ip}" ]]; then
 		passive_ip="$(_af_primary_ipv4)"
@@ -123,13 +111,41 @@ function _ftpdconfig() {
 			printf '[ERROR] Invalid IPv4 address for vsftpd pasv_address\n' >>"${outto}" 2>&1
 			return 1
 		fi
-		sed -i '/^pasv_address=/d' "${vsftpd_conf}"
-		printf 'pasv_address=%s\n' "${passive_ip}" >>"${vsftpd_conf}"
 	fi
-	chmod 0644 "${vsftpd_conf}"
 
-	echo "" >"${vsftpd_chroot_list}"
-	chmod 0644 "${vsftpd_chroot_list}"
+	local tmp_conf
+	tmp_conf="$(mktemp "${conf_dir}/.vsftpd.conf.af.XXXXXX")" || return 1
+	if ! \cp -f "${local_setup}templates/vsftpd.conf.template" "${tmp_conf}" || \
+	   ! _af_vsftpd_sync_tls_directives "${tmp_conf}" "${vsftpd_bin}"; then
+		rm -f -- "${tmp_conf}"
+		return 1
+	fi
+
+	# Enabling passive mode (firewall rules for 21/tcp and 10090:10100/tcp are
+	# managed centrally by _setup_firewall so UFW detection is not bypassed).
+	if ! sed -i 's/^\(pasv_min_port=\).*/\110090/' "${tmp_conf}" || \
+	   ! sed -i 's/^\(pasv_max_port=\).*/\110100/' "${tmp_conf}"; then
+		rm -f -- "${tmp_conf}"
+		return 1
+	fi
+	if [[ -n "${passive_ip}" ]]; then
+		if ! sed -i '/^pasv_address=/d' "${tmp_conf}" || \
+		   ! printf 'pasv_address=%s\n' "${passive_ip}" >>"${tmp_conf}"; then
+			rm -f -- "${tmp_conf}"
+			return 1
+		fi
+	fi
+	if [[ ! -s "${tmp_conf}" ]] || ! chmod 0644 "${tmp_conf}" || ! mv -fT -- "${tmp_conf}" "${vsftpd_conf}"; then
+		rm -f -- "${tmp_conf}"
+		return 1
+	fi
+
+	local tmp_chroot
+	tmp_chroot="$(mktemp "${chroot_dir}/.vsftpd.chroot_list.af.XXXXXX")" || return 1
+	if ! printf '\n' >"${tmp_chroot}" || ! chmod 0644 "${tmp_chroot}" || ! mv -fT -- "${tmp_chroot}" "${vsftpd_chroot_list}"; then
+		rm -f -- "${tmp_chroot}"
+		return 1
+	fi
 
 	if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
 		systemctl enable vsftpd >>"${outto}" 2>&1 || return 1
@@ -178,14 +194,17 @@ EOF
 	chmod 0644 /etc/systemd/system.conf.d/aetherflow.conf
 
 	# Ensure permissions and service user are configured before starting services
-	_harden_permissions
-	_safe_overlay_config /opt/AetherFlow/current/deploy/systemd/aetherflow-log-retention.service \
+	# (do not prematurely mark harden_perms complete here; the canonical ALL_STEPS
+	# harden_perms step executes after boot and firewall).
+	_harden_permissions || return 1
+	local log_retention_service_src="${AF_INSTALL_ROOT:+${AF_INSTALL_ROOT}/current/deploy/systemd/aetherflow-log-retention.service}"
+	log_retention_service_src="${log_retention_service_src:-/opt/AetherFlow/current/deploy/systemd/aetherflow-log-retention.service}"
+	local log_retention_timer_src="${AF_INSTALL_ROOT:+${AF_INSTALL_ROOT}/current/deploy/systemd/aetherflow-log-retention.timer}"
+	log_retention_timer_src="${log_retention_timer_src:-/opt/AetherFlow/current/deploy/systemd/aetherflow-log-retention.timer}"
+	_safe_overlay_config "${log_retention_service_src}" \
 		/etc/systemd/system/aetherflow-log-retention.service || return 1
-	_safe_overlay_config /opt/AetherFlow/current/deploy/systemd/aetherflow-log-retention.timer \
+	_safe_overlay_config "${log_retention_timer_src}" \
 		/etc/systemd/system/aetherflow-log-retention.timer || return 1
-	if type _mark_step &>/dev/null; then
-		_mark_step "harden_perms"
-	fi
 
 	systemctl daemon-reload >/dev/null 2>&1
 	systemctl start aetherflow-log-retention.service || return 1
@@ -227,9 +246,9 @@ except Exception:
 ' >/dev/null 2>&1 || true
 	fi
 
-	mkdir -p /opt/AetherFlow/config
+	mkdir -p "${af_root}/config"
 	if [[ -n "${IFACE:-}" ]]; then
-		printf '%s\n' "${IFACE}" > /opt/AetherFlow/config/interface.txt
+		printf '%s\n' "${IFACE}" > "${af_root}/config/interface.txt"
 	fi
 	rm -f /etc/cron.d/set_interface
 }
@@ -249,20 +268,22 @@ function _perms() {
 
 # Create the dedicated aetherflow system user for running services
 _ensure_aetherflow_user() {
+	local af_root="${AF_INSTALL_ROOT:-/opt/AetherFlow}"
 	local outto="${OUTTO:-/dev/null}"
 	if ! id -u aetherflow >/dev/null 2>&1; then
 		useradd --system --shell /usr/sbin/nologin \
-			--home-dir /opt/AetherFlow \
+			--home-dir "${af_root}" \
 			--comment "AetherFlow service account" \
 			aetherflow >>"${outto}" 2>&1
-		echo "[$(date '+%Y-%m-%d %H:%M:%S')] Created system user: aetherflow" >> "${INSTALL_LOG}"
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] Created system user: aetherflow" >> "${INSTALL_LOG:-/dev/null}"
 	fi
 	usermod -a -G systemd-journal,adm aetherflow >>"${outto}" 2>&1 || true
 }
 
-# Comprehensive permission hardening across /opt/AetherFlow
+# Comprehensive permission hardening across AF_INSTALL_ROOT (default /opt/AetherFlow)
 _harden_permissions() {
-	local af_root="/opt/AetherFlow"
+	local default_af_root="/opt/AetherFlow"
+	local af_root="${AF_INSTALL_ROOT:-${default_af_root}}"
 	local outto="${OUTTO:-/dev/null}"
 
 	# Ensure the service user exists
@@ -309,8 +330,11 @@ _harden_permissions() {
 			fi
 		done
 		if [[ -d "${af_root}/releases" ]]; then
-			find "${af_root}/releases" \( -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type f \( -name "speedtest-backend" -o -name "af-transcode" -o -name "aetherflow-api" -o -name "af" -o -name "*.sh" -o -name "*.py" \) -exec chmod 755 {} + 2>/dev/null || true
-			find "${af_root}/releases" -path "*/packages/*" -type f -exec chmod 755 {} + 2>/dev/null || true
+			find "${af_root}/releases" \( -path "${af_root}/releases/*/data-snapshot" \) -prune -o -type f \( -name "speedtest-backend" -o -name "af-transcode" -o -name "aetherflow-api" -o -name "af" -o -name "*.sh" -o -name "*.py" -o -path "*/bin/aetherflow-plugin-*" -o -path "*/backend/hooks/*.sh" \) -exec chmod 755 {} + 2>/dev/null || true
+			find "${af_root}/releases" \( -path "${af_root}/releases/*/data-snapshot" \) -prune -o -path "*/packages/*" -type f -exec chmod 755 {} + 2>/dev/null || true
+		fi
+		if [[ -d "${af_root}/plugins" ]]; then
+			find "${af_root}/plugins" -type f \( -path "*/bin/aetherflow-plugin-*" -o -path "*/backend/hooks/*.sh" \) -exec chmod 755 {} + 2>/dev/null || true
 		fi
 
 		if [[ -d "${af_root}/setup" ]]; then
@@ -477,7 +501,7 @@ PY
 		find "${af_root}" -perm -002 -type d -exec chmod o-w {} + 2>/dev/null || true
 	fi
 
-	echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Permission hardening complete for ${af_root}" >> "${INSTALL_LOG}"
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Permission hardening complete for ${af_root}" >> "${INSTALL_LOG:-/dev/null}"
 }
 
 # Post-check: ensure aetherflow-api runs as unprivileged user
@@ -578,10 +602,26 @@ Dashboard Onboarding: ${onboarding_url}
 Admin Username: ${username:-}
 Setup Bootstrap Token File (for remote/proxied first-admin setup): /var/lib/aetherflow/.setup-bootstrap-token
 EOF
-	if [[ "${AF_SKIP_SELF_DELETE:-0}" != "1" ]] && [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then
+	local af_root="${AF_INSTALL_ROOT:-/opt/AetherFlow}"
+	af_root="$(realpath -m "${af_root}" 2>/dev/null || printf '%s' "${af_root%/}")"
+	af_root="${af_root%/}"
+	if [[ "${AF_SKIP_SELF_DELETE:-0}" != "1" ]] && [[ -n "${af_root}" ]] && [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != "${af_root}"/* ]]; then
 		rm -rf "$0" >>"${outto}" 2>&1
 	fi
 	if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]] && command -v systemctl >/dev/null 2>&1; then
+		local _php_etc="${AF_PHP_ETC_DIR:-/etc/php}"
+		local _php_ver="${PHP_VER:-}"
+		if [[ -z "${_php_ver}" || ! -d "${_php_etc}/${_php_ver}/fpm" ]]; then
+			local _detected_php_ver=""
+			_detected_php_ver="$(find "${_php_etc}" -mindepth 2 -maxdepth 2 -type d -name fpm 2>/dev/null | awk -F/ '{print $(NF-1)}' | sort -V | tail -n1)" || true
+			if [[ -n "${_detected_php_ver}" ]]; then
+				_php_ver="${_detected_php_ver}"
+			fi
+		fi
+		if [[ -n "${_php_ver}" ]]; then
+			systemctl enable "php${_php_ver}-fpm" >>"${outto}" 2>&1 || true
+			systemctl restart "php${_php_ver}-fpm" >>"${outto}" 2>&1 || true
+		fi
 		for i in ssh apache2 fail2ban cron; do
 			systemctl restart "${i}" >>"${outto}" 2>&1 || true
 			systemctl enable "${i}" >>"${outto}" 2>&1 || true

@@ -10,7 +10,7 @@
 STATE_FILE="${STATE_FILE:-/install/.aetherflow.state}"
 CONFIG_FILE="${CONFIG_FILE:-/install/.aetherflow.conf}"
 INSTALL_LOG="${INSTALL_LOG:-/install/.aetherflow.install.log}"
-LOCKFILE="${LOCKFILE:-/var/run/aetherflow-setup.lock}"
+LOCKFILE="${LOCKFILE:-/run/aetherflow-setup.lock}"
 
 # State file format version. Bump this when step IDs change incompatibly.
 STATE_VERSION="2"
@@ -24,61 +24,137 @@ FRESH_INSTALL="${FRESH_INSTALL:-false}"
 # Lockfile — Prevents concurrent installer instances
 ################################################################################
 
-# Acquire an exclusive lockfile. Uses bash noclobber (set -C) for atomic
-# creation — no race condition possible between check-and-write.
+# Dedicated lockfile FD, owning shell PID, and captured path for kernel-enforced flock locking.
+AF_LOCK_FD="${AF_LOCK_FD:-}"
+AF_LOCK_OWNER_PID="${AF_LOCK_OWNER_PID:-}"
+AF_LOCK_PATH="${AF_LOCK_PATH:-}"
+
+# Acquire an exclusive kernel-enforced flock on LOCKFILE.
+# Eliminates check-then-write and PID-reuse races on stale lock reclamation.
 _acquire_lock() {
-    local lockdir
+    if [[ "${LOCKFILE}" == /var/run/* && -L /var/run && "$(stat -c '%u' /var/run 2>/dev/null)" == "0" ]]; then
+        local var_run_target
+        var_run_target="$(readlink /var/run 2>/dev/null || true)"
+        if [[ ( "${var_run_target}" == "/run" || "${var_run_target}" == "../run" ) && ! -L /run && -d /run && "$(stat -c '%u' /run 2>/dev/null)" == "0" ]]; then
+            LOCKFILE="/run/${LOCKFILE#/var/run/}"
+        fi
+    fi
+    if [[ -z "${LOCKFILE}" || "${LOCKFILE}" == ".." || "${LOCKFILE}" == "../"* || "${LOCKFILE}" == *"/../"* || "${LOCKFILE}" == *"/.." ]]; then
+        echo "[ERROR] Refusing unsafe lockfile path: ${LOCKFILE}" >&2
+        exit 1
+    fi
+    local lockdir check_dir parent_dir
     lockdir="$(dirname "${LOCKFILE}")"
-    mkdir -p "${lockdir}" 2>/dev/null || true
-
-    if ( set -C; echo $$ > "${LOCKFILE}" ) 2>/dev/null; then
-        # Lock acquired successfully
-        return 0
+    check_dir="${lockdir}"
+    while [[ -n "${check_dir}" && "${check_dir}" != "/" && "${check_dir}" != "." ]]; do
+        if [[ -L "${check_dir}" ]]; then
+            echo "[ERROR] Refusing symlinked lockfile directory: ${check_dir}" >&2
+            exit 1
+        fi
+        parent_dir="$(dirname "${check_dir}")"
+        if [[ "${parent_dir}" == "${check_dir}" ]]; then
+            break
+        fi
+        check_dir="${parent_dir}"
+    done
+    mkdir -p "${lockdir}" 2>/dev/null || {
+        echo "[ERROR] Failed to create lockfile directory: ${lockdir}" >&2
+        exit 1
+    }
+    if [[ -L "${lockdir}" || ! -d "${lockdir}" ]]; then
+        echo "[ERROR] Refusing symlinked lockfile directory: ${lockdir}" >&2
+        exit 1
     fi
-
-    # Lockfile already exists — check if the owning process is still alive
-    local existing_pid
-    existing_pid="$(cat "${LOCKFILE}" 2>/dev/null)" || existing_pid=""
-
-    if [[ -z "${existing_pid}" ]]; then
-        # Empty/corrupt lockfile — reclaim it
-        rm -f "${LOCKFILE}"
-        ( set -C; echo $$ > "${LOCKFILE}" ) 2>/dev/null && return 0
+    if [[ -L "${LOCKFILE}" || ( -e "${LOCKFILE}" && ! -f "${LOCKFILE}" ) ]]; then
+        echo "[ERROR] Refusing unsafe lockfile path: ${LOCKFILE}" >&2
+        exit 1
     fi
-
-    # Check if the PID is still running
-    if kill -0 "${existing_pid}" 2>/dev/null; then
-        echo ""
-        echo "═══════════════════════════════════════════════════════════════"
-        echo "  ERROR: Another instance of AetherFlow Setup is running!"
-        echo ""
-        echo "  PID: ${existing_pid}"
-        echo "  Lockfile: ${LOCKFILE}"
-        echo ""
-        echo "  If you believe this is stale, remove the lockfile manually:"
-        echo "    rm -f ${LOCKFILE}"
-        echo "═══════════════════════════════════════════════════════════════"
-        echo ""
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "[ERROR] Required 'flock' utility not found; refusing unlocked execution." >&2
         exit 1
     fi
 
-    # Process is dead — stale lock. Reclaim it.
-    echo "[INFO] Reclaiming stale lockfile from dead PID ${existing_pid}"
-    rm -f "${LOCKFILE}"
-    ( set -C; echo $$ > "${LOCKFILE}" ) 2>/dev/null && return 0
+    local my_pid="${BASHPID:-$$}"
+    if [[ -n "${AF_LOCK_FD:-}" && "${AF_LOCK_OWNER_PID:-}" == "${my_pid}" ]]; then
+        return 0
+    fi
 
-    echo "[ERROR] Failed to acquire lockfile: ${LOCKFILE}"
+    local attempt fd existing_pid fd_id path_id prev_umask
+    for attempt in 1 2 3; do
+        if [[ -L "${LOCKFILE}" || ( -e "${LOCKFILE}" && ! -f "${LOCKFILE}" ) ]]; then
+            echo "[ERROR] Refusing unsafe lockfile path: ${LOCKFILE}" >&2
+            exit 1
+        fi
+
+        # Open without truncation (<>) under umask 0077 so an existing holder's
+        # PID metadata is never clobbered prior to acquiring the kernel lock.
+        prev_umask="$(umask)"
+        umask 0077
+        if ! exec {fd}<>"${LOCKFILE}"; then
+            umask "${prev_umask}"
+            echo "[ERROR] Failed to open lockfile: ${LOCKFILE}" >&2
+            exit 1
+        fi
+        umask "${prev_umask}"
+
+        if ! flock -n "${fd}"; then
+            existing_pid="$(head -c 64 <&"${fd}" 2>/dev/null | tr -dc '0-9' || true)"
+            exec {fd}>&- 2>/dev/null || true
+            echo ""
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "  ERROR: Another instance of AetherFlow Setup is running!"
+            echo ""
+            echo "  PID: ${existing_pid:-unknown}"
+            echo "  Lockfile: ${LOCKFILE}"
+            echo ""
+            echo "  Wait for the active installer to finish before re-running."
+            echo "═══════════════════════════════════════════════════════════════"
+            echo ""
+            exit 1
+        fi
+
+        # Verify the locked descriptor is a regular file and still matches the live
+        # LOCKFILE inode (guards against concurrent unlink/replace before flock).
+        fd_id="$(stat -L -c '%d:%i' "/proc/${my_pid}/fd/${fd}" 2>/dev/null || true)"
+        path_id="$(stat -c '%d:%i' "${LOCKFILE}" 2>/dev/null || true)"
+        if [[ -f "/proc/${my_pid}/fd/${fd}" && -n "${fd_id}" && "${fd_id}" == "${path_id}" ]]; then
+            AF_LOCK_FD="${fd}"
+            AF_LOCK_OWNER_PID="${my_pid}"
+            AF_LOCK_PATH="${LOCKFILE}"
+            # Update PID metadata directly via the locked FD path (noclobber-safe,
+            # immune to LOCKFILE path swaps while holding the kernel flock).
+            printf '%s\n' "${my_pid}" >| "/proc/${my_pid}/fd/${fd}" 2>/dev/null || true
+            return 0
+        fi
+
+        flock -u "${fd}" 2>/dev/null || true
+        exec {fd}>&- 2>/dev/null || true
+    done
+
+    echo "[ERROR] Failed to acquire lockfile: ${LOCKFILE}" >&2
     exit 1
 }
 
-# Release the lockfile, but only if it belongs to us (PID match).
+# Release the kernel flock held by this shell process and clear PID metadata
+# without unlinking the lockfile inode (avoids flock unlink races).
 _release_lock() {
-    if [[ -f "${LOCKFILE}" ]]; then
-        local lock_pid
-        lock_pid="$(cat "${LOCKFILE}" 2>/dev/null)" || lock_pid=""
-        if [[ "${lock_pid}" == "$$" ]]; then
-            rm -f "${LOCKFILE}"
+    local my_pid="${BASHPID:-$$}"
+    if [[ -n "${AF_LOCK_FD:-}" && "${AF_LOCK_OWNER_PID:-}" == "${my_pid}" ]]; then
+        local lock_fd="${AF_LOCK_FD}"
+        local lock_path="${AF_LOCK_PATH:-}"
+        local fd_id="" path_id=""
+        fd_id="$(stat -L -c '%d:%i' "/proc/${my_pid}/fd/${lock_fd}" 2>/dev/null || true)"
+        if [[ -n "${lock_path}" && -f "${lock_path}" && ! -L "${lock_path}" ]]; then
+            path_id="$(stat -c '%d:%i' "${lock_path}" 2>/dev/null || true)"
         fi
+        if [[ -n "${fd_id}" && "${fd_id}" == "${path_id}" ]]; then
+            : >| "/proc/${my_pid}/fd/${lock_fd}" 2>/dev/null || true
+        fi
+        flock -u "${lock_fd}" 2>/dev/null || true
+        exec {lock_fd}>&- 2>/dev/null || true
+        AF_LOCK_FD=""
+        AF_LOCK_OWNER_PID=""
+        AF_LOCK_PATH=""
     fi
 }
 
@@ -90,9 +166,27 @@ _af_cleanup_setup_scratch() {
     fi
 }
 
-# Register cleanup traps so the lockfile and installer scratch dir are always released.
+_af_cleanup_on_exit() {
+    local rc=$?
+    _release_lock
+    _af_cleanup_setup_scratch
+    return "${rc}"
+}
+
+_af_cleanup_on_signal() {
+    local sig="$1"
+    _release_lock
+    _af_cleanup_setup_scratch
+    trap - "${sig}" EXIT
+    kill -s "${sig}" "${BASHPID:-$$}" 2>/dev/null || exit 1
+}
+
+# Register cleanup traps so the kernel flock and installer scratch dir are always released.
 _setup_lock_trap() {
-    trap '_release_lock; _af_cleanup_setup_scratch' EXIT INT TERM HUP
+    trap '_af_cleanup_on_exit' EXIT
+    trap '_af_cleanup_on_signal INT' INT
+    trap '_af_cleanup_on_signal TERM' TERM
+    trap '_af_cleanup_on_signal HUP' HUP
 }
 
 ################################################################################
@@ -469,9 +563,18 @@ _run_step() {
     # Run the step
     echo -n "${description} ... "
     
-    # Execute the function (in a subshell to capture failures)
-    # We background + spinner for visual feedback, just like the original
-    "${func_name}" "$@" &
+    # Execute the function in a background subshell with the parent's lock FD
+    # closed so background children can never pin the setup flock past exit.
+    (
+        if [[ -n "${AF_LOCK_FD:-}" ]]; then
+            local _child_lock_fd="${AF_LOCK_FD}"
+            exec {_child_lock_fd}>&- 2>/dev/null || true
+            AF_LOCK_FD=""
+            AF_LOCK_OWNER_PID=""
+            AF_LOCK_PATH=""
+        fi
+        "${func_name}" "$@"
+    ) &
     local pid=$!
 
     # Use the spinner if it's available

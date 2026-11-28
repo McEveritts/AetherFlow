@@ -1480,6 +1480,38 @@ fn production_hosts_lock_uses_protected_runtime_directory() {
     );
 }
 
+#[test]
+fn resolve_hosts_file_path_ignores_empty_or_whitespace_env_overrides() {
+    let _lock = ENV_TEST_MUTEX.blocking_lock();
+    let prev_af = env::var_os("AF_HOSTS_FILE");
+    let prev_full = env::var_os("AETHERFLOW_HOSTS_FILE");
+
+    env::set_var("AF_HOSTS_FILE", "   ");
+    env::set_var("AETHERFLOW_HOSTS_FILE", "  /tmp/fallback-hosts  ");
+    assert_eq!(
+        crate::hosts_dns::resolve_hosts_file_path(),
+        Path::new("/tmp/fallback-hosts")
+    );
+
+    env::set_var("AF_HOSTS_FILE", "");
+    env::set_var("AETHERFLOW_HOSTS_FILE", " \t ");
+    assert_eq!(
+        crate::hosts_dns::resolve_hosts_file_path(),
+        Path::new("/etc/hosts")
+    );
+
+    if let Some(v) = prev_af {
+        env::set_var("AF_HOSTS_FILE", v);
+    } else {
+        env::remove_var("AF_HOSTS_FILE");
+    }
+    if let Some(v) = prev_full {
+        env::set_var("AETHERFLOW_HOSTS_FILE", v);
+    } else {
+        env::remove_var("AETHERFLOW_HOSTS_FILE");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn hosts_reconciliation_rejects_a_symlink_lock_without_changing_hosts() {

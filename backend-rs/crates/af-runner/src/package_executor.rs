@@ -107,8 +107,7 @@ use helpers::{
     add_missing_rclone_env_aliases, append_log_line, apply_sandbox_in_root_with_journal,
     escape_systemd_env_quoted, extract_binaries_from_targz, format_znc_major_minor,
     interpolate_template, is_downgrade_allowed, is_semver_strictly_greater, merge_ini_settings,
-    step_progress_meta, trigger_certbot_sync_best_effort, update_preserved_rclone_env_pass,
-    update_preserved_template_port,
+    step_progress_meta, update_preserved_rclone_env_pass, update_preserved_template_port,
 };
 pub(crate) use helpers::{
     ensure_package_sandbox_dropin_under_root_with_journal, package_request_deletes_data,

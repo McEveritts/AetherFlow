@@ -220,6 +220,27 @@ class ModernStackSourceBuildTests(unittest.TestCase):
             self.assertFalse((current / "bin/speedtest-backend").exists())
             self.assertEqual(os.readlink(root / "install/backend/af"), str(current / "af"))
 
+    def test_default_release_tag_skips_invalid_first_candidate_to_next_valid_v4_tag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "current").mkdir(parents=True)
+            (root / ".version").write_text("source-1764270000\n", encoding="utf-8")
+            (root / "current/.version").write_text("4.2.3\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; _af_default_release_tag',
+                    "bash",
+                    str(MODERN_STACK_SH),
+                ],
+                env={**os.environ, "AF_INSTALL_ROOT": str(root)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "v4.2.3")
+
 
 class ModernStackEnvGenerationTests(unittest.TestCase):
     def setUp(self):

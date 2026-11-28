@@ -407,18 +407,26 @@ fn render_default_sandboxed_plugin_ui(
   <script>
     const pluginId = {id_json};
     const out = document.getElementById('output');
+    let requestSeq = 0;
     window.addEventListener('message', (event) => {{
+      if (event.source !== window.parent) return;
       const msg = event.data || {{}};
+      if (msg.pluginId !== pluginId) return;
       if (msg.type === 'AF_PLUGIN_INIT') {{
         out.textContent = JSON.stringify({{ status: 'handshake_complete', capabilities: msg.capabilities || [] }}, null, 2);
       }} else if (msg.type === 'AF_PLUGIN_PROXY_RESPONSE') {{
-        out.textContent = JSON.stringify(msg.payload, null, 2);
+        if (msg.ok === false || msg.error) {{
+          out.textContent = JSON.stringify({{ ok: false, status: msg.status ?? null, error: msg.error || 'Unknown proxy error' }}, null, 2);
+        }} else {{
+          out.textContent = JSON.stringify(msg.payload, null, 2);
+        }}
       }}
     }});
     document.getElementById('probe-btn').addEventListener('click', () => {{
       window.parent.postMessage({{
         type: 'AF_PLUGIN_PROXY_REQUEST',
         pluginId,
+        requestId: `${{pluginId}}-${{++requestSeq}}`,
         path: 'status',
         method: 'GET'
       }}, '*');
@@ -444,4 +452,50 @@ fn html_escape(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+#[cfg(test)]
+mod sandbox_ui_tests {
+    use super::*;
+    use crate::plugins::types::{
+        PluginBackendSpec, PluginFrontendSpec, PluginLifecycleHooks, PluginRegistryState,
+        ValidatedPluginManifest,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn default_sandboxed_plugin_ui_enforces_source_plugin_id_and_error_reporting() {
+        let manifest = ValidatedPluginManifest {
+            id: "demo-plugin".into(),
+            name: "Demo Plugin".into(),
+            version: "1.0.0".into(),
+            sdk: "rust".into(),
+            contract_version: "1".into(),
+            runtime_status: "managed".into(),
+            description: "Test plugin".into(),
+            author: "AetherFlow".into(),
+            permissions: Vec::new(),
+            granted_scopes: Vec::new(),
+            lifecycle_hooks: PluginLifecycleHooks::default(),
+            backend: PluginBackendSpec::default(),
+            frontend: PluginFrontendSpec::default(),
+            plugin_dir: PathBuf::from("/tmp/demo-plugin"),
+        };
+        let state = PluginRegistryState {
+            plugin_id: "demo-plugin".into(),
+            enabled: true,
+            allocated_port: 8801,
+            token_epoch: 1,
+            status: "running".into(),
+            last_health_at: None,
+            last_error: String::new(),
+        };
+        let html = render_default_sandboxed_plugin_ui(&manifest, &state);
+        assert!(html.contains("if (event.source !== window.parent) return;"));
+        assert!(html.contains("if (msg.pluginId !== pluginId) return;"));
+        assert!(html.contains("let requestSeq = 0;"));
+        assert!(html.contains("requestId: `${pluginId}-${++requestSeq}`,"));
+        assert!(html.contains("if (msg.ok === false || msg.error)"));
+        assert!(html.contains("error: msg.error || 'Unknown proxy error'"));
+    }
 }

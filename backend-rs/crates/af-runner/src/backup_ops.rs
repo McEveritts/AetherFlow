@@ -8,10 +8,9 @@ type RunnerResolvedBackupConfig = (
 );
 
 fn resolve_server_owned_backup_config(
+    isolated_root: Option<PathBuf>,
     app_version: &str,
 ) -> Result<RunnerResolvedBackupConfig, (StatusCode, String)> {
-    let isolated_root = af_models::try_resolve_isolated_root_with_env(None, |k| env::var(k).ok())
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let active_db = af_models::try_resolve_active_db_path_from_env(
         isolated_root.as_deref(),
         "/var/lib/aetherflow/aetherflow.sqlite",
@@ -45,17 +44,42 @@ fn resolve_server_owned_backup_config(
     Ok((cfg, None, env_sqlite_uid, env_sqlite_gid))
 }
 
+fn format_runner_backup_app_version(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let body = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    if !body.is_empty() {
+        let candidate = format!("v{body}");
+        if af_host::parse_semver_triplet(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+    concat!("v", env!("CARGO_PKG_VERSION")).to_string()
+}
+
+fn default_runner_backup_app_version_for_root(isolated_root: Option<&Path>) -> String {
+    format_runner_backup_app_version(&af_release::runtime::runtime_version_for_root(
+        isolated_root,
+    ))
+}
+
 fn build_runner_backup_config(
     req: &BackupRunnerRequest,
 ) -> Result<RunnerResolvedBackupConfig, (StatusCode, String)> {
+    let isolated_root = af_models::try_resolve_isolated_root_with_env(None, |k| env::var(k).ok())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let fallback_version;
     let app_version = if req.app_version.trim().is_empty() {
-        "v4.0.0"
+        fallback_version = default_runner_backup_app_version_for_root(isolated_root.as_deref());
+        fallback_version.as_str()
     } else {
         req.app_version.trim()
     };
 
     let (mut cfg, isolated_root, mut trusted_sqlite_uid, mut trusted_sqlite_gid) =
-        resolve_server_owned_backup_config(app_version)?;
+        resolve_server_owned_backup_config(isolated_root, app_version)?;
 
     if let Some(req_uid) = req.trusted_sqlite_uid {
         if let Some(existing_uid) = trusted_sqlite_uid {
@@ -661,4 +685,108 @@ pub async fn dispatch_backup_request(
     execute_backup_local(req)
         .await
         .map_err(|(_, msg)| anyhow::anyhow!(msg))
+}
+
+#[cfg(test)]
+mod backup_version_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn default_runner_backup_app_version_formats_runtime_identity_with_v_prefix() {
+        assert_eq!(format_runner_backup_app_version("4.0.1"), "v4.0.1");
+        assert_eq!(format_runner_backup_app_version("v4.0.1"), "v4.0.1");
+        assert_eq!(format_runner_backup_app_version("V4.0.1"), "v4.0.1");
+        assert_eq!(
+            format_runner_backup_app_version("v4.1.0-nightly.12.1"),
+            "v4.1.0-nightly.12.1"
+        );
+        let fallback = concat!("v", env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            format_runner_backup_app_version("source-1764270000"),
+            fallback
+        );
+        assert_eq!(
+            format_runner_backup_app_version("vsource-1764270000"),
+            fallback
+        );
+        assert_eq!(format_runner_backup_app_version(""), fallback);
+        assert_eq!(format_runner_backup_app_version("   "), fallback);
+        assert_eq!(format_runner_backup_app_version("not-a-semver"), fallback);
+
+        let resolved = default_runner_backup_app_version_for_root(None);
+        assert!(resolved.starts_with('v'), "expected v prefix: {resolved}");
+        assert!(
+            af_host::parse_semver_triplet(&resolved).is_ok(),
+            "expected valid semver: {resolved}"
+        );
+    }
+
+    #[test]
+    fn default_runner_backup_app_version_honors_isolated_root_version_and_rejects_non_semver() {
+        let root = std::env::temp_dir().join(format!("af-backup-ver-{}", Uuid::new_v4()));
+        let current_dir = root.join("opt/AetherFlow/current");
+        fs::create_dir_all(&current_dir).unwrap();
+        let version_file = current_dir.join(".version");
+
+        fs::write(&version_file, "4.9.2\n").unwrap();
+        assert_eq!(
+            default_runner_backup_app_version_for_root(Some(&root)),
+            "v4.9.2"
+        );
+
+        fs::write(&version_file, "v4.9.3\n").unwrap();
+        assert_eq!(
+            default_runner_backup_app_version_for_root(Some(&root)),
+            "v4.9.3"
+        );
+
+        // Non-semver --from-source stamps must fall back cleanly to Cargo package version
+        fs::write(&version_file, "source-1764270000\n").unwrap();
+        assert_eq!(
+            default_runner_backup_app_version_for_root(Some(&root)),
+            concat!("v", env!("CARGO_PKG_VERSION"))
+        );
+
+        // Verify full build_runner_backup_config resolves isolated_root first and honors .version
+        let _lock = crate::ENV_TEST_MUTEX.blocking_lock();
+        fs::write(&version_file, "v4.8.7\n").unwrap();
+        let prev_iso = env::var_os("AETHERFLOW_BACKUP_ISOLATED_ROOT");
+        let prev_rel = env::var_os("AETHERFLOW_RELEASE_ROOT");
+        let prev_db = env::var_os("AETHERFLOW_DB_PATH");
+        let prev_bdir = env::var_os("AETHERFLOW_BACKUP_DIR");
+        env::set_var("AETHERFLOW_BACKUP_ISOLATED_ROOT", &root);
+        env::remove_var("AETHERFLOW_RELEASE_ROOT");
+        env::remove_var("AETHERFLOW_DB_PATH");
+        env::remove_var("AETHERFLOW_BACKUP_DIR");
+
+        let req = BackupRunnerRequest {
+            action: "list".to_string(),
+            ..Default::default()
+        };
+        let cfg_res = build_runner_backup_config(&req);
+
+        match prev_iso {
+            Some(v) => env::set_var("AETHERFLOW_BACKUP_ISOLATED_ROOT", v),
+            None => env::remove_var("AETHERFLOW_BACKUP_ISOLATED_ROOT"),
+        }
+        match prev_rel {
+            Some(v) => env::set_var("AETHERFLOW_RELEASE_ROOT", v),
+            None => env::remove_var("AETHERFLOW_RELEASE_ROOT"),
+        }
+        match prev_db {
+            Some(v) => env::set_var("AETHERFLOW_DB_PATH", v),
+            None => env::remove_var("AETHERFLOW_DB_PATH"),
+        }
+        match prev_bdir {
+            Some(v) => env::set_var("AETHERFLOW_BACKUP_DIR", v),
+            None => env::remove_var("AETHERFLOW_BACKUP_DIR"),
+        }
+
+        let (cfg, iso_resolved, _, _) = cfg_res.expect("build_runner_backup_config should succeed");
+        assert_eq!(iso_resolved.as_deref(), Some(root.as_path()));
+        assert_eq!(cfg.app_version, "v4.8.7");
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

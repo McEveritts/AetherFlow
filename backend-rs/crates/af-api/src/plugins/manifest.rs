@@ -311,11 +311,98 @@ pub fn validate_relative_plugin_subpath(
     }
 }
 
+const MAX_PLUGIN_MANIFEST_BYTES: u64 = 256 * 1024;
+
 #[cfg(unix)]
-fn check_trusted_ownership(path: &StdPath) -> Result<(), String> {
+fn is_production_env_with_lookup<F>(get_env: &mut F) -> bool
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    get_env("AETHERFLOW_ENV")
+        .as_deref()
+        .is_some_and(crate::auth::is_production_or_release_env)
+}
+
+#[cfg(unix)]
+fn is_env_flag_truthy(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[cfg(unix)]
+fn normalize_non_root_isolated_path(candidate: &StdPath, label: &str) -> Option<PathBuf> {
+    af_models::normalize_lexical_path(candidate, label)
+        .ok()
+        .filter(|norm| norm.is_absolute() && norm != StdPath::new("/"))
+}
+
+#[cfg(unix)]
+fn is_non_root_isolated_path(candidate: &StdPath, label: &str) -> bool {
+    normalize_non_root_isolated_path(candidate, label).is_some()
+}
+
+#[cfg(unix)]
+fn is_path_strictly_within_isolated_root(path: &StdPath, isolated_root: &StdPath) -> bool {
+    let Some(norm_root) = normalize_non_root_isolated_path(isolated_root, "isolated_root") else {
+        return false;
+    };
+    let candidate = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let root_effective = fs::canonicalize(&norm_root).unwrap_or(norm_root);
+    if !root_effective.is_absolute() || root_effective == StdPath::new("/") {
+        return false;
+    }
+    af_models::validate_path_within_isolated_root(&candidate, &root_effective, "plugin_path")
+        .is_ok()
+}
+
+#[cfg(unix)]
+fn is_isolated_plugin_root_for_path_with_env<F>(path: &StdPath, mut get_env: F) -> bool
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if is_production_env_with_lookup(&mut get_env) {
+        return false;
+    }
+    if get_env("AETHERFLOW_E2E_ISOLATED").is_some_and(|v| is_env_flag_truthy(&v)) {
+        return true;
+    }
+    if af_models::try_resolve_isolated_root_with_env(None, &mut get_env)
+        .ok()
+        .flatten()
+        .is_some_and(|root| is_path_strictly_within_isolated_root(path, &root))
+    {
+        return true;
+    }
+    ["AETHERFLOW_FS_ROOT", "AETHERFLOW_INSTALL_ROOT"]
+        .iter()
+        .any(|key| {
+            get_env(key).is_some_and(|v| {
+                let trimmed = v.trim();
+                !trimmed.is_empty()
+                    && is_non_root_isolated_path(StdPath::new(trimmed), key)
+                    && is_path_strictly_within_isolated_root(path, StdPath::new(trimmed))
+            })
+        })
+}
+
+#[cfg(unix)]
+fn is_isolated_plugin_test_root_for_path(path: &StdPath) -> bool {
+    let mut get_env = |k: &str| std::env::var(k).ok();
+    if is_production_env_with_lookup(&mut get_env) {
+        return false;
+    }
+    cfg!(test) || is_isolated_plugin_root_for_path_with_env(path, get_env)
+}
+
+#[cfg(unix)]
+fn check_trusted_metadata_with_root_policy(
+    path: &StdPath,
+    meta: &fs::Metadata,
+    require_root_only: bool,
+) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
-    let meta = fs::symlink_metadata(path)
-        .map_err(|e| format!("Failed to stat '{}': {}", path.display(), e))?;
     let mode = meta.mode();
     if (mode & 0o002) != 0 {
         return Err(format!(
@@ -324,16 +411,321 @@ fn check_trusted_ownership(path: &StdPath) -> Result<(), String> {
             path.display()
         ));
     }
-    let file_uid = meta.uid();
-    let euid = unsafe { libc::geteuid() };
-    if file_uid != 0 && file_uid != euid {
+    if require_root_only && (mode & 0o020) != 0 && meta.gid() != 0 {
         return Err(format!(
-            "Untrusted file owner uid={} on '{}' (must be root or service uid={})",
-            file_uid,
-            path.display(),
-            euid
+            "Insecure group-writable permissions (mode {:o}, gid={}) on '{}' (must not be writable by non-root group)",
+            mode & 0o777,
+            meta.gid(),
+            path.display()
         ));
     }
+    let file_uid = meta.uid();
+    let euid = unsafe { libc::geteuid() };
+    let trusted = if require_root_only {
+        file_uid == 0
+    } else {
+        file_uid == 0 || file_uid == euid
+    };
+    if !trusted {
+        return Err(if require_root_only {
+            format!(
+                "Untrusted file owner uid={} on '{}' (must be root uid=0)",
+                file_uid,
+                path.display()
+            )
+        } else {
+            format!(
+                "Untrusted file owner uid={} on '{}' (must be root or service uid={})",
+                file_uid,
+                path.display(),
+                euid
+            )
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn check_trusted_ownership_with_root_policy(
+    path: &StdPath,
+    require_root_only: bool,
+) -> Result<(), String> {
+    let meta = fs::symlink_metadata(path)
+        .map_err(|e| format!("Failed to stat '{}': {}", path.display(), e))?;
+    check_trusted_metadata_with_root_policy(path, &meta, require_root_only)
+}
+
+#[cfg(unix)]
+fn check_trusted_metadata(path: &StdPath, meta: &fs::Metadata) -> Result<(), String> {
+    check_trusted_metadata_with_root_policy(
+        path,
+        meta,
+        !is_isolated_plugin_test_root_for_path(path),
+    )
+}
+
+#[cfg(unix)]
+fn check_trusted_ownership(path: &StdPath) -> Result<(), String> {
+    // Production `aetherflow-api` runs as the unprivileged `aetherflow` user while
+    // `aetherflow-runner` runs as root (`uid == 0`). Match root `af-runner` by
+    // requiring `file_uid == 0` outside isolated test environments so `af-api`
+    // never admits service-owned plugin assets that `af-runner` rejects.
+    check_trusted_ownership_with_root_policy(path, !is_isolated_plugin_test_root_for_path(path))
+}
+
+#[cfg(all(test, unix))]
+mod ownership_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use uuid::Uuid;
+
+    fn lookup_from<'a>(
+        entries: &'a [(&'a str, &'a str)],
+    ) -> impl FnMut(&str) -> Option<String> + 'a {
+        let map: HashMap<&str, &str> = entries.iter().copied().collect();
+        move |k: &str| map.get(k).map(|v| (*v).to_string())
+    }
+
+    #[test]
+    fn production_root_policy_rejects_non_root_service_owned_and_group_writable_plugin_paths() {
+        let euid = unsafe { libc::geteuid() };
+        if euid == 0 {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("af-plugin-own-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let err = check_trusted_ownership_with_root_policy(&dir, true)
+            .expect_err("root-only policy must reject non-root owner even when file_uid == euid");
+        assert!(err.contains("must be root uid=0"), "{err}");
+        assert!(check_trusted_ownership_with_root_policy(&dir, false).is_ok());
+
+        let gw_file = dir.join("group-writable.json");
+        fs::write(&gw_file, "{}").unwrap();
+        fs::set_permissions(&gw_file, fs::Permissions::from_mode(0o664)).unwrap();
+        let gw_err = check_trusted_ownership_with_root_policy(&gw_file, true)
+            .expect_err("root-only policy must reject group-writable non-root-gid paths");
+        assert!(gw_err.contains("group-writable"), "{gw_err}");
+        assert!(
+            check_trusted_ownership_with_root_policy(&gw_file, false).is_ok(),
+            "non-root isolated policy permits service-owned group-writable test files"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn isolated_plugin_env_scopes_relaxation_to_absolute_isolated_root_and_denies_production() {
+        let inside_fs = StdPath::new("/tmp/af-iso/opt/AetherFlow/plugins/demo");
+        let outside_fs = StdPath::new("/var/tmp/outside-plugins/demo");
+        let inside_install = StdPath::new("/tmp/af-install/plugins/demo");
+        let inside_backup = StdPath::new("/tmp/af-backup-iso/plugins/demo");
+
+        // Non-production isolated flags and paths strictly inside configured absolute roots are allowed
+        assert!(is_isolated_plugin_root_for_path_with_env(
+            outside_fs,
+            lookup_from(&[("AETHERFLOW_E2E_ISOLATED", "1")]),
+        ));
+        assert!(is_isolated_plugin_root_for_path_with_env(
+            outside_fs,
+            lookup_from(&[
+                ("AETHERFLOW_ENV", "development"),
+                ("AETHERFLOW_E2E_ISOLATED", "true"),
+            ]),
+        ));
+        assert!(is_isolated_plugin_root_for_path_with_env(
+            inside_fs,
+            lookup_from(&[("AETHERFLOW_FS_ROOT", "/tmp/af-iso")]),
+        ));
+        assert!(is_isolated_plugin_root_for_path_with_env(
+            inside_install,
+            lookup_from(&[("AETHERFLOW_INSTALL_ROOT", "/tmp/af-install")]),
+        ));
+        assert!(is_isolated_plugin_root_for_path_with_env(
+            inside_backup,
+            lookup_from(&[("AETHERFLOW_BACKUP_ISOLATED_ROOT", "/tmp/af-backup-iso")]),
+        ));
+
+        // Paths OUTSIDE the isolated root (e.g. AETHERFLOW_PLUGINS_DIR pointing elsewhere or
+        // sibling prefix collision) MUST NOT inherit isolated-root ownership relaxation
+        assert!(!is_isolated_plugin_root_for_path_with_env(
+            outside_fs,
+            lookup_from(&[
+                ("AETHERFLOW_FS_ROOT", "/tmp/af-iso"),
+                ("AETHERFLOW_PLUGINS_DIR", "/var/tmp/outside-plugins"),
+            ]),
+        ));
+        assert!(!is_isolated_plugin_root_for_path_with_env(
+            StdPath::new("/tmp/af-iso-evil/plugins/demo"),
+            lookup_from(&[("AETHERFLOW_FS_ROOT", "/tmp/af-iso")]),
+        ));
+        assert!(!is_isolated_plugin_root_for_path_with_env(
+            StdPath::new("/tmp/af-iso"),
+            lookup_from(&[("AETHERFLOW_FS_ROOT", "/tmp/af-iso")]),
+        ));
+
+        // Root `/`, `//`, `/.`, relative paths, or AETHERFLOW_PLUGINS_DIR alone MUST NOT weaken checks
+        for root_key in [
+            "AETHERFLOW_FS_ROOT",
+            "AETHERFLOW_INSTALL_ROOT",
+            "AETHERFLOW_RELEASE_ROOT",
+            "AETHERFLOW_BACKUP_ISOLATED_ROOT",
+        ] {
+            for root_val in [
+                "/",
+                "//",
+                "/.",
+                "/./",
+                ".",
+                "relative",
+                "tmp/af-iso",
+                "../iso",
+            ] {
+                assert!(
+                    !is_non_root_isolated_path(StdPath::new(root_val), root_key),
+                    "expected {root_key}={root_val:?} to fail non-root absolute path check"
+                );
+                assert!(
+                    !is_isolated_plugin_root_for_path_with_env(
+                        inside_fs,
+                        lookup_from(&[(root_key, root_val)]),
+                    ),
+                    "expected {root_key}={root_val:?} to be rejected"
+                );
+            }
+        }
+        assert!(!is_isolated_plugin_root_for_path_with_env(
+            StdPath::new("/tmp/custom-plugins/demo"),
+            lookup_from(&[("AETHERFLOW_PLUGINS_DIR", "/tmp/custom-plugins")]),
+        ));
+        assert!(!is_isolated_plugin_root_for_path_with_env(
+            inside_fs,
+            lookup_from(&[("AETHERFLOW_E2E_ISOLATED", "0")]),
+        ));
+
+        // Production and release environments MUST ALWAYS deny isolated fallback regardless of other env flags
+        for prod_val in [
+            "production",
+            "PRODUCTION",
+            " Production ",
+            "release",
+            "RELEASE",
+            " Release ",
+        ] {
+            assert!(
+                !is_isolated_plugin_root_for_path_with_env(
+                    inside_fs,
+                    lookup_from(&[
+                        ("AETHERFLOW_ENV", prod_val),
+                        ("AETHERFLOW_E2E_ISOLATED", "1"),
+                        ("AETHERFLOW_FS_ROOT", "/tmp/af-iso"),
+                        ("AETHERFLOW_RELEASE_ROOT", "/tmp/af-release-iso"),
+                        ("AETHERFLOW_BACKUP_ISOLATED_ROOT", "/tmp/af-backup-iso"),
+                    ]),
+                ),
+                "expected AETHERFLOW_ENV={prod_val:?} to deny isolated fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn discover_plugins_in_dir_rejects_untrusted_parent_plugins_root() {
+        let root = std::env::temp_dir().join(format!("af-plugin-root-ww-{}", Uuid::new_v4()));
+        let valid_plugin = root.join("good-plugin");
+        fs::create_dir_all(&valid_plugin).unwrap();
+        fs::write(
+            valid_plugin.join("plugin.manifest.json"),
+            r#"{"id":"good-plugin","name":"Good Plugin","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let (manifests, rejected) = discover_plugins_in_dir(&root);
+        assert!(
+            manifests.is_empty(),
+            "world-writable plugins root must admit 0 manifests, got {manifests:?}"
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|(_, reason)| reason.contains("world-writable")),
+            "expected world-writable parent root rejection, got {rejected:?}"
+        );
+
+        let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o755));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_plugins_in_dir_rejects_world_writable_and_oversized_manifests() {
+        let root = std::env::temp_dir().join(format!("af-plugin-disc-{}", Uuid::new_v4()));
+        let writable_plugin = root.join("bad-perms");
+        fs::create_dir_all(&writable_plugin).unwrap();
+        let writable_manifest = writable_plugin.join("plugin.manifest.json");
+        fs::write(
+            &writable_manifest,
+            r#"{"id":"bad-perms","name":"Bad Perms","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&writable_manifest, fs::Permissions::from_mode(0o666)).unwrap();
+
+        let writable_dir_plugin = root.join("bad-dir-perms");
+        fs::create_dir_all(&writable_dir_plugin).unwrap();
+        fs::write(
+            writable_dir_plugin.join("plugin.manifest.json"),
+            r#"{"id":"bad-dir-perms","name":"Bad Dir Perms","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&writable_dir_plugin, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let oversized_plugin = root.join("too-big");
+        fs::create_dir_all(&oversized_plugin).unwrap();
+        let oversized_manifest = oversized_plugin.join("plugin.manifest.json");
+        fs::write(
+            &oversized_manifest,
+            vec![b' '; (MAX_PLUGIN_MANIFEST_BYTES as usize) + 16],
+        )
+        .unwrap();
+
+        let dir_manifest_plugin = root.join("dir-manifest");
+        fs::create_dir_all(dir_manifest_plugin.join("plugin.manifest.json")).unwrap();
+
+        let (manifests, rejected) = discover_plugins_in_dir(&root);
+        assert!(
+            manifests.is_empty(),
+            "expected 0 valid manifests, got {manifests:?}"
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|(id, reason)| id == "bad-perms" && reason.contains("world-writable")),
+            "expected world-writable rejection, got {rejected:?}"
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|(id, reason)| id == "bad-dir-perms" && reason.contains("world-writable")),
+            "expected world-writable plugin directory rejection, got {rejected:?}"
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|(id, reason)| id == "too-big" && reason.contains("oversized")),
+            "expected oversized rejection, got {rejected:?}"
+        );
+        assert!(
+            rejected
+                .iter()
+                .any(|(id, reason)| id == "dir-manifest" && reason.contains("Invalid or oversized")),
+            "expected non-regular file rejection, got {rejected:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(not(unix))]
+fn check_trusted_metadata(_path: &StdPath, _meta: &fs::Metadata) -> Result<(), String> {
     Ok(())
 }
 
@@ -475,6 +867,16 @@ pub fn discover_plugins_in_dir(
     let Ok(canon_root) = fs::canonicalize(root) else {
         return (manifests, rejected);
     };
+    if let Err(err) = check_trusted_ownership(&canon_root) {
+        rejected.push((
+            canon_root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| canon_root.display().to_string()),
+            err,
+        ));
+        return (manifests, rejected);
+    }
     let Ok(entries) = fs::read_dir(&canon_root) else {
         return (manifests, rejected);
     };
@@ -511,22 +913,101 @@ pub fn discover_plugins_in_dir(
             ));
             continue;
         }
-
-        let manifest_path = canon_dir.join("plugin.manifest.json");
-        if !manifest_path.exists() {
+        if let Err(err) = check_trusted_ownership(&canon_dir) {
+            rejected.push((dir_name, err));
             continue;
         }
-        if let Ok(m_sym) = fs::symlink_metadata(&manifest_path) {
-            if m_sym.file_type().is_symlink() {
+
+        let manifest_path = canon_dir.join("plugin.manifest.json");
+        let m_sym = match fs::symlink_metadata(&manifest_path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
                 rejected.push((
                     dir_name,
-                    "plugin.manifest.json cannot be a symbolic link".to_string(),
+                    format!("Failed to inspect plugin.manifest.json: {}", e),
                 ));
                 continue;
             }
+        };
+        if m_sym.file_type().is_symlink() {
+            rejected.push((
+                dir_name,
+                "plugin.manifest.json cannot be a symbolic link".to_string(),
+            ));
+            continue;
         }
-        let raw_text = match fs::read_to_string(&manifest_path) {
-            Ok(t) => t,
+        if let Err(err) = check_trusted_metadata(&manifest_path, &m_sym) {
+            rejected.push((dir_name, err));
+            continue;
+        }
+        if !m_sym.is_file() || m_sym.len() > MAX_PLUGIN_MANIFEST_BYTES {
+            rejected.push((
+                dir_name,
+                "Invalid or oversized plugin.manifest.json".to_string(),
+            ));
+            continue;
+        }
+
+        let mut open_opts = fs::OpenOptions::new();
+        open_opts.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open_opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+        }
+        let file = match open_opts.open(&manifest_path) {
+            Ok(f) => f,
+            Err(e) => {
+                #[cfg(unix)]
+                if e.raw_os_error() == Some(libc::ELOOP) {
+                    rejected.push((
+                        dir_name,
+                        "plugin.manifest.json cannot be a symbolic link".to_string(),
+                    ));
+                    continue;
+                }
+                rejected.push((dir_name, format!("Failed to read manifest: {}", e)));
+                continue;
+            }
+        };
+        let file_meta = match file.metadata() {
+            Ok(meta) => meta,
+            Err(e) => {
+                rejected.push((
+                    dir_name,
+                    format!("Failed to inspect plugin.manifest.json: {}", e),
+                ));
+                continue;
+            }
+        };
+        if let Err(err) = check_trusted_metadata(&manifest_path, &file_meta) {
+            rejected.push((dir_name, err));
+            continue;
+        }
+        if !file_meta.is_file() || file_meta.len() > MAX_PLUGIN_MANIFEST_BYTES {
+            rejected.push((
+                dir_name,
+                "Invalid or oversized plugin.manifest.json".to_string(),
+            ));
+            continue;
+        }
+        let read_result = {
+            use std::io::Read;
+            let mut buf = String::new();
+            file.take(MAX_PLUGIN_MANIFEST_BYTES + 1)
+                .read_to_string(&mut buf)
+                .map(|_| buf)
+        };
+        let raw_text = match read_result {
+            Ok(t) if (t.len() as u64) <= MAX_PLUGIN_MANIFEST_BYTES => t,
+            Ok(_) => {
+                rejected.push((
+                    dir_name,
+                    "Invalid or oversized plugin.manifest.json".to_string(),
+                ));
+                continue;
+            }
             Err(e) => {
                 rejected.push((dir_name, format!("Failed to read manifest: {}", e)));
                 continue;

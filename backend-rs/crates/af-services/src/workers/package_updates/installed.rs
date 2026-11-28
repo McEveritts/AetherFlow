@@ -38,6 +38,9 @@ pub async fn probe_package_update(
     github_api_base: &str,
     pkg: &Package,
 ) -> (PackageUpdateRecord, bool) {
+    let lifecycle_snapshot = tokio::task::spawn_blocking(capture_package_lifecycle_snapshot)
+        .await
+        .ok();
     let is_installed = package_is_installed(pkg);
 
     let installed_res = detect_installed_version(pkg).await;
@@ -56,7 +59,12 @@ pub async fn probe_package_update(
     };
 
     let expected_source_key = canonical_update_source_key(github_api_base, pkg);
-    let prev_record = get_package_update_map().get(&pkg.name).cloned();
+    let pkg_name_for_lookup = pkg.name.clone();
+    let prev_record =
+        tokio::task::spawn_blocking(move || get_package_update_map().remove(&pkg_name_for_lookup))
+            .await
+            .ok()
+            .flatten();
     let (update_source, _) = effective_update_source_and_apt_package(pkg);
     let mut record = build_package_update_record_for_source(
         github_api_base,
@@ -134,11 +142,13 @@ pub async fn probe_package_update(
         }
         if installed_failed {
             if let Some(ref e) = installed_err_msg {
-                record.error = format!("Installed version check failed: {e}");
-            } else if record.error.is_empty() {
-                record.error =
-                    "Installed version check failed: probe returned no output".to_string();
+                tracing::warn!(
+                    package = %pkg.name,
+                    error = %e,
+                    "installed version check failed for package"
+                );
             }
+            record.error = "Installed version could not be confirmed".to_string();
             record.update_available = false;
         } else {
             if !record.installed_version.is_empty() && !record.latest_version.is_empty() {
@@ -155,7 +165,20 @@ pub async fn probe_package_update(
         }
     }
 
-    let notify = persist_and_cache_package_update(&record);
+    let notify = if let Some((probe_db_path, probe_epoch)) = lifecycle_snapshot {
+        let record_for_persist = record.clone();
+        tokio::task::spawn_blocking(move || {
+            persist_and_cache_package_update_for_epoch(
+                &record_for_persist,
+                &probe_db_path,
+                &probe_epoch,
+            )
+        })
+        .await
+        .unwrap_or(false)
+    } else {
+        false
+    };
     (record, notify)
 }
 
@@ -997,5 +1020,42 @@ pub async fn probe_installed_package_version_strict(pkg: &Package) -> anyhow::Re
                 pkg.name
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod installed_probe_tests {
+    use super::*;
+    use crate::inventory_regressions::{isolated, Fixture};
+
+    #[tokio::test]
+    async fn retired_failed_installed_probe_returns_fixed_public_summary_without_raw_stderr() {
+        if !isolated(
+            "workers::package_updates::installed::installed_probe_tests::retired_failed_installed_probe_returns_fixed_public_summary_without_raw_stderr",
+        ) {
+            return;
+        }
+        let _fixture = Fixture::new();
+        af_db::init_db().unwrap();
+        ensure_app_updates_columns();
+
+        let client = build_github_http_client();
+        let pkg = Package {
+            name: "readarr".into(),
+            update_source: "retired".into(),
+            version_command: vec!["/bin/false".into()],
+            ..Default::default()
+        };
+
+        let (rec, _) = probe_package_update(&client, "https://api.github.com", &pkg).await;
+        assert_eq!(rec.error, "Installed version could not be confirmed");
+        assert!(!rec.update_available);
+        assert!(
+            !rec.error
+                .to_ascii_lowercase()
+                .contains("installed version check failed"),
+            "must not emit raw probe failure prefix: {}",
+            rec.error
+        );
     }
 }

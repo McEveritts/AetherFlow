@@ -167,6 +167,42 @@ pub(super) fn set_config(
     set_config_with_secondary_port(conn, config, None, owner)
 }
 
+fn invalidate_app_updates_in_tx(
+    tx: &Connection,
+    package_id: &str,
+    require_table: bool,
+) -> anyhow::Result<()> {
+    if !require_table && !has_table(tx, "app_updates")? {
+        return Ok(());
+    }
+    let clean = package_id.trim();
+    let clean_lower = clean.to_ascii_lowercase();
+    let lock_alias = af_models::resolve_package_lock_name(&clean_lower);
+    tx.execute(
+        "DELETE FROM app_updates WHERE LOWER(package_name) IN (LOWER(?1), LOWER(?2))",
+        params![clean, lock_alias],
+    )?;
+    Ok(())
+}
+
+fn bump_package_lifecycle_epoch_in_tx(tx: &Connection) -> anyhow::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS system_config (
+             key TEXT PRIMARY KEY,
+             value TEXT NOT NULL,
+             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+         );",
+    )?;
+    tx.execute(
+        "INSERT INTO system_config (key, value)
+         VALUES ('package_lifecycle_epoch', '1')
+         ON CONFLICT(key) DO UPDATE SET
+             value = CAST((CAST(COALESCE(NULLIF(TRIM(system_config.value), ''), '0') AS INTEGER) + 1) AS TEXT)",
+        [],
+    )?;
+    Ok(())
+}
+
 pub(super) fn set_config_with_secondary_port(
     conn: &mut Connection,
     config: &AppIngressConfig,
@@ -185,6 +221,10 @@ pub(super) fn set_config_with_secondary_port(
         write_secondary_port_in_tx(&tx, &config.app_name, role, sec, config.listen_port)?;
     }
     crate::write_app_ingress_config(&tx, config)?;
+    if owner.is_some() {
+        invalidate_app_updates_in_tx(&tx, &config.app_name, false)?;
+        bump_package_lifecycle_epoch_in_tx(&tx)?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -565,6 +605,8 @@ pub fn synchronize_lifecycle_ingress_with_secondary_port(
                 crate::write_app_ingress_config(&tx, &config)?;
             }
         }
+        invalidate_app_updates_in_tx(&tx, app, false)?;
+        bump_package_lifecycle_epoch_in_tx(&tx)?;
         tx.commit()?;
     }
     crate::invalidate_ingress_cache();
@@ -653,7 +695,8 @@ fn archive_with_secondary(
     }
     tx.execute("DELETE FROM app_ingress_configs WHERE app_name=?1", [app])?;
     if owner.is_some() {
-        tx.execute("DELETE FROM app_updates WHERE package_name=?1", [app])?;
+        invalidate_app_updates_in_tx(&tx, app, true)?;
+        bump_package_lifecycle_epoch_in_tx(&tx)?;
     }
     tx.commit()?;
     Ok(())
@@ -1406,5 +1449,179 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[test]
+    fn lifecycle_commits_atomically_invalidate_alias_updates_and_bump_epoch_in_single_tx() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        fixture(&conn);
+
+        let read_epoch = |c: &Connection| -> Option<String> {
+            if !has_table(c, "system_config").unwrap() {
+                return None;
+            }
+            c.query_row(
+                "SELECT value FROM system_config WHERE key = 'package_lifecycle_epoch'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+        };
+
+        // 1. Non-lifecycle set_config (owner: None) must NOT delete app_updates or bump epoch.
+        conn.execute(
+            "INSERT INTO app_updates(package_name) VALUES ('AutoDLIRSSI'), ('radarr')",
+            [],
+        )
+        .unwrap();
+        set_config(
+            &mut conn,
+            &AppIngressConfig {
+                app_name: "autodl".into(),
+                listen_port: 18501,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(read_epoch(&conn), None);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM app_updates", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+
+        // 2. Lifecycle set_config_with_secondary_port (owner: Some) atomically deletes
+        //    alias/case-normalized app_updates and bumps package_lifecycle_epoch.
+        conn.execute(
+            "INSERT INTO package_lifecycle_jobs VALUES ('autodl','upd-1','update','updating','[\"autodlirssi\"]')",
+            [],
+        )
+        .unwrap();
+        set_config_with_secondary_port(
+            &mut conn,
+            &AppIngressConfig {
+                app_name: "autodl".into(),
+                listen_port: 18502,
+                ..Default::default()
+            },
+            None,
+            Some(("upd-1", "update")),
+        )
+        .unwrap();
+        assert_eq!(read_epoch(&conn).as_deref(), Some("1"));
+        let remaining: Vec<String> = conn
+            .prepare("SELECT package_name FROM app_updates ORDER BY package_name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(remaining, vec!["radarr"]);
+
+        // 3. synchronize_lifecycle_ingress_with_secondary_port with port == 0 (non-web install/update)
+        //    also invalidates alias/case-normalized app_updates and bumps epoch atomically.
+        conn.execute(
+            "INSERT INTO app_updates(package_name) VALUES ('Transmission'), ('transmission-daemon')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO package_lifecycle_jobs VALUES ('transmission-daemon','inst-2','install','installing','[\"transmission\"]')",
+            [],
+        )
+        .unwrap();
+        synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn,
+            "transmission-daemon",
+            "install",
+            "inst-2",
+            0,
+            None,
+            false,
+            "",
+        )
+        .unwrap();
+        assert_eq!(read_epoch(&conn).as_deref(), Some("2"));
+        let remaining_after_install: Vec<String> = conn
+            .prepare("SELECT package_name FROM app_updates ORDER BY package_name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(remaining_after_install, vec!["radarr"]);
+
+        // 4. Remove (archive_with_secondary) atomically deletes alias/case-matched app_updates and bumps epoch.
+        conn.execute(
+            "INSERT INTO app_updates(package_name) VALUES ('AutoDL'), ('autodlirssi')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE package_lifecycle_jobs SET job_id='rm-3', action='remove', status='uninstalling' WHERE package_id='autodl'",
+            [],
+        )
+        .unwrap();
+        synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn, "autodl", "remove", "rm-3", 0, None, false, "",
+        )
+        .unwrap();
+        assert_eq!(read_epoch(&conn).as_deref(), Some("3"));
+        assert!(read_config(&conn, "autodl").unwrap().is_none());
+        let remaining_after_remove: Vec<String> = conn
+            .prepare("SELECT package_name FROM app_updates ORDER BY package_name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(remaining_after_remove, vec!["radarr"]);
+
+        // 5. Single-transaction rollback atomicity: if system_config epoch update fails,
+        //    the entire lifecycle ingress write + app_updates delete rolls back together.
+        conn.execute(
+            "INSERT INTO app_updates(package_name) VALUES ('autodlirssi')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE package_lifecycle_jobs SET job_id='inst-rb', action='install', status='installing' WHERE package_id='autodl'",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER abort_epoch_bump BEFORE UPDATE ON system_config
+             BEGIN SELECT RAISE(ABORT, 'simulated epoch bump failure'); END;",
+        )
+        .unwrap();
+        assert!(synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn,
+            "autodl",
+            "install",
+            "inst-rb",
+            18503,
+            None,
+            false,
+            "example.test",
+        )
+        .is_err());
+        assert!(
+            read_config(&conn, "autodl").unwrap().is_none(),
+            "ingress write must roll back when epoch bump fails in the same transaction"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM app_updates WHERE LOWER(package_name) = 'autodlirssi'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "app_updates delete must roll back when epoch bump fails in the same transaction"
+        );
+        assert_eq!(read_epoch(&conn).as_deref(), Some("3"));
     }
 }

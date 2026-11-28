@@ -192,32 +192,108 @@ function resolveWebDist(opts) {
 }
 
 function startStaticServer(distDir) {
-  const indexPath = path.join(distDir, 'index.html');
+  const resolvedDistDir = path.resolve(distDir);
+  const resolvedDistPrefix = resolvedDistDir.endsWith(path.sep)
+    ? resolvedDistDir
+    : resolvedDistDir + path.sep;
+  const resolvedRealDistDir = fs.existsSync(resolvedDistDir)
+    ? fs.realpathSync(resolvedDistDir)
+    : resolvedDistDir;
+  const resolvedRealDistPrefix = resolvedRealDistDir.endsWith(path.sep)
+    ? resolvedRealDistDir
+    : resolvedRealDistDir + path.sep;
+  const indexPath = path.join(resolvedDistDir, 'index.html');
   const server = http.createServer((req, res) => {
-    const reqUrl = new URL(req.url || '/', 'http://127.0.0.1');
-    const cleanPath = decodeURIComponent(reqUrl.pathname).replace(/^\/+/, '');
-    if (cleanPath.startsWith('api/')) {
+    let reqUrl;
+    let decodedPathname;
+    try {
+      reqUrl = new URL(req.url || '/', 'http://127.0.0.1');
+      decodedPathname = decodeURIComponent(reqUrl.pathname);
+    } catch {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('Bad Request');
+      return;
+    }
+    if (decodedPathname.includes('\0')) {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('Bad Request');
+      return;
+    }
+
+    const cleanPath = decodedPathname.replace(/^\/+/, '');
+    if (cleanPath === 'api' || cleanPath.startsWith('api/')) {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'Unmocked API route', path: reqUrl.pathname }));
       return;
     }
 
-    let filePath = path.resolve(distDir, cleanPath);
-    if (!filePath.startsWith(path.resolve(distDir))) {
-      res.writeHead(403);
+    let filePath = path.resolve(resolvedDistDir, cleanPath);
+    if (filePath !== resolvedDistDir && !filePath.startsWith(resolvedDistPrefix)) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
       res.end('Forbidden');
       return;
     }
-    if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    let stat = null;
+    try {
+      stat = fs.lstatSync(filePath);
+    } catch {
+      stat = null;
+    }
+    if (stat) {
+      let candidateRealPath;
+      try {
+        candidateRealPath = fs.realpathSync(filePath);
+      } catch {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('Forbidden');
+        return;
+      }
+      if (
+        candidateRealPath !== resolvedRealDistDir
+        && !candidateRealPath.startsWith(resolvedRealDistPrefix)
+      ) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('Forbidden');
+        return;
+      }
+      if (fs.statSync(candidateRealPath).isDirectory()) {
+        filePath = indexPath;
+      } else {
+        filePath = candidateRealPath;
+      }
+    } else {
       filePath = indexPath;
     }
-    const ext = path.extname(filePath).toLowerCase();
+    let realServePath;
+    try {
+      realServePath = fs.realpathSync(filePath);
+    } catch {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('Not Found');
+      return;
+    }
+    if (
+      realServePath !== resolvedRealDistDir
+      && !realServePath.startsWith(resolvedRealDistPrefix)
+    ) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('Forbidden');
+      return;
+    }
+    const ext = path.extname(realServePath).toLowerCase();
     const contentType = MIME_TYPES[ext] || 'application/octet-stream';
     res.writeHead(200, {
       'content-type': contentType,
       'cache-control': 'no-cache',
     });
-    fs.createReadStream(filePath).pipe(res);
+    const stream = fs.createReadStream(realServePath);
+    stream.on('error', () => {
+      if (!res.headersSent) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+      }
+      res.end();
+    });
+    stream.pipe(res);
   });
 
   return new Promise((resolve, reject) => {
@@ -2533,7 +2609,13 @@ const SHOTS = [
     ready: async (page) => {
       await page.getByRole('heading', { name: 'Overview', exact: true }).waitFor({ timeout: 20_000 });
       await page.locator('.af-chart svg').first().waitFor({ timeout: 15_000 });
-      await page.getByText('API Connected').waitFor({ timeout: 10_000 }).catch(() => {});
+      await page.getByText('API Connected').waitFor({ timeout: 10_000 }).catch((err) => {
+        console.warn('[capture_screenshots] soft-wait timeout', {
+          shot: 'overview',
+          target: 'API Connected',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
     },
   },
   {
@@ -2635,7 +2717,18 @@ const SHOTS = [
     url: '/?tab=settings',
     ready: async (page) => {
       await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor({ timeout: 20_000 });
-      await page.getByText('atlas.example.com').or(page.locator('input[value="atlas.example.com"]')).first().waitFor({ timeout: 15_000 }).catch(() => {});
+      await page
+        .getByText('atlas.example.com')
+        .or(page.locator('input[value="atlas.example.com"]'))
+        .first()
+        .waitFor({ timeout: 15_000 })
+        .catch((err) => {
+          console.warn('[capture_screenshots] soft-wait timeout', {
+            shot: 'settings',
+            target: 'atlas.example.com',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
     },
   },
   {
@@ -2683,7 +2776,13 @@ const SHOTS = [
     ready: async (page) => {
       await page.getByRole('heading', { name: 'Overview', exact: true }).waitFor({ timeout: 20_000 });
       await page.locator('.af-chart svg').first().waitFor({ timeout: 15_000 });
-      await page.getByText('API Connected').waitFor({ timeout: 10_000 }).catch(() => {});
+      await page.getByText('API Connected').waitFor({ timeout: 10_000 }).catch((err) => {
+        console.warn('[capture_screenshots] soft-wait timeout', {
+          shot: 'command-palette',
+          target: 'API Connected',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
       await page.evaluate(() => {
         const main = document.querySelector('#main-content');
         if (main) main.scrollTop = 0;

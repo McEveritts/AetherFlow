@@ -995,16 +995,17 @@ async fn test_readarr_failed_installed_probe_preserves_error_and_rejects_admissi
 
     let (rec, _notify) = probe_package_update(&client, "https://api.github.com", &pkg).await;
 
-    // Verify last_error / error preserves the installed version check failure
-    assert!(
+    // Verify last_error / error uses only the fixed safe public summary without raw probe output
+    assert_eq!(
+        rec.error, "Installed version could not be confirmed",
+        "Expected fixed safe installed check failure in error, got: {}",
         rec.error
+    );
+    assert!(
+        !rec.error
             .to_ascii_lowercase()
-            .contains("installed version check failed")
-            || rec
-                .error
-                .to_ascii_lowercase()
-                .contains("installed version could not be confirmed"),
-        "Expected installed check failure in error, got: {}",
+            .contains("installed version check failed"),
+        "Raw installed probe prefix must not leak in error: {}",
         rec.error
     );
 
@@ -1024,12 +1025,10 @@ async fn test_readarr_failed_installed_probe_preserves_error_and_rejects_admissi
         )
         .unwrap();
     assert!(!db_avail);
-    assert!(
-        db_err
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .contains("installed version check failed"),
-        "Database last_error must preserve failure"
+    let db_err_text = db_err.unwrap_or_default();
+    assert_eq!(
+        db_err_text, "Installed version could not be confirmed",
+        "Database last_error must record the fixed safe failure summary"
     );
 }
 

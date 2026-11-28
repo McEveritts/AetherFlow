@@ -967,6 +967,209 @@ exit 0
             post_fail_state = json.loads(ipt_state.read_text(encoding="utf-8"))
             self.assertEqual(post_fail_state["v4"]["policies"]["INPUT"], "ACCEPT", "Must never flip INPUT to DROP if SSH allow failed")
 
+    def test_state_acquire_lock_defaults_to_run_normalizes_var_run_and_rejects_custom_symlink_dirs(self) -> None:
+        state_module = ROOT / "setup/modules/06-state.sh"
+        with tempfile.TemporaryDirectory(prefix="af-lock-") as tmp:
+            root = Path(tmp)
+            # 1. Default LOCKFILE points to /run/aetherflow-setup.lock (not legacy /var/run symlink)
+            default_probe = subprocess.run(
+                ["bash", "-c", 'unset LOCKFILE; source "$1"; printf "%s" "$LOCKFILE"', "lock-default", str(state_module)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(default_probe.returncode, 0, default_probe.stderr)
+            self.assertEqual(default_probe.stdout, "/run/aetherflow-setup.lock")
+
+            # 2. Custom symlinked lock directory MUST fail closed without creating any target file
+            real_dir = root / "real-lock-dir"
+            real_dir.mkdir()
+            sym_dir = root / "sym-lock-dir"
+            sym_dir.symlink_to(real_dir)
+            sym_res = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; _acquire_lock',
+                    "lock-symdir",
+                    str(state_module),
+                ],
+                env={**os.environ, "LOCKFILE": str(sym_dir / "aetherflow-setup.lock")},
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(sym_res.returncode, 0)
+            self.assertIn("Refusing symlinked lockfile directory", sym_res.stderr)
+            self.assertFalse((real_dir / "aetherflow-setup.lock").exists())
+
+            # 2b. Nested lock path beneath a symlinked ancestor MUST fail closed BEFORE mkdir -p
+            nested_sym_res = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; _acquire_lock',
+                    "lock-nested-symdir",
+                    str(state_module),
+                ],
+                env={**os.environ, "LOCKFILE": str(sym_dir / "nested" / "sub" / "aetherflow-setup.lock")},
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(nested_sym_res.returncode, 0)
+            self.assertIn("Refusing symlinked lockfile directory", nested_sym_res.stderr)
+            self.assertFalse((real_dir / "nested").exists())
+
+            # 3. Direct non-symlink directory acquires and releases flock cleanly even under
+            #    noclobber and if LOCKFILE is mutated after acquisition (AF_LOCK_PATH preserved)
+            direct_lock = real_dir / "aetherflow-setup.lock"
+            decoy_lock = real_dir / "decoy.lock"
+            decoy_lock.write_text("KEEP-DECOY\n", encoding="utf-8")
+            ok_res = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'set -o noclobber; source "$1"; _acquire_lock; '
+                    'printf "%s" "$LOCKFILE"; '
+                    'LOCKFILE="$2"; '
+                    '_release_lock',
+                    "lock-ok",
+                    str(state_module),
+                    str(decoy_lock),
+                ],
+                env={**os.environ, "LOCKFILE": str(direct_lock)},
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(ok_res.returncode, 0, ok_res.stdout + ok_res.stderr)
+            self.assertEqual(ok_res.stdout, str(direct_lock))
+            self.assertEqual(direct_lock.read_text(encoding="utf-8"), "")
+            self.assertEqual(decoy_lock.read_text(encoding="utf-8"), "KEEP-DECOY\n")
+
+            # 3b. Contended lock reads holder PID via locked FD without clobbering
+            contended_lock = real_dir / "contended.lock"
+            holder = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; _acquire_lock; printf "LOCKED:%s\\n" "${BASHPID:-$$}"; sleep 5; _release_lock',
+                    "lock-holder",
+                    str(state_module),
+                ],
+                env={**os.environ, "LOCKFILE": str(contended_lock)},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert holder.stdout is not None
+                ready_line = holder.stdout.readline().strip()
+                self.assertTrue(ready_line.startswith("LOCKED:"), ready_line)
+                holder_pid = ready_line.split(":", 1)[1]
+                contender = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; _acquire_lock',
+                        "lock-contender",
+                        str(state_module),
+                    ],
+                    env={**os.environ, "LOCKFILE": str(contended_lock)},
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertNotEqual(contender.returncode, 0)
+                self.assertIn(f"PID: {holder_pid}", contender.stdout)
+            finally:
+                holder.terminate()
+                try:
+                    holder.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    holder.kill()
+                    holder.wait(timeout=5)
+
+            # 3c. Trailing slash on AF_INSTALL_ROOT in 05-finalize.sh self-delete guard preserves repo script
+            finalize_module = ROOT / "setup/modules/05-finalize.sh"
+            fake_root = root / "af-root"
+            fake_setup_dir = fake_root / "setup"
+            fake_setup_dir.mkdir(parents=True)
+            fake_script = fake_setup_dir / "AetherFlow-Setup"
+            fake_script.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            guard_probe = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'af_root="${AF_INSTALL_ROOT:-/opt/AetherFlow}"; '
+                    'af_root="$(realpath -m "${af_root}" 2>/dev/null || printf \'%s\' "${af_root%/}")"; '
+                    'af_root="${af_root%/}"; '
+                    'if [[ "${AF_SKIP_SELF_DELETE:-0}" != "1" ]] && [[ -n "${af_root}" ]] && [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != "${af_root}"/* ]]; then '
+                    'printf "WOULD_DELETE"; else printf "KEPT"; fi',
+                    str(fake_script),
+                ],
+                env={**os.environ, "AF_INSTALL_ROOT": f"{fake_root}/"},
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(guard_probe.returncode, 0, guard_probe.stderr)
+            self.assertEqual(guard_probe.stdout, "KEPT")
+            self.assertIn('af_root="${af_root%/}"', finalize_module.read_text(encoding="utf-8"))
+
+            # 4. Legacy /var/run/* normalizes to /run/* when /var/run is a root-owned symlink to /run or ../run
+            var_run = Path("/var/run")
+            run_dir = Path("/run")
+            if (
+                var_run.is_symlink()
+                and var_run.lstat().st_uid == 0
+                and os.readlink(var_run) in ("/run", "../run")
+                and not run_dir.is_symlink()
+                and run_dir.is_dir()
+                and run_dir.lstat().st_uid == 0
+            ):
+                run_user_dir = Path(f"/run/user/{os.getuid()}")
+                if run_user_dir.is_dir() and os.access(run_user_dir, os.W_OK):
+                    lock_name = f"af-setup-lock-test-{os.getpid()}.lock"
+                    expected_norm = f"/run/user/{os.getuid()}/{lock_name}"
+                    try:
+                        norm_res = subprocess.run(
+                            [
+                                "bash",
+                                "-c",
+                                'source "$1"; _acquire_lock; printf "%s" "$LOCKFILE"; _release_lock',
+                                "lock-varrun",
+                                str(state_module),
+                            ],
+                            env={**os.environ, "LOCKFILE": f"/var/run/user/{os.getuid()}/{lock_name}"},
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        self.assertEqual(norm_res.returncode, 0, norm_res.stdout + norm_res.stderr)
+                        self.assertEqual(norm_res.stdout, expected_norm)
+                    finally:
+                        Path(expected_norm).unlink(missing_ok=True)
+                else:
+                    # Non-writable /run: still verify /var/run/* normalized to /run/* and did NOT fail symlink check
+                    norm_res = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            'source "$1"; _acquire_lock',
+                            "lock-varrun-ro",
+                            str(state_module),
+                        ],
+                        env={**os.environ, "LOCKFILE": "/var/run/aetherflow-setup.lock"},
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertNotIn("Refusing symlinked lockfile directory", norm_res.stderr)
+                    if norm_res.returncode != 0:
+                        self.assertIn("/run/aetherflow-setup.lock", norm_res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

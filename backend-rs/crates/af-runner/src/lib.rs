@@ -1160,9 +1160,9 @@ pub use hosts_dns::{
     reconcile_hosts_file, reconcile_hosts_file_at_path, reconcile_pihole_custom_list_content,
     remove_dns_provider_domain, remove_dns_provider_files, remove_hosts_file_at_path,
     remove_pihole_custom_list_content, run_hosts_cli, sync_adguard_dns, sync_dns_provider_files,
-    sync_dns_provider_files_with_mode, update_hosts_file, update_hosts_file_at_path,
-    update_hosts_file_local, update_hosts_file_with_ip_at_path, validate_hosts_domain,
-    validate_hosts_ip, HostsModifyAction, RunnerError,
+    sync_dns_provider_files_for_root, sync_dns_provider_files_with_mode, update_hosts_file,
+    update_hosts_file_at_path, update_hosts_file_local, update_hosts_file_with_ip_at_path,
+    validate_hosts_domain, validate_hosts_ip, HostsModifyAction, RunnerError,
 };
 use hosts_dns::{handle_hosts, resolve_provider_dir};
 

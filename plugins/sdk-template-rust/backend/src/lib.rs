@@ -1,7 +1,7 @@
 //! AetherFlow Rust Plugin SDK Template (`{{PLUGIN_ID}}` / `{{PLUGIN_NAME}}`)
 //!
 //! Operates as a host-managed or standalone companion HTTP service that communicates with
-//! verified AetherFlow v4.0.0 HTTP routes using a short-lived scoped plugin token (`AETHERFLOW_PLUGIN_TOKEN`):
+//! verified AetherFlow v4.0.1 HTTP routes using a short-lived scoped plugin token (`AETHERFLOW_PLUGIN_TOKEN`):
 //! - `GET /api/v1/public/marketplace` (unauthenticated public catalog route)
 //! - `GET /api/v1/auth/system/metrics` (authenticated via `Authorization: Bearer <scoped_plugin_token>`)
 
@@ -27,11 +27,11 @@ pub const PLUGIN_ID: &str = "{{PLUGIN_ID}}";
 /// Placeholder human-readable plugin name replaced during scaffold instantiation.
 pub const PLUGIN_NAME: &str = "{{PLUGIN_NAME}}";
 
-/// Verified AetherFlow v4.0.0 public marketplace endpoint (`backend-rs/crates/af-api/src/routes.rs`).
+/// Verified AetherFlow v4.0.1 public marketplace endpoint (`backend-rs/crates/af-api/src/routes.rs`).
 pub const PATH_PUBLIC_MARKETPLACE: &str = "/api/v1/public/marketplace";
-/// Verified AetherFlow v4.0.0 authenticated system metrics endpoint (`backend-rs/crates/af-api/src/routes.rs`).
+/// Verified AetherFlow v4.0.1 authenticated system metrics endpoint (`backend-rs/crates/af-api/src/routes.rs`).
 pub const PATH_AUTH_SYSTEM_METRICS: &str = "/api/v1/auth/system/metrics";
-/// Verified AetherFlow v4.0.0 public liveness endpoint (`backend-rs/crates/af-api/src/routes.rs`).
+/// Verified AetherFlow v4.0.1 public liveness endpoint (`backend-rs/crates/af-api/src/routes.rs`).
 pub const PATH_PUBLIC_HEALTH: &str = "/health";
 
 /// Default base URL for the local AetherFlow Rust control plane (`aetherflow-api`).
@@ -139,13 +139,14 @@ pub enum ClientError {
     },
 }
 
-/// HTTP client wrapper for verified AetherFlow v4.0.0 control-plane endpoints.
+/// HTTP client wrapper for verified AetherFlow v4.0.1 control-plane endpoints.
 #[derive(Debug, Clone)]
 pub struct AetherFlowClient {
     base_url: String,
     bearer_token: Option<String>,
     http: reqwest::Client,
     token_file: Option<std::path::PathBuf>,
+    managed_runtime: bool,
 }
 
 impl AetherFlowClient {
@@ -163,6 +164,7 @@ impl AetherFlowClient {
             bearer_token: sanitize_token(bearer_token.as_deref()),
             http,
             token_file: None,
+            managed_runtime: false,
         }
     }
 
@@ -171,6 +173,9 @@ impl AetherFlowClient {
         client.token_file = env::var_os("AETHERFLOW_PLUGIN_TOKEN_FILE")
             .filter(|path| !path.is_empty())
             .map(std::path::PathBuf::from);
+        client.managed_runtime = client.token_file.is_some()
+            || env::var_os("AETHERFLOW_PLUGIN_RUNTIME_ID").is_some_and(|val| !val.is_empty())
+            || env::var_os("AETHERFLOW_PLUGIN_STATE_DIR").is_some_and(|val| !val.is_empty());
         client
     }
 
@@ -180,6 +185,15 @@ impl AetherFlowClient {
 
     pub fn has_bearer_token(&self) -> bool {
         self.current_token().is_some()
+    }
+
+    /// Derives the runtime mode consistently across `/healthz`, `/status`, and `/snapshot`.
+    pub fn runtime_mode(&self) -> &'static str {
+        if self.managed_runtime || self.token_file.is_some() {
+            "managed"
+        } else {
+            "standalone-companion"
+        }
     }
 
     fn current_token(&self) -> Option<String> {
@@ -349,7 +363,7 @@ async fn healthz_handler(State(client): State<Arc<AetherFlowClient>>) -> Json<He
         plugin_id: PLUGIN_ID.to_string(),
         plugin_name: PLUGIN_NAME.to_string(),
         sdk: "rust".to_string(),
-        runtime_mode: "managed".to_string(),
+        runtime_mode: client.runtime_mode().to_string(),
         auth_token_configured: client.has_bearer_token(),
     })
 }
@@ -400,7 +414,7 @@ async fn snapshot_handler(State(client): State<Arc<AetherFlowClient>>) -> Respon
         StatusCode::OK,
         Json(SnapshotResponse {
             plugin_id: PLUGIN_ID.to_string(),
-            runtime_mode: "standalone-companion".to_string(),
+            runtime_mode: client.runtime_mode().to_string(),
             system_metrics,
             system_metrics_notice,
             marketplace_count,
@@ -412,6 +426,92 @@ async fn snapshot_handler(State(client): State<Arc<AetherFlowClient>>) -> Respon
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn snapshot_handler_matches_healthz_runtime_mode() {
+        let upstream = Router::new()
+            .route(
+                PATH_PUBLIC_MARKETPLACE,
+                get(|| async {
+                    Json(json!({ "packages": [{ "id": "jellyfin" }, { "id": "sonarr" }] }))
+                }),
+            )
+            .route(
+                PATH_AUTH_SYSTEM_METRICS,
+                get(|| async { Json(json!({ "cpu_usage": 12.5 })) }),
+            );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let _ = axum::serve(upstream_listener, upstream).await;
+        });
+
+        let base_url = format!("http://{upstream_addr}");
+        let dir = std::env::temp_dir().join(format!(
+            "af-sdk-runtime-mode-test-{}-{}",
+            std::process::id(),
+            upstream_addr.port()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token_file = dir.join("runtime.token");
+        std::fs::write(&token_file, "eyJhbGciOiJIUzI1NiJ9.managed.sig").unwrap();
+
+        let standalone_client = Arc::new(AetherFlowClient::new(&base_url, None));
+        let mut managed_inner = AetherFlowClient::new(&base_url, None);
+        managed_inner.token_file = Some(token_file.clone());
+        managed_inner.managed_runtime = true;
+        let managed_client = Arc::new(managed_inner);
+
+        for (client, expected_mode, expected_auth) in [
+            (standalone_client, "standalone-companion", false),
+            (managed_client, "managed", true),
+        ] {
+            let plugin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let plugin_addr = plugin_listener.local_addr().unwrap();
+            let plugin_router = build_router(client);
+            let plugin_task = tokio::spawn(async move {
+                let _ = axum::serve(plugin_listener, plugin_router).await;
+            });
+
+            let http = reqwest::Client::builder().no_proxy().build().unwrap();
+            let health: HealthResponse = http
+                .get(format!("http://{plugin_addr}/healthz"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let status: HealthResponse = http
+                .get(format!("http://{plugin_addr}/status"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let snapshot: SnapshotResponse = http
+                .get(format!("http://{plugin_addr}/snapshot"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+
+            assert_eq!(health.runtime_mode, expected_mode);
+            assert_eq!(status.runtime_mode, health.runtime_mode);
+            assert_eq!(snapshot.runtime_mode, health.runtime_mode);
+            assert_eq!(health.auth_token_configured, expected_auth);
+            assert_eq!(snapshot.marketplace_count, Some(2));
+
+            plugin_task.abort();
+        }
+
+        upstream_task.abort();
+        let _ = std::fs::remove_file(&token_file);
+        let _ = std::fs::remove_dir(&dir);
+    }
 
     #[test]
     fn managed_client_reads_rotated_token_for_each_request() {
