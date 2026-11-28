@@ -63,7 +63,16 @@ youtube_abort_install() {
 
 _youtube_git() {
     if [[ -n "${APP_NAME:-}" ]] && id "$APP_NAME" >/dev/null 2>&1; then
-        runuser -u "$APP_NAME" -- git "$@"
+        local _app_home
+        _app_home="$(getent passwd "$APP_NAME" | cut -d: -f6 2>/dev/null || true)"
+        [[ -n "$_app_home" ]] || _app_home="/tmp"
+        runuser -u "$APP_NAME" -- env -i \
+            PATH="/usr/local/bin:/usr/bin:/bin" \
+            HOME="$_app_home" \
+            USER="$APP_NAME" \
+            LOGNAME="$APP_NAME" \
+            LANG="C.UTF-8" \
+            git "$@"
     else
         git "$@"
     fi
@@ -99,7 +108,7 @@ youtube_source() {
         return 0
     fi
 
-    if ! target_ref="$(python3 -c '
+    if ! target_ref="$(python3 -I -c '
 import sys
 
 raw = sys.argv[1]
@@ -136,7 +145,7 @@ print(trimmed)
         exit 1
     fi
 
-    if ! resolved_output="$(python3 -c '
+    if ! resolved_output="$(python3 -I -c '
 import re, sys
 
 target = sys.argv[1]
@@ -332,9 +341,11 @@ youtube_private_port() {
         fi
     fi
     if [[ "$needs_alloc" == true ]]; then
-        allocated_port="$(python3 - "$APP_PORT" "$CONFIG_DIR" "$path" <<'PY'
+        allocated_port="$(python3 -I - "$APP_PORT" "$CONFIG_DIR" "$path" <<'PY'
+import os
 import pathlib
 import socket
+import stat
 import sys
 
 used = {int(sys.argv[1])}
@@ -350,17 +361,55 @@ if etc_dir.name == "etc":
     opt_dir = etc_dir.parent / "opt"
     for sibling in ("piped", "invidious"):
         search_dirs.append(opt_dir / sibling)
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+def open_dir_nofollow(dir_path):
+    p = pathlib.PurePosixPath(os.path.abspath(str(dir_path)))
+    if ".." in p.parts:
+        return -1
+    cur = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    try:
+        for part in p.parts[1:]:
+            nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur)
+            os.close(cur)
+            cur = nxt
+        return cur
+    except OSError:
+        os.close(cur)
+        return -1
+
 for directory in search_dirs:
-    if not directory.is_dir():
+    dfd = open_dir_nofollow(directory)
+    if dfd < 0:
         continue
-    for port_file in directory.glob("*-port"):
-        if not port_file.is_file() or not port_file.stat().st_size:
-            continue
-        if port_file.resolve() == self_port_file:
-            continue
-        raw = port_file.read_text().strip()
-        if raw.isdecimal():
-            used.add(int(raw))
+    try:
+        for name in os.listdir(dfd):
+            if not name.endswith("-port"):
+                continue
+            cand_path = directory / name
+            if cand_path == self_port_file:
+                continue
+            try:
+                pfd = os.open(name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=dfd)
+            except OSError:
+                continue
+            try:
+                pst = os.fstat(pfd)
+                if not stat.S_ISREG(pst.st_mode) or pst.st_size <= 0 or pst.st_size > 64:
+                    continue
+                raw_bytes = os.read(pfd, 65)
+                if len(raw_bytes) > 64:
+                    continue
+                raw = raw_bytes.decode("utf-8", errors="ignore").strip()
+                if raw.isdecimal():
+                    used.add(int(raw))
+            finally:
+                os.close(pfd)
+    finally:
+        os.close(dfd)
 for port in range(20000, 30000):
     if port in used:
         continue
@@ -384,8 +433,21 @@ youtube_database() {
     DB_PASSWORD="$(youtube_secret database-password)"
     systemctl enable --now postgresql.service
     (
-    export AF_YOUTUBE_DB_PASSWORD="$DB_PASSWORD"
-    af_logged runuser --preserve-environment -u postgres -- psql -v ON_ERROR_STOP=1 --set="app=$APP_NAME" <<'SQL'
+    # Scrub parent environment via os.execvpe without placing DB_PASSWORD on process argv.
+    AF_YOUTUBE_DB_PASSWORD="$DB_PASSWORD" af_logged python3 -I -c '
+import os, sys
+app_name = sys.argv[1]
+clean_env = {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "LANG": "C.UTF-8",
+    "AF_YOUTUBE_DB_PASSWORD": os.environ["AF_YOUTUBE_DB_PASSWORD"],
+}
+os.execvpe(
+    "runuser",
+    ["runuser", "-u", "postgres", "--", "psql", "-v", "ON_ERROR_STOP=1", f"--set=app={app_name}"],
+    clean_env,
+)
+' "$APP_NAME" <<'SQL'
 \getenv password AF_YOUTUBE_DB_PASSWORD
 SELECT format('CREATE ROLE %I LOGIN', :'app') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'app') \gexec
 SELECT format('ALTER ROLE %I PASSWORD %L', :'app', :'password') \gexec
@@ -497,7 +559,7 @@ youtube_remove() {
             print_error "PostgreSQL service is not active; refusing ${app} purge while database/role teardown cannot run."
             return 1
         fi
-        if ! af_logged runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 --set="app=$app" <<'SQL'
+        if ! af_logged runuser -u postgres -- env -i PATH="/usr/local/bin:/usr/bin:/bin" LANG="C.UTF-8" psql --dbname=postgres -v ON_ERROR_STOP=1 --set="app=$app" <<'SQL'
 SELECT format('DROP DATABASE IF EXISTS %I', :'app') \gexec
 SELECT format('DROP ROLE IF EXISTS %I', :'app') \gexec
 SQL
@@ -506,7 +568,7 @@ SQL
             return 1
         fi
         local remaining_pg=""
-        if ! remaining_pg="$(runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 -X -q -tA --set="app=$app" <<'SQL'
+        if ! remaining_pg="$(runuser -u postgres -- env -i PATH="/usr/local/bin:/usr/bin:/bin" LANG="C.UTF-8" psql --dbname=postgres -v ON_ERROR_STOP=1 -X -q -tA --set="app=$app" <<'SQL'
 SELECT (SELECT count(*) FROM pg_database WHERE datname = :'app') + (SELECT count(*) FROM pg_roles WHERE rolname = :'app');
 SQL
         )"; then

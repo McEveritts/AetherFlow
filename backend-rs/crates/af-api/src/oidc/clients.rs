@@ -1,12 +1,22 @@
 use super::authorize::is_safe_redirect_uri;
 use crate::auth::{api_error, blocking_response, AuthUser};
-use crate::ws::extract_client_ip;
+use crate::ws::extract_client_ip_for_peer;
 use axum::extract::{Path, Request};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use rand::RngCore;
 use rusqlite::params;
 use sha2::{Digest, Sha256};
+
+/// Audit-log client IP resolved via `extract_client_ip_for_peer` using the TCP peer recorded by
+/// `ConnectInfo` (`SEC-09`), so forwarding headers are trusted only from trusted proxies.
+fn request_client_ip(req: &Request) -> String {
+    let peer_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    extract_client_ip_for_peer(req.headers(), peer_ip)
+}
 
 pub async fn get_oidc_clients() -> Response {
     blocking_response(get_oidc_clients_blocking).await
@@ -69,7 +79,7 @@ fn get_oidc_clients_blocking() -> Response {
 
 pub async fn create_oidc_client(req: Request) -> Response {
     let actor = req.extensions().get::<AuthUser>().cloned();
-    let ip = extract_client_ip(req.headers());
+    let ip = request_client_ip(&req);
     let ua = req
         .headers()
         .get(header::USER_AGENT)
@@ -203,7 +213,7 @@ fn delete_oidc_client_blocking(client_id: String, req: Request) -> Response {
         );
     }
     let actor = req.extensions().get::<AuthUser>().cloned();
-    let ip = extract_client_ip(req.headers());
+    let ip = request_client_ip(&req);
     let ua = req
         .headers()
         .get(header::USER_AGENT)
@@ -281,4 +291,36 @@ fn delete_oidc_client_blocking(client_id: String, req: Request) -> Response {
     }
 
     Json(serde_json::json!({ "message": "Client deleted and tokens revoked" })).into_response()
+}
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::request_client_ip;
+    use axum::body::Body;
+    use axum::extract::{ConnectInfo, Request};
+    use std::net::SocketAddr;
+
+    fn request(peer: &str, xff: &str) -> Request {
+        Request::builder()
+            .uri("/api/v1/admin/oidc/clients")
+            .header("x-forwarded-for", xff)
+            .extension(ConnectInfo(peer.parse::<SocketAddr>().unwrap()))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn sec09_oidc_audit_ip_ignores_spoofed_forwarding_from_untrusted_peer() {
+        if std::env::var("TRUSTED_PROXIES").is_ok_and(|v| !v.trim().is_empty()) {
+            return;
+        }
+        assert_eq!(
+            request_client_ip(&request("203.0.113.9:5000", "1.2.3.4")),
+            "203.0.113.9"
+        );
+        assert_eq!(
+            request_client_ip(&request("127.0.0.1:5000", "198.51.100.7")),
+            "198.51.100.7"
+        );
+    }
 }

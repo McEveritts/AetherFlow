@@ -186,7 +186,9 @@ pub struct ProposedAction {
     pub impact: String,
 }
 
-#[derive(Debug, Clone)]
+/// Resolved AI provider configuration. `Debug` is implemented manually so API keys are never
+/// printed in plaintext by `{:?}` logging (`SEC-05`).
+#[derive(Clone)]
 pub struct ProviderSettings {
     pub gemini_api_key: String,
     pub openai_api_key: String,
@@ -198,6 +200,42 @@ pub struct ProviderSettings {
     pub local_provider: String,
     pub local_model: String,
     pub system_prompt: String,
+}
+
+/// Renders a secret for `Debug` output: `"<unset>"` when empty, `"[REDACTED]"` otherwise.
+/// Never reveals any character, prefix, suffix, or the length of the secret.
+fn redacted_secret_debug(value: &str) -> &'static str {
+    if value.trim().is_empty() {
+        "<unset>"
+    } else {
+        "[REDACTED]"
+    }
+}
+
+impl std::fmt::Debug for ProviderSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderSettings")
+            .field(
+                "gemini_api_key",
+                &redacted_secret_debug(&self.gemini_api_key),
+            )
+            .field(
+                "openai_api_key",
+                &redacted_secret_debug(&self.openai_api_key),
+            )
+            .field(
+                "anthropic_api_key",
+                &redacted_secret_debug(&self.anthropic_api_key),
+            )
+            .field("anthropic_endpoint", &self.anthropic_endpoint)
+            .field("lm_studio_endpoint", &self.lm_studio_endpoint)
+            .field("ollama_endpoint", &self.ollama_endpoint)
+            .field("default_model", &self.default_model)
+            .field("local_provider", &self.local_provider)
+            .field("local_model", &self.local_model)
+            .field("system_prompt", &self.system_prompt)
+            .finish()
+    }
 }
 
 pub(super) fn select_gemini_model_from_setting(raw_ai_model: Option<&str>) -> String {
@@ -830,5 +868,48 @@ pub(crate) async fn call_configured_ai(
                 anyhow::bail!("No AI provider API key configured")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_settings_debug_tests {
+    use super::*;
+
+    #[test]
+    fn sec05_provider_settings_debug_redacts_api_keys() {
+        let settings = ProviderSettings {
+            gemini_api_key: "AIzaSyD-gemini-secret-0001".to_string(),
+            openai_api_key: "sk-proj-openai-secret-0002".to_string(),
+            anthropic_api_key: "sk-ant-api03-anthropic-secret-0003".to_string(),
+            anthropic_endpoint: "https://api.anthropic.com".to_string(),
+            lm_studio_endpoint: "http://127.0.0.1:1234".to_string(),
+            ollama_endpoint: String::new(),
+            default_model: "gemini-2.5-flash".to_string(),
+            local_provider: "ollama".to_string(),
+            local_model: "llama3".to_string(),
+            system_prompt: "be helpful".to_string(),
+        };
+        for rendered in [format!("{settings:?}"), format!("{settings:#?}")] {
+            for secret in [
+                "gemini-secret",
+                "openai-secret",
+                "anthropic-secret",
+                "0001",
+                "0003",
+            ] {
+                assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+            }
+            assert_eq!(rendered.matches("[REDACTED]").count(), 3, "{rendered}");
+            assert!(rendered.contains("https://api.anthropic.com"));
+            assert!(rendered.contains("gemini-2.5-flash"));
+        }
+        let empty = ProviderSettings {
+            gemini_api_key: String::new(),
+            openai_api_key: "  ".to_string(),
+            ..settings
+        };
+        let rendered = format!("{empty:?}");
+        assert_eq!(rendered.matches("<unset>").count(), 2, "{rendered}");
+        assert_eq!(rendered.matches("[REDACTED]").count(), 1, "{rendered}");
     }
 }

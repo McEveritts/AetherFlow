@@ -532,12 +532,19 @@ fn test_regression_snapshot_and_recovery_permissions_and_cleanup_state() {
             & 0o777;
         assert_eq!(data_dir_mode, 0o700, "data_dir must be 0700");
 
+        let env_dir_mode = fs::symlink_metadata(&cfg.env_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(env_dir_mode, 0o750, "env_dir must be 0750");
+
         let env_mode = fs::symlink_metadata(&cfg.host_env_file)
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(env_mode, 0o600, "migrated .env must be 0600");
+        assert_eq!(env_mode, 0o640, "migrated .env must be 0640");
 
         let snap_dir = release_dir.join("data-snapshot");
         let snap_dir_mode = fs::symlink_metadata(&snap_dir)
@@ -817,4 +824,136 @@ fn test_round8_standalone_rollback_restores_current_release_data_snapshot() {
         restored_marker, "pre-deploy-good-state",
         "standalone rollback must restore snapshot from outgoing current release (`broken/data-snapshot`)"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn w1b_r3_restore_unlinks_planted_directory_symlink_and_restores_without_touching_target() {
+    use std::os::unix::fs::symlink;
+
+    let sb = TempSandbox::new("w1b-r3-symlink-restore");
+    let cfg = ReleaseConfig::for_root(sb.path());
+    fs::create_dir_all(&cfg.data_dir).unwrap();
+    let live_db = cfg.data_dir.join(&cfg.sqlite_db);
+    let conn = Connection::open(&live_db).unwrap();
+    conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('restored-ok');")
+        .unwrap();
+    drop(conn);
+
+    let resolved = crate::config::try_resolve_db_path(&cfg, None).unwrap();
+    let rel_dir = cfg.releases_dir.join("100");
+    fs::create_dir_all(&rel_dir).unwrap();
+    let snap = crate::snapshot::create_state_snapshot(&cfg, &resolved, &rel_dir, false).unwrap();
+    assert!(snap.created);
+
+    // Plant a symlink at live_db pointing to a sensitive target directory.
+    let target_dir = sb.path().join("etc-sensitive");
+    fs::create_dir_all(&target_dir).unwrap();
+    fs::remove_file(&live_db).unwrap();
+    symlink(&target_dir, &live_db).unwrap();
+
+    let report =
+        crate::snapshot::restore_state_if_corrupted(&cfg, &resolved, &rel_dir, false, |_| Ok(()))
+            .expect("restore must unlink planted symlink and restore verified snapshot");
+    assert!(report.restored_from_snapshot);
+    assert!(report.quarantined_corrupted_path.is_none());
+
+    // live_db must now be a regular file (not a symlink) holding the restored row,
+    // and target_dir must remain completely empty and untouched.
+    let meta = fs::symlink_metadata(&live_db).unwrap();
+    assert!(!meta.file_type().is_symlink() && meta.is_file());
+    assert_eq!(fs::read_dir(&target_dir).unwrap().count(), 0);
+    let check_conn = Connection::open(&live_db).unwrap();
+    let val: String = check_conn
+        .query_row("SELECT v FROM t LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(val, "restored-ok");
+}
+
+#[cfg(unix)]
+#[test]
+fn w1b_r4_fd_isolated_sqlite_backup_preserves_hot_wal_and_rejects_symlinks_and_truncated_output() {
+    use std::os::unix::fs::symlink;
+
+    let sb = TempSandbox::new("w1b-r4-fd-isolated-backup");
+    let src_dir = sb.path().join("src");
+    let dst_dir = sb.path().join("dst");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::create_dir_all(&dst_dir).unwrap();
+
+    // 1. Hot WAL database with uncheckpointed rows must be backed up cleanly via FD-isolated scratch copy.
+    let live_db = src_dir.join("live.sqlite");
+    let live_conn = Connection::open(&live_db).unwrap();
+    live_conn
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT);
+             INSERT INTO items VALUES (1, 'checkpointed');
+             PRAGMA wal_checkpoint(TRUNCATE);
+             INSERT INTO items VALUES (2, 'hot-wal-row');",
+        )
+        .unwrap();
+    let wal_path = PathBuf::from(format!("{}-wal", live_db.display()));
+    assert!(wal_path.is_file() && fs::metadata(&wal_path).unwrap().len() > 0);
+
+    let isolated_dst = dst_dir.join("isolated.sqlite");
+    crate::snapshot::run_fd_isolated_sqlite_backup(&live_db, &isolated_dst, &isolated_dst)
+        .expect("FD-isolated backup must preserve hot WAL rows");
+    let check_conn = Connection::open(&isolated_dst).unwrap();
+    let count: i64 = check_conn
+        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+        .unwrap();
+    let wal_val: String = check_conn
+        .query_row("SELECT label FROM items WHERE id = 2", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(wal_val, "hot-wal-row");
+    drop(check_conn);
+    drop(live_conn);
+
+    // 2. Symlinked source DB and symlinked -wal sidecar must both be rejected by O_NOFOLLOW.
+    let sym_src = src_dir.join("sym.sqlite");
+    symlink(&live_db, &sym_src).unwrap();
+    let err_sym_src =
+        crate::snapshot::run_fd_isolated_sqlite_backup(&sym_src, &isolated_dst, &isolated_dst)
+            .unwrap_err();
+    assert!(matches!(err_sym_src, ReleaseError::Snapshot { .. }));
+
+    let plain_db = src_dir.join("plain.sqlite");
+    let plain_conn = Connection::open(&plain_db).unwrap();
+    plain_conn
+        .execute_batch("CREATE TABLE k(x TEXT); INSERT INTO k VALUES ('ok');")
+        .unwrap();
+    drop(plain_conn);
+    let outside = sb.path().join("outside-wal");
+    fs::write(&outside, b"fake").unwrap();
+    symlink(&outside, src_dir.join("plain.sqlite-wal")).unwrap();
+    let err_sym_wal =
+        crate::snapshot::run_fd_isolated_sqlite_backup(&plain_db, &isolated_dst, &isolated_dst)
+            .unwrap_err();
+    assert!(matches!(err_sym_wal, ReleaseError::Snapshot { .. }));
+
+    // 3. Staged SQLite publication must refuse 0-byte / non-SQLite output (no silent corruption).
+    let zero_dst = dst_dir.join("zero.sqlite");
+    let err_zero = crate::fs_security::atomic_publish_staged_file_with_mode(
+        &zero_dst,
+        0o600,
+        None,
+        true,
+        false,
+        true,
+        16 * 1024 * 1024,
+        |_staged| Ok(()),
+    )
+    .unwrap_err();
+    assert!(matches!(err_zero, ReleaseError::Snapshot { .. }));
+    assert!(!zero_dst.exists());
+
+    // 4. Scratch-isolated integrity check handles hot WAL cleanly, and rejects symlinked -wal sidecar.
+    assert_eq!(
+        crate::snapshot::sqlite_integrity_via_root_scratch(&live_db),
+        "ok"
+    );
+    assert_eq!(crate::snapshot::sqlite_integrity(&plain_db), "error");
 }

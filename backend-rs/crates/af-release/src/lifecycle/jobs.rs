@@ -128,7 +128,11 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn reconcile_jobs(conn: &Connection, database: &Path) -> Result<()> {
+pub fn reconcile_jobs_with_options(
+    conn: &Connection,
+    database: &Path,
+    retire_leases: bool,
+) -> Result<()> {
     let has_owner: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('package_lifecycle_jobs') WHERE name='owner_id')",
         [], |row| row.get(0),
@@ -250,8 +254,14 @@ pub fn reconcile_jobs(conn: &Connection, database: &Path) -> Result<()> {
         }
         interrupt_orphaned_row(row)?;
     }
-    let _ = retire_finished_owners(conn, database);
+    if retire_leases {
+        let _ = retire_finished_owners(conn, database);
+    }
     Ok(())
+}
+
+pub fn reconcile_jobs(conn: &Connection, database: &Path) -> Result<()> {
+    reconcile_jobs_with_options(conn, database, true)
 }
 
 pub fn check_package_reservation(

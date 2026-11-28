@@ -3,6 +3,8 @@ mod constant_time;
 pub use constant_time::constant_time_eq;
 mod marketplace;
 pub mod md5;
+pub mod secret_zeroize;
+pub use secret_zeroize::{SecretBytes, SecretString};
 #[cfg(not(target_arch = "wasm32"))]
 pub mod package_receipts;
 #[cfg(not(target_arch = "wasm32"))]

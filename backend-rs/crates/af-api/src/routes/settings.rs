@@ -14,7 +14,9 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::env;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Settings API payload. `Debug` is implemented manually so provider API keys are never printed
+/// in plaintext by `{:?}` logging (`SEC-05`).
+#[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsPayload {
     pub ai_model: String,
@@ -35,6 +37,37 @@ pub struct SettingsPayload {
     pub ollama_endpoint: String,
     pub anthropic_api_key: String,
     pub anthropic_endpoint: String,
+}
+
+impl std::fmt::Debug for SettingsPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never reveal any character, prefix/suffix, or length of an API key.
+        fn redact(value: &str) -> &'static str {
+            if value.trim().is_empty() {
+                "<unset>"
+            } else {
+                "[REDACTED]"
+            }
+        }
+        f.debug_struct("SettingsPayload")
+            .field("ai_model", &self.ai_model)
+            .field("local_provider", &self.local_provider)
+            .field("local_model", &self.local_model)
+            .field("system_prompt", &self.system_prompt)
+            .field("language", &self.language)
+            .field("timezone", &self.timezone)
+            .field("update_channel", &self.update_channel)
+            .field("default_dashboard", &self.default_dashboard)
+            .field("setup_completed", &self.setup_completed)
+            .field("base_domain", &self.base_domain)
+            .field("gemini_api_key", &redact(&self.gemini_api_key))
+            .field("openai_api_key", &redact(&self.openai_api_key))
+            .field("lm_studio_endpoint", &self.lm_studio_endpoint)
+            .field("ollama_endpoint", &self.ollama_endpoint)
+            .field("anthropic_api_key", &redact(&self.anthropic_api_key))
+            .field("anthropic_endpoint", &self.anthropic_endpoint)
+            .finish()
+    }
 }
 
 pub(super) fn is_masked_secret(raw: &str) -> bool {
@@ -1181,4 +1214,42 @@ pub(super) async fn synchronize_base_domain_update(
 
     af_services::mutators::trigger_apache_cert_sync().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod settings_payload_debug_tests {
+    use super::SettingsPayload;
+
+    #[test]
+    fn sec05_settings_payload_debug_redacts_api_keys() {
+        let payload = SettingsPayload {
+            ai_model: "gemini-2.5-pro".to_string(),
+            gemini_api_key: "AIzaSyD-gemini-plaintext-9911".to_string(),
+            openai_api_key: "sk-proj-openai-plaintext-9922".to_string(),
+            anthropic_api_key: "sk-ant-api03-anthropic-plaintext-9933".to_string(),
+            base_domain: "example.test".to_string(),
+            ..SettingsPayload::default()
+        };
+        for rendered in [format!("{payload:?}"), format!("{payload:#?}")] {
+            for secret in [
+                "plaintext",
+                "9911",
+                "9922",
+                "9933",
+                "AIzaSyD",
+                "sk-ant",
+                "sk-proj",
+            ] {
+                assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+            }
+            assert_eq!(rendered.matches("[REDACTED]").count(), 3, "{rendered}");
+            assert!(rendered.contains("gemini-2.5-pro") && rendered.contains("example.test"));
+        }
+        let rendered = format!("{:?}", SettingsPayload::default());
+        assert_eq!(rendered.matches("<unset>").count(), 3, "{rendered}");
+        assert!(!rendered.contains("[REDACTED]"));
+        // Serialization (API contract) is unchanged by the redacting Debug impl.
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["geminiApiKey"], "AIzaSyD-gemini-plaintext-9911");
+    }
 }

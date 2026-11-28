@@ -477,7 +477,10 @@ _depends
         self.assertIn('shared_db_lock="${AETHERFLOW_MAINTENANCE_LOCK_PATH:-}"', rm)
         self.assertIn('shared_db_lock="/run/aetherflow/.snapshot.lock"', rm)
         self.assertIn('shared_db_lock="${EFFECTIVE_RELEASE_ROOT}/run/aetherflow/.snapshot.lock"', rm)
-        self.assertLess(rm.index('exec 199<'), rm.index('exec 201>'))
+        self.assertLess(
+            rm.index('acquire_fd_lock_coproc "maintenance lock" "${shared_db_lock}"'),
+            rm.index('acquire_fd_lock_coproc "release lock" "${release_lock}"'),
+        )
 
     def test_bootstrap_verifies_and_stages_before_replacing_opt_aetherflow(self):
         setup = (ROOT / "setup/AetherFlow-Setup").read_text(encoding="utf-8")

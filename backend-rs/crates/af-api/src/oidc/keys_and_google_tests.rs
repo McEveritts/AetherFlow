@@ -56,6 +56,7 @@ async fn callback_errors_are_relative_and_preserve_safe_continuation() {
         ),
     );
     let response = google_callback(
+        None,
         headers.clone(),
         Query(HashMap::from([("error".into(), "access_denied".into())])),
     )
@@ -80,7 +81,7 @@ async fn callback_errors_are_relative_and_preserve_safe_continuation() {
             let cookie = cookie.to_str().unwrap();
             cookie.starts_with("oauth2_state=;") && cookie.contains("Max-Age=0")
         }));
-    let response = google_callback(headers, Query(HashMap::new())).await;
+    let response = google_callback(None, headers, Query(HashMap::new())).await;
     assert!(response.headers()[header::LOCATION]
         .to_str()
         .unwrap()
@@ -246,7 +247,7 @@ async fn google_callback_mfa_has_no_session_until_factor_verification() {
     ensure_shared_test_db();
     env::remove_var("AETHERFLOW_GOOGLE_ALLOWED_EMAILS");
     env::remove_var("AETHERFLOW_GOOGLE_ALLOWED_DOMAINS");
-    let denied = complete_google_login(&HeaderMap::new(), &identity(true));
+    let denied = complete_google_login(&HeaderMap::new(), None, &identity(true));
     assert_eq!(
         denied.headers()[header::LOCATION],
         "/login?error=not_authorized"
@@ -266,7 +267,7 @@ async fn google_callback_mfa_has_no_session_until_factor_verification() {
             "oauth2_return_to=%2Fapi%2Fv1%2Fpublic%2Foidc%2Fauthorize%3Fstate%3Dmfa",
         ),
     );
-    let response = complete_google_login(&headers, &identity(true));
+    let response = complete_google_login(&headers, None, &identity(true));
     let location = response.headers()[header::LOCATION].to_str().unwrap();
     assert!(location.ends_with("&return_to=%2Fapi%2Fv1%2Fpublic%2Foidc%2Fauthorize%3Fstate%3Dmfa"));
     let challenge = location

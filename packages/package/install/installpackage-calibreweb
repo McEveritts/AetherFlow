@@ -46,16 +46,170 @@ if [[ "$APP_PORT" != 8083 ]]; then
         exit 1
     fi
     if ! safe_config_python /var/lib/calibre-web/app.db "$APP_PORT" <<'PYEOF'
-import pathlib, sqlite3, sys
+import os, pathlib, sqlite3, stat, sys, tempfile, time, uuid
+
 path = pathlib.Path(sys.argv[1])
 port = int(sys.argv[2])
-with ManagedConfig(path, create_parents=False) as config:
-    if config.metadata is None:
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+MAX_SCRATCH_BYTES = 512 * 1024 * 1024
+SUPER_JOURNAL_MAGIC = b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
+
+def is_trusted_root_sticky(dir_str):
+    dp = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    cur = pathlib.Path("/")
+    for part in dp.parts:
+        cur = pathlib.Path("/") if part == "/" else cur / part
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            return False
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+            return False
+        if (st.st_mode & 0o022) != 0 and (st.st_mode & getattr(stat, "S_ISVTX", 0o1000)) == 0:
+            return False
+    return True
+
+def make_private_scratch(min_free):
+    if os.geteuid() == 0:
+        sc_name = f".af-cw.{os.getpid()}.{uuid.uuid4().hex}"
+        for cand in ("/var/tmp", "/tmp", "/run"):
+            if not is_trusted_root_sticky(cand):
+                continue
+            cand_fd = -1
+            try:
+                cand_fd = os.open(cand, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                vfs = os.fstatvfs(cand_fd)
+                if vfs.f_bavail * (vfs.f_frsize or vfs.f_bsize) < min_free:
+                    os.close(cand_fd)
+                    continue
+                os.mkdir(sc_name, 0o700, dir_fd=cand_fd)
+                sc_fd = os.open(sc_name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cand_fd)
+                os.fchmod(sc_fd, 0o700)
+                return cand_fd, sc_fd, sc_name, os.path.join(cand, sc_name)
+            except OSError:
+                if cand_fd >= 0:
+                    os.close(cand_fd)
+        return None
+    tmp_dir = tempfile.mkdtemp(prefix=".af-cw-")
+    os.chmod(tmp_dir, 0o700)
+    sc_fd = os.open(tmp_dir, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    return -1, sc_fd, tmp_dir, tmp_dir
+
+def copy_fd_bounded(in_fd, out_dfd, out_name, rem):
+    out_fd = os.open(out_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=out_dfd)
+    copied = 0
+    tail8 = b""
+    try:
+        while True:
+            chunk = os.read(in_fd, 65536)
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > rem:
+                raise OSError("scratch copy cap exceeded")
+            tail8 = (tail8 + chunk)[-8:]
+            view = memoryview(chunk)
+            while view:
+                w = os.write(out_fd, view)
+                if w <= 0:
+                    raise OSError("short write")
+                view = view[w:]
+        if out_name.endswith("-journal") and copied >= 16 and tail8 == SUPER_JOURNAL_MAGIC:
+            raise OSError("forbidden super-journal trailer")
+        return rem - copied
+    finally:
+        os.close(out_fd)
+
+for attempt in range(3):
+    sc = None
+    db_fd = wal_fd = jrn_fd = -1
+    try:
+        with ManagedConfig(path, create_parents=False) as config:
+            if config.metadata is None:
+                sys.exit(1)
+            config.check_target()
+            db_fd = os.open(config.name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=config.directory)
+            dst = os.fstat(db_fd)
+            if not stat.S_ISREG(dst.st_mode) or dst.st_nlink != 1:
+                sys.exit(1)
+            total_sz = dst.st_size
+            for suffix in ("-wal", "-shm", "-journal"):
+                try:
+                    sfd = os.open(config.name + suffix, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=config.directory)
+                except FileNotFoundError:
+                    continue
+                sst = os.fstat(sfd)
+                if not stat.S_ISREG(sst.st_mode) or sst.st_nlink != 1:
+                    os.close(sfd)
+                    sys.exit(1)
+                if suffix == "-wal":
+                    wal_fd = sfd
+                    total_sz += sst.st_size
+                elif suffix == "-journal":
+                    if sst.st_size >= 16:
+                        os.lseek(sfd, -8, os.SEEK_END)
+                        jtail = os.read(sfd, 8)
+                        os.lseek(sfd, 0, os.SEEK_SET)
+                        if jtail == SUPER_JOURNAL_MAGIC:
+                            os.close(sfd)
+                            sys.exit(1)
+                    jrn_fd = sfd
+                    total_sz += sst.st_size
+                else:
+                    os.close(sfd)
+            if total_sz > MAX_SCRATCH_BYTES:
+                sys.exit(1)
+            sc = make_private_scratch(total_sz * 2 + 16 * 1024 * 1024)
+            if sc is None:
+                sys.exit(1)
+            _, sc_fd, _, sc_path = sc
+            rem = copy_fd_bounded(db_fd, sc_fd, "app.db", MAX_SCRATCH_BYTES)
+            if wal_fd >= 0:
+                rem = copy_fd_bounded(wal_fd, sc_fd, "app.db-wal", rem)
+            if jrn_fd >= 0:
+                copy_fd_bounded(jrn_fd, sc_fd, "app.db-journal", rem)
+        conn = sqlite3.connect(os.path.join(sc_path, "app.db"), timeout=5)
+        try:
+            conn.execute("PRAGMA trusted_schema = OFF;")
+            tbl = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone()
+            if not tbl:
+                sys.exit(1)
+            row = conn.execute("SELECT config_port FROM settings LIMIT 1").fetchone()
+            sys.exit(0 if row and int(row[0]) == port else 1)
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        if attempt + 1 < 3:
+            time.sleep(0.025)
+            continue
         sys.exit(1)
-    config.check_target()
-    with sqlite3.connect(f'file:/proc/self/fd/{config.directory}/{config.name}?mode=ro', uri=True) as conn:
-        row = conn.execute('SELECT config_port FROM settings LIMIT 1').fetchone()
-        sys.exit(0 if row and int(row[0]) == port else 1)
+    except OSError:
+        sys.exit(1)
+    finally:
+        for fd_c in (db_fd, wal_fd, jrn_fd):
+            if fd_c >= 0:
+                os.close(fd_c)
+        if sc is not None:
+            sc_base_fd, sc_fd, sc_name, sc_path = sc
+            for nm in ("app.db", "app.db-wal", "app.db-shm", "app.db-journal"):
+                try:
+                    os.unlink(nm, dir_fd=sc_fd)
+                except FileNotFoundError:
+                    _ = nm
+            os.close(sc_fd)
+            try:
+                if sc_base_fd >= 0:
+                    os.rmdir(sc_name, dir_fd=sc_base_fd)
+                else:
+                    os.rmdir(sc_path)
+            except OSError:
+                _ = sc_name
+            if sc_base_fd >= 0:
+                os.close(sc_base_fd)
+sys.exit(1)
 PYEOF
     then
         print_error "Calibre-Web starts on port 8083 until its database setting matches ${APP_PORT}."
@@ -161,11 +315,24 @@ snapshot_app_state "$BACKUP_DIR" /var/lib/calibre-web /var/lib/calibre-library
 if [[ -f /etc/systemd/system/calibreweb.service ]]; then
     cp -a /etc/systemd/system/calibreweb.service "$BACKUP_DIR/calibreweb.service"
 fi
+BUILD_HOME="$BUILD_DIR/.build-home"
+mkdir -p "$BUILD_HOME"
 chmod 755 "$BUILD_DIR"
+chmod 700 "$BUILD_HOME"
 chown -hRP calibreweb:calibreweb "$BUILD_DIR" /var/lib/calibre-web /var/lib/calibre-library
 run_as_calibreweb_builder() {
     if [[ -z "${AF_FIXTURE_ROOT:-}" && -z "${TEST_ROOT:-}" && "${EUID:-$(id -u)}" -eq 0 ]]; then
-        runuser -u calibreweb -- "$@"
+        runuser -u calibreweb -- env -i \
+            PATH="/usr/local/bin:/usr/bin:/bin" \
+            HOME="${BUILD_HOME:-/nonexistent}" \
+            XDG_CONFIG_HOME="${BUILD_HOME:-/nonexistent}/.config" \
+            PIP_CONFIG_FILE="/dev/null" \
+            PIP_DISABLE_PIP_VERSION_CHECK="1" \
+            USER="calibreweb" \
+            LOGNAME="calibreweb" \
+            LANG="C.UTF-8" \
+            PYTHONNOUSERSITE="1" \
+            "$@"
     else
         "$@"
     fi
@@ -174,7 +341,7 @@ af_logged run_as_calibreweb_builder python3 -m venv "$BUILD_DIR/.venv"
 af_logged run_as_calibreweb_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir --upgrade pip setuptools wheel
 af_logged run_as_calibreweb_builder "$BUILD_DIR/.venv/bin/pip" install --no-cache-dir -r "$BUILD_DIR/requirements.txt"
 test -x "$BUILD_DIR/.venv/bin/python" || { log_error "Failed to verify Calibre-Web virtual environment"; exit 1; }
-python3 - "$BUILD_DIR/.venv" "/opt/calibre-web/.venv" <<'VENV_PYEOF'
+run_as_calibreweb_builder python3 -I - "$BUILD_DIR/.venv" "/opt/calibre-web/.venv" <<'VENV_PYEOF'
 import os, pathlib, stat, sys
 old_venv, new_venv = sys.argv[1], sys.argv[2]
 old_bytes, new_bytes = old_venv.encode(), new_venv.encode()
@@ -195,14 +362,249 @@ if bin_dir.is_dir():
             entry.write_bytes(updated)
             os.chmod(entry, mode)
 VENV_PYEOF
-chown -hRP root:root "$BUILD_DIR"
-chmod -R go-w,a+rX "$BUILD_DIR"
-
-if [[ ! -f /var/lib/calibre-library/metadata.db ]]; then
-    af_logged sqlite3 /var/lib/calibre-library/metadata.db "CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, timestamp TEXT, pubdate TEXT, series_index REAL, modify_date TEXT, path TEXT, flags INTEGER, has_cover BOOL DEFAULT 0);" || true
+if [[ -z "${AF_FIXTURE_ROOT:-}" && -z "${TEST_ROOT:-}" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+    pkill -9 -u calibreweb 2>/dev/null || true
 fi
+BUILD_HOME="/nonexistent"
 
-chown -hRP calibreweb:calibreweb /var/lib/calibre-web /var/lib/calibre-library
+# Reclaim $BUILD_DIR and verify /var/lib/calibre-web + /var/lib/calibre-library strictly via
+# dirfd + O_NOFOLLOW (rejecting hardlinks, special files, and escaping/chained symlinks).
+python3 -I - "$BUILD_DIR" calibreweb /var/lib/calibre-web /var/lib/calibre-library <<'PYRECLAIM'
+import os, pathlib, pwd, stat, sys
+
+build_root = os.path.abspath(sys.argv[1])
+user_name = sys.argv[2]
+state_roots = [os.path.abspath(p) for p in sys.argv[3:]]
+is_root = os.geteuid() == 0
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+def open_dir_nofollow(path_str):
+    p = pathlib.PurePosixPath(os.path.abspath(path_str))
+    if ".." in p.parts:
+        raise RuntimeError(f"traversal in {path_str}")
+    cur = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    try:
+        for part in p.parts[1:]:
+            nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur)
+            os.close(cur)
+            cur = nxt
+        return cur
+    except BaseException:
+        os.close(cur)
+        raise
+
+def rmtree_dirfd(parent_fd, name):
+    st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISDIR(st.st_mode):
+        dfd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=parent_fd)
+        try:
+            for entry in os.listdir(dfd):
+                rmtree_dirfd(dfd, entry)
+        finally:
+            os.close(dfd)
+        os.rmdir(name, dir_fd=parent_fd)
+    else:
+        os.unlink(name, dir_fd=parent_fd)
+
+def norm_go_w_a_rx(mode, is_dir):
+    perm = stat.S_IMODE(mode) & 0o755
+    perm |= 0o444
+    if is_dir or (perm & 0o111):
+        perm |= 0o111
+    return perm
+
+def verify_relative_target_confined(root_fd, rel_parts, target):
+    if os.path.isabs(target):
+        return False
+    stack = list(rel_parts)
+    for part in pathlib.PurePosixPath(target).parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not stack:
+                return False
+            stack.pop()
+        else:
+            stack.append(part)
+    if not stack:
+        return True
+    cur = os.dup(root_fd)
+    try:
+        for comp in stack[:-1]:
+            nxt = os.open(comp, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur)
+            os.close(cur)
+            cur = nxt
+        try:
+            st = os.stat(stack[-1], dir_fd=cur, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)
+    except OSError:
+        return False
+    finally:
+        os.close(cur)
+
+def is_allowed_venv_python_symlink(child_rel, target):
+    if len(child_rel) != 3 or child_rel[0] != ".venv" or child_rel[1] != "bin":
+        return False
+    if not child_rel[2].startswith("python"):
+        return False
+    if target.startswith("/usr/bin/python3") and ".." not in pathlib.PurePosixPath(target).parts:
+        try:
+            st = os.lstat(target)
+        except OSError:
+            return False
+        if stat.S_ISLNK(st.st_mode):
+            resolved = os.path.realpath(target)
+            if not resolved.startswith("/usr/bin/python3"):
+                return False
+            rst = os.stat(resolved)
+            return stat.S_ISREG(rst.st_mode) and rst.st_uid == 0 and (rst.st_mode & 0o022) == 0
+        return stat.S_ISREG(st.st_mode) and st.st_uid == 0 and (st.st_mode & 0o022) == 0
+    return target in ("python3", "python") or (target.startswith("python3.") and "/" not in target)
+
+def reclaim_tree(root_fd, dfd, rel_parts):
+    if is_root:
+        os.fchown(dfd, 0, 0)
+    dst = os.fstat(dfd)
+    os.fchmod(dfd, norm_go_w_a_rx(dst.st_mode, True))
+    for name in os.listdir(dfd):
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        child_rel = rel_parts + (name,)
+        if stat.S_ISLNK(st.st_mode):
+            target = os.readlink(name, dir_fd=dfd)
+            allowed = (
+                is_allowed_venv_python_symlink(child_rel, target)
+                or (child_rel == (".venv", "lib64") and target == "lib")
+                or verify_relative_target_confined(root_fd, rel_parts, target)
+            )
+            if not allowed:
+                raise RuntimeError(f"forbidden symlink in build dir: {'/'.join(child_rel)} -> {target}")
+            if is_root:
+                os.chown(name, 0, 0, dir_fd=dfd, follow_symlinks=False)
+        elif stat.S_ISDIR(st.st_mode):
+            sub_fd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=dfd)
+            try:
+                reclaim_tree(root_fd, sub_fd, child_rel)
+            finally:
+                os.close(sub_fd)
+        elif stat.S_ISREG(st.st_mode):
+            ffd = os.open(name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=dfd)
+            try:
+                fst = os.fstat(ffd)
+                if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1:
+                    raise RuntimeError(f"non-regular or hardlinked file in build dir: {'/'.join(child_rel)}")
+                if is_root:
+                    os.fchown(ffd, 0, 0)
+                os.fchmod(ffd, norm_go_w_a_rx(fst.st_mode, False))
+            finally:
+                os.close(ffd)
+        else:
+            raise RuntimeError(f"forbidden special file in build dir: {'/'.join(child_rel)}")
+
+def fchown_tree_no_symlinks(dfd, uid, gid):
+    os.fchown(dfd, uid, gid)
+    for name in os.listdir(dfd):
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode):
+            raise RuntimeError(f"forbidden symlink in state dir: {name}")
+        if stat.S_ISDIR(st.st_mode):
+            sub_fd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=dfd)
+            try:
+                fchown_tree_no_symlinks(sub_fd, uid, gid)
+            finally:
+                os.close(sub_fd)
+        elif stat.S_ISREG(st.st_mode):
+            ffd = os.open(name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=dfd)
+            try:
+                fst = os.fstat(ffd)
+                if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1:
+                    raise RuntimeError(f"non-regular or hardlinked file in state dir: {name}")
+                os.fchown(ffd, uid, gid)
+            finally:
+                os.close(ffd)
+        else:
+            raise RuntimeError(f"forbidden special file in state dir: {name}")
+
+build_fd = open_dir_nofollow(build_root)
+try:
+    try:
+        os.stat(".build-home", dir_fd=build_fd, follow_symlinks=False)
+        has_bh = True
+    except FileNotFoundError:
+        has_bh = False
+    if has_bh:
+        rmtree_dirfd(build_fd, ".build-home")
+    reclaim_tree(build_fd, build_fd, ())
+finally:
+    os.close(build_fd)
+
+if is_root:
+    pw = pwd.getpwnam(user_name)
+    for sroot in state_roots:
+        sfd = open_dir_nofollow(sroot)
+        try:
+            fchown_tree_no_symlinks(sfd, pw.pw_uid, pw.pw_gid)
+        finally:
+            os.close(sfd)
+PYRECLAIM
+
+# Initialize metadata.db strictly as unprivileged calibreweb with O_NOFOLLOW + sidecar checks
+# (never invoke /usr/bin/sqlite3 as root inside a calibreweb-writable directory).
+af_logged run_as_calibreweb_builder python3 -I - /var/lib/calibre-library/metadata.db <<'META_PYEOF' || true
+import os, pathlib, sqlite3, stat, sys
+
+db_abs = os.path.abspath(sys.argv[1])
+parent_str = os.path.dirname(db_abs)
+leaf = os.path.basename(db_abs)
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+p = pathlib.PurePosixPath(parent_str)
+if ".." in p.parts:
+    raise SystemExit(1)
+cur_fd = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+try:
+    for part in p.parts[1:]:
+        nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt
+    try:
+        os.stat(leaf, dir_fd=cur_fd, follow_symlinks=False)
+        leaf_exists = True
+    except FileNotFoundError:
+        leaf_exists = False
+    if leaf_exists:
+        raise SystemExit(0)
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            os.stat(leaf + suffix, dir_fd=cur_fd, follow_symlinks=False)
+            sidecar_exists = True
+        except FileNotFoundError:
+            sidecar_exists = False
+        if sidecar_exists:
+            raise SystemExit(1)
+    init_fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o640, dir_fd=cur_fd)
+    os.close(init_fd)
+finally:
+    os.close(cur_fd)
+
+conn = sqlite3.connect(db_abs, timeout=5)
+try:
+    conn.execute("PRAGMA trusted_schema = OFF;")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS books ("
+        "id INTEGER PRIMARY KEY, title TEXT, sort TEXT, timestamp TEXT, pubdate TEXT, "
+        "series_index REAL, modify_date TEXT, path TEXT, flags INTEGER, has_cover BOOL DEFAULT 0);"
+    )
+    conn.commit()
+finally:
+    conn.close()
+META_PYEOF
 
 report_progress 75 "Backing up existing Calibre-Web installation and activating new build..."
 if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
@@ -318,13 +720,143 @@ probe_port = default_port
 scheme = "http"
 
 if os.path.lexists(db_path):
-    with ManagedConfig(db_path, create_parents=False) as config:
-        if config.metadata is not None:
-            config.check_target()
+    import stat as _stat
+    import tempfile as _tempfile
+    import time as _time
+    import uuid as _uuid
+
+    _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+    _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+    _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+    _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+    _MAX_SCRATCH_BYTES = 512 * 1024 * 1024
+    _SUPER_JOURNAL_MAGIC = b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
+
+    def _is_trusted_root_sticky(dir_str):
+        dp = pathlib.PurePosixPath(os.path.abspath(dir_str))
+        cur = pathlib.Path("/")
+        for part in dp.parts:
+            cur = pathlib.Path("/") if part == "/" else cur / part
             try:
-                with contextlib.closing(
-                    sqlite3.connect(f"file:/proc/self/fd/{config.directory}/{config.name}?mode=ro", uri=True)
-                ) as conn:
+                st = os.lstat(cur)
+            except OSError:
+                return False
+            if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+                return False
+            if (st.st_mode & 0o022) != 0 and (st.st_mode & getattr(_stat, "S_ISVTX", 0o1000)) == 0:
+                return False
+        return True
+
+    def _make_private_scratch(min_free):
+        if os.geteuid() == 0:
+            sc_name = f".af-cw-probe.{os.getpid()}.{_uuid.uuid4().hex}"
+            for cand in ("/var/tmp", "/tmp", "/run"):
+                if not _is_trusted_root_sticky(cand):
+                    continue
+                cand_fd = -1
+                try:
+                    cand_fd = os.open(cand, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+                    vfs = os.fstatvfs(cand_fd)
+                    if vfs.f_bavail * (vfs.f_frsize or vfs.f_bsize) < min_free:
+                        os.close(cand_fd)
+                        continue
+                    os.mkdir(sc_name, 0o700, dir_fd=cand_fd)
+                    sc_fd = os.open(sc_name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC, dir_fd=cand_fd)
+                    os.fchmod(sc_fd, 0o700)
+                    return cand_fd, sc_fd, sc_name, os.path.join(cand, sc_name)
+                except OSError:
+                    if cand_fd >= 0:
+                        os.close(cand_fd)
+            return None
+        tmp_dir = _tempfile.mkdtemp(prefix=".af-cw-probe-")
+        os.chmod(tmp_dir, 0o700)
+        sc_fd = os.open(tmp_dir, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+        return -1, sc_fd, tmp_dir, tmp_dir
+
+    def _copy_fd_bounded(in_fd, out_dfd, out_name, rem):
+        out_fd = os.open(out_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=out_dfd)
+        copied = 0
+        tail8 = b""
+        try:
+            while True:
+                chunk = os.read(in_fd, 65536)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > rem:
+                    raise OSError("scratch copy cap exceeded")
+                tail8 = (tail8 + chunk)[-8:]
+                view = memoryview(chunk)
+                while view:
+                    w = os.write(out_fd, view)
+                    if w <= 0:
+                        raise OSError("short write")
+                    view = view[w:]
+            if out_name.endswith("-journal") and copied >= 16 and tail8 == _SUPER_JOURNAL_MAGIC:
+                raise OSError("forbidden super-journal trailer")
+            return rem - copied
+        finally:
+            os.close(out_fd)
+
+    for _attempt in range(3):
+        _sc = None
+        _db_fd = _wal_fd = _jrn_fd = -1
+        try:
+            with ManagedConfig(db_path, create_parents=False) as config:
+                if config.metadata is None:
+                    break
+                config.check_target()
+                _db_fd = os.open(config.name, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC, dir_fd=config.directory)
+                _dst = os.fstat(_db_fd)
+                if not _stat.S_ISREG(_dst.st_mode) or _dst.st_nlink != 1:
+                    break
+                _total_sz = _dst.st_size
+                _bad_sidecar = False
+                for _suffix in ("-wal", "-shm", "-journal"):
+                    try:
+                        _sfd = os.open(config.name + _suffix, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC, dir_fd=config.directory)
+                    except FileNotFoundError:
+                        continue
+                    _sst = os.fstat(_sfd)
+                    if not _stat.S_ISREG(_sst.st_mode) or _sst.st_nlink != 1:
+                        os.close(_sfd)
+                        _bad_sidecar = True
+                        break
+                    if _suffix == "-wal":
+                        _wal_fd = _sfd
+                        _total_sz += _sst.st_size
+                    elif _suffix == "-journal":
+                        if _sst.st_size >= 16:
+                            os.lseek(_sfd, -8, os.SEEK_END)
+                            _jtail = os.read(_sfd, 8)
+                            os.lseek(_sfd, 0, os.SEEK_SET)
+                            if _jtail == _SUPER_JOURNAL_MAGIC:
+                                os.close(_sfd)
+                                _bad_sidecar = True
+                                break
+                        _jrn_fd = _sfd
+                        _total_sz += _sst.st_size
+                    else:
+                        os.close(_sfd)
+                if _bad_sidecar or _total_sz > _MAX_SCRATCH_BYTES:
+                    break
+                _sc = _make_private_scratch(_total_sz * 2 + 16 * 1024 * 1024)
+                if _sc is None:
+                    break
+                _, _sc_fd, _, _sc_path = _sc
+                _rem = _copy_fd_bounded(_db_fd, _sc_fd, "app.db", _MAX_SCRATCH_BYTES)
+                if _wal_fd >= 0:
+                    _rem = _copy_fd_bounded(_wal_fd, _sc_fd, "app.db-wal", _rem)
+                if _jrn_fd >= 0:
+                    _copy_fd_bounded(_jrn_fd, _sc_fd, "app.db-journal", _rem)
+            with contextlib.closing(
+                sqlite3.connect(os.path.join(_sc_path, "app.db"), timeout=5)
+            ) as conn:
+                conn.execute("PRAGMA trusted_schema = OFF;")
+                has_settings = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'"
+                ).fetchone()
+                if has_settings:
                     cols = {
                         row[1]
                         for row in conn.execute("PRAGMA table_info(settings)").fetchall()
@@ -350,8 +882,35 @@ if os.path.lexists(db_path):
                                     key_path = work_dir / key_path
                                 if cert_path.is_file() and key_path.is_file():
                                     scheme = "https"
-            except sqlite3.Error:
-                pass
+            break
+        except sqlite3.Error:
+            if _attempt + 1 < 3:
+                _time.sleep(0.025)
+                continue
+            break
+        except OSError:
+            break
+        finally:
+            for _fd_c in (_db_fd, _wal_fd, _jrn_fd):
+                if _fd_c >= 0:
+                    os.close(_fd_c)
+            if _sc is not None:
+                _sc_base_fd, _sc_fd, _sc_name, _sc_path = _sc
+                for _nm in ("app.db", "app.db-wal", "app.db-shm", "app.db-journal"):
+                    try:
+                        os.unlink(_nm, dir_fd=_sc_fd)
+                    except FileNotFoundError:
+                        _ = _nm
+                os.close(_sc_fd)
+                try:
+                    if _sc_base_fd >= 0:
+                        os.rmdir(_sc_name, dir_fd=_sc_base_fd)
+                    else:
+                        os.rmdir(_sc_path)
+                except OSError:
+                    _ = _sc_name
+                if _sc_base_fd >= 0:
+                    os.close(_sc_base_fd)
 
 if not bind_host:
     tls_insecure = "1" if scheme == "https" else "0"

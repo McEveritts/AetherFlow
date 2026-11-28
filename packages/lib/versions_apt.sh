@@ -90,7 +90,7 @@ af_normalize_exact_registry_version() {
 af_read_npm_package_version() {
     local manifest="${1:-}"
     [[ -f "$manifest" && ! -L "$manifest" ]] || return 1
-    python3 - "$manifest" <<'PYEOF'
+    python3 -I - "$manifest" <<'PYEOF'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
@@ -180,7 +180,8 @@ queue_app_version() {
             if [[ ! -f "$snapshot" ]]; then
                 install -m 0600 -- "$version_path" "$snapshot" || return 1
             fi
-            cp -p --remove-destination -- "$snapshot" "$staged/.af-version" || return 1
+            [[ ! -L "$staged/.af-version" ]] || return 1
+            cp -pT --remove-destination -- "$snapshot" "$staged/.af-version" || return 1
         fi
     fi
     [[ -v AF_PENDING_VERSION_PATHS ]] || declare -ag AF_PENDING_VERSION_PATHS=()
@@ -256,7 +257,7 @@ write_app_version() {
         print_error "Refusing an empty application version receipt"
         return 1
     fi
-    AF_TX_DIR="${AF_TX_DIR:-}" python3 - "$@" <<'PYEOF'
+    AF_TX_DIR="${AF_TX_DIR:-}" python3 -I - "$@" <<'PYEOF'
 import os, pathlib, re, secrets, shutil, stat, subprocess, sys
 def _deb_ge(new_v, old_v):
     if shutil.which('dpkg'):
@@ -470,7 +471,7 @@ git_stage_exact_revision() {
         expected_commit="${BASH_REMATCH[1],,}"
     else
         if [[ -n "$raw_target" ]]; then
-            if ! target="$(python3 -c '
+            if ! target="$(python3 -I -c '
 import sys
 
 raw = sys.argv[1]
@@ -512,7 +513,7 @@ print(trimmed)
             return 1
         fi
 
-        if ! resolved_output="$(python3 -c '
+        if ! resolved_output="$(python3 -I -c '
 import re, sys
 
 target = sys.argv[1]
@@ -739,7 +740,7 @@ deb_compare_versions() {
         dpkg --compare-versions "$v1" "$op" "$v2"
         return $?
     fi
-    python3 - "$v1" "$op" "$v2" <<'PYEOF'
+    python3 -I - "$v1" "$op" "$v2" <<'PYEOF'
 import sys
 
 v1, op, v2 = sys.argv[1], sys.argv[2], sys.argv[3]

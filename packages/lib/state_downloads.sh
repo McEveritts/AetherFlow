@@ -154,7 +154,7 @@ af_prepare_recovery_root() {
     if [[ -z "$fixture_root" && "${EUID:-$(id -u)}" -ne 0 ]]; then
         fixture_root="${AF_FIXTURE_ROOT:-${TEST_ROOT:-}}"
     fi
-    python3 - "$requested" "$fixture_root" <<'PYEOF'
+    python3 -I - "$requested" "$fixture_root" <<'PYEOF'
 import errno, os, stat, sys
 
 target = sys.argv[1]
@@ -350,7 +350,7 @@ af_create_recovery_backup_dir() {
     local prefix="${1:?af_create_recovery_backup_dir requires prefix}"
     local recovery_root
     recovery_root="$(af_prepare_recovery_root "${2:-}")" || return 1
-    python3 - "$recovery_root" "$prefix" <<'PYEOF'
+    python3 -I - "$recovery_root" "$prefix" <<'PYEOF'
 import errno, os, re, secrets, stat, sys
 
 root, prefix = sys.argv[1], sys.argv[2]
@@ -755,7 +755,7 @@ verify_download_sha256() {
     fi
     if [[ -n "$release_metadata" && -n "$source_url" ]]; then
         local release_digest
-        if ! release_digest="$(python3 -c '
+        if ! release_digest="$(python3 -I -c '
 import json, sys
 release = json.load(sys.stdin)
 for asset in release.get("assets", []):
@@ -787,7 +787,7 @@ for asset in release.get("assets", []):
             "$base_dir/checksums.txt" "$base_dir/sha256sums.txt" "$base_dir/SHA256SUMS" "$base_dir/SHA256SUMS.txt"
             "$base_dir/${stem}_checksums.txt")
         if [[ -n "$release_metadata" ]]; then
-            release_manifests="$(python3 -c '
+            release_manifests="$(python3 -I -c '
 import json, sys
 for asset in json.load(sys.stdin).get("assets", []):
     name = str(asset.get("name", "")).lower()
@@ -894,7 +894,7 @@ download_servarr_archive() {
     url="$prefix$asset"
 
     if RELEASE_JSON="$(af_github_curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/$repo/releases/tags/$tag")" && [[ -n "$RELEASE_JSON" ]]; then
-        if resolved="$(python3 -c '
+        if resolved="$(python3 -I -c '
 import json, sys
 
 prefix, preferred, alternate = sys.argv[1:]

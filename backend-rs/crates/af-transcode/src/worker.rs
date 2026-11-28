@@ -87,7 +87,7 @@ impl WorkerConfig {
             start_frame_timeout: DEFAULT_WORKER_START_FRAME_TIMEOUT,
             frame_write_timeout: DEFAULT_FRAME_WRITE_TIMEOUT,
             render_nodes_override: None,
-            allowed_peer_uids: None,
+            allowed_peer_uids: configured_allowed_peer_uids()?,
             safe_cwd: None,
             allowed_cwd_roots: None,
         })
@@ -140,6 +140,123 @@ impl Drop for BoundWorkerSocket {
 
 fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
+}
+
+/// `SO_PEERCRED` UID allowlist for the worker socket (`SEC-09`).
+///
+/// Comma- and/or whitespace-separated numeric UIDs or user names, e.g. `jellyfin,aetherflow,0`.
+/// `*` or `any` explicitly disables the UID check (socket file permissions still apply). When
+/// unset or empty, [`default_allowed_peer_uids`] is used. Unknown names or malformed entries make
+/// `WorkerConfig::from_env` fail closed.
+pub const ENV_WORKER_ALLOWED_PEER_UIDS: &str = "AF_TRANSCODE_ALLOWED_PEER_UIDS";
+
+/// Service account of `aetherflow-api.service`, which reaches the worker socket via
+/// `SupplementaryGroups=jellyfin` to run peer-offloaded transcode jobs.
+pub const DEFAULT_API_SERVICE_USER: &str = "aetherflow";
+
+/// Default peer UID allowlist, matching the current deployment: the worker's own UID (the
+/// `jellyfin` service and its `af-transcode` shim), `root` (the privileged runner), and the
+/// `aetherflow` API service account when it exists on this host.
+pub fn default_allowed_peer_uids(
+    worker_euid: u32,
+    resolve_user: impl Fn(&str) -> Option<u32>,
+) -> Vec<u32> {
+    let mut uids = vec![worker_euid, 0];
+    uids.extend(resolve_user(DEFAULT_API_SERVICE_USER));
+    uids.sort_unstable();
+    uids.dedup();
+    uids
+}
+
+/// Parses an `AF_TRANSCODE_ALLOWED_PEER_UIDS` value.
+///
+/// Returns `Ok(None)` when the UID check is explicitly disabled (`*` / `any`),
+/// `Ok(Some(default))` when the value is empty, and `Err(entry)` naming the first entry that is
+/// neither a numeric UID nor a resolvable user name.
+pub fn parse_allowed_peer_uids(
+    raw: &str,
+    worker_euid: u32,
+    resolve_user: impl Fn(&str) -> Option<u32>,
+) -> Result<Option<Vec<u32>>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Some(default_allowed_peer_uids(worker_euid, resolve_user)));
+    }
+    if trimmed == "*" || trimmed.eq_ignore_ascii_case("any") {
+        return Ok(None);
+    }
+    let mut uids = Vec::new();
+    for entry in trimmed
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter(|entry| !entry.is_empty())
+    {
+        let uid = if entry.bytes().all(|b| b.is_ascii_digit()) {
+            entry.parse::<u32>().map_err(|_| entry.to_string())?
+        } else if entry
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            resolve_user(entry).ok_or_else(|| entry.to_string())?
+        } else {
+            return Err(entry.to_string());
+        };
+        uids.push(uid);
+    }
+    uids.sort_unstable();
+    uids.dedup();
+    Ok(Some(uids))
+}
+
+/// Resolves a local user name to its UID via `getpwnam_r(3)`.
+fn lookup_user_uid(name: &str) -> Option<u32> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: `passwd` is a plain C struct; an all-zero value is a valid "empty" record that
+    // `getpwnam_r` fully overwrites on success.
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer refers to live, properly sized storage owned by this frame, and
+    // `buf.len()` is the exact length of `buf`.
+    let rc = unsafe {
+        libc::getpwnam_r(
+            cname.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    (rc == 0 && !result.is_null()).then_some(pwd.pw_uid)
+}
+
+/// Resolves the effective peer UID allowlist from [`ENV_WORKER_ALLOWED_PEER_UIDS`].
+pub fn configured_allowed_peer_uids() -> Result<Option<Vec<u32>>, ConfigError> {
+    let raw = env::var(ENV_WORKER_ALLOWED_PEER_UIDS).unwrap_or_default();
+    let parsed = parse_allowed_peer_uids(&raw, current_euid(), lookup_user_uid).map_err(|entry| {
+        ConfigError::Io {
+            path: ENV_WORKER_ALLOWED_PEER_UIDS.to_string(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid peer UID allowlist entry '{entry}' (expected a numeric UID or existing user name)"),
+            ),
+        }
+    })?;
+    if parsed.is_none() {
+        tracing::warn!(
+            "{ENV_WORKER_ALLOWED_PEER_UIDS} disables SO_PEERCRED UID checks; relying on socket permissions only"
+        );
+    }
+    Ok(parsed)
+}
+
+/// Returns whether a connecting peer passes the `SO_PEERCRED` UID allowlist. A missing allowlist
+/// (`None`) admits every peer that the socket permissions admit; a peer whose credentials cannot
+/// be read is always rejected when an allowlist is configured.
+pub fn peer_uid_allowed(allowed: Option<&[u32]>, peer_uid: Option<u32>) -> bool {
+    match allowed {
+        None => true,
+        Some(list) => peer_uid.is_some_and(|uid| list.contains(&uid)),
+    }
 }
 
 /// A private directory for the unpublished socket. It is never shared by competing workers.
@@ -404,14 +521,14 @@ pub async fn serve_worker_listener(
                     }
                 };
 
-                // Optional SO_PEERCRED UID restriction.
+                // SO_PEERCRED UID allowlist (`AF_TRANSCODE_ALLOWED_PEER_UIDS`, SEC-09).
                 if let Some(ref allowed) = shared_cfg.allowed_peer_uids {
-                    let allowed_peer = stream
-                        .peer_cred()
-                        .ok()
-                        .is_some_and(|cred| allowed.contains(&cred.uid()));
-                    if !allowed_peer {
-                        tracing::warn!("rejecting worker connection from unauthorized peer uid");
+                    let peer_uid = stream.peer_cred().ok().map(|cred| cred.uid());
+                    if !peer_uid_allowed(Some(allowed), peer_uid) {
+                        tracing::warn!(
+                            peer_uid = ?peer_uid,
+                            "rejecting worker connection from unauthorized peer uid"
+                        );
                         drop(stream);
                         continue;
                     }
@@ -741,8 +858,7 @@ async fn handle_connection(
     .map_or(true, |res| res.is_err())
     {
         pg_guard.kill_now(Signal::SIGKILL);
-        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-        pg_guard.disarm();
+        reap_or_defer_killed_child(child, pg_guard, job_permit).await;
         return;
     }
 
@@ -955,6 +1071,7 @@ async fn handle_connection(
     stdin_task.abort();
     let _ = stdin_task.await;
 
+    let mut permit_opt = Some(job_permit);
     if let Some(code) = clean_exit_code {
         // Give both pipes time to finish before reporting success. A timed-out drain must
         // abort the pumps, otherwise they can keep outbound senders and the socket alive.
@@ -978,8 +1095,9 @@ async fn handle_connection(
         // Abnormal teardown: kill process group BEFORE waiting so PGID cannot be reused, then reap.
         pg_guard.kill_now(Signal::SIGKILL);
         output_tasks.shutdown().await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-        pg_guard.disarm();
+        if let Some(permit) = permit_opt.take() {
+            reap_or_defer_killed_child(child, pg_guard, permit).await;
+        }
     }
 
     drop(outbound_tx);
@@ -995,5 +1113,150 @@ async fn handle_connection(
         writer_task.abort();
         let _ = writer_task.await;
     }
-    drop(job_permit);
+    drop(permit_opt);
+}
+
+async fn reap_or_defer_killed_child(
+    mut child: tokio::process::Child,
+    mut pg_guard: ProcessGroupGuard,
+    job_permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(_) => {
+            pg_guard.disarm();
+            drop(job_permit);
+        }
+        Err(_) => {
+            // Retain the concurrency permit until an uninterruptible (e.g., D-state NFS) child exits.
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+                pg_guard.disarm();
+                drop(job_permit);
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod peer_uid_allowlist_tests {
+    use super::*;
+
+    fn resolver(name: &str) -> Option<u32> {
+        match name {
+            "aetherflow" => Some(998),
+            "jellyfin" => Some(997),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn sec09_default_allowlist_is_worker_root_and_api_service() {
+        assert_eq!(default_allowed_peer_uids(997, resolver), vec![0, 997, 998]);
+        assert_eq!(default_allowed_peer_uids(0, |_| None), vec![0]);
+        assert_eq!(
+            parse_allowed_peer_uids("", 997, resolver),
+            Ok(Some(vec![0, 997, 998]))
+        );
+        assert_eq!(
+            parse_allowed_peer_uids("  \t ", 1000, |_| None),
+            Ok(Some(vec![0, 1000]))
+        );
+    }
+
+    #[test]
+    fn sec09_parses_numeric_uids_and_user_names() {
+        assert_eq!(
+            parse_allowed_peer_uids("jellyfin, aetherflow 0,1000,1000", 5, resolver),
+            Ok(Some(vec![0, 997, 998, 1000]))
+        );
+        assert_eq!(parse_allowed_peer_uids("*", 5, resolver), Ok(None));
+        assert_eq!(parse_allowed_peer_uids("ANY", 5, resolver), Ok(None));
+    }
+
+    #[test]
+    fn sec09_rejects_unknown_or_malformed_entries() {
+        assert_eq!(
+            parse_allowed_peer_uids("jellyfin,nobody-here", 5, resolver),
+            Err("nobody-here".to_string())
+        );
+        assert_eq!(
+            parse_allowed_peer_uids("99999999999", 5, resolver),
+            Err("99999999999".to_string())
+        );
+        assert_eq!(
+            parse_allowed_peer_uids("-1", 5, resolver),
+            Err("-1".to_string())
+        );
+        assert_eq!(
+            parse_allowed_peer_uids("root;id", 5, resolver),
+            Err("root;id".to_string())
+        );
+    }
+
+    #[test]
+    fn sec09_peer_uid_policy() {
+        assert!(peer_uid_allowed(None, None));
+        assert!(peer_uid_allowed(None, Some(4242)));
+        assert!(peer_uid_allowed(Some(&[0, 997]), Some(997)));
+        assert!(!peer_uid_allowed(Some(&[0, 997]), Some(4242)));
+        assert!(
+            !peer_uid_allowed(Some(&[0, 997]), None),
+            "unreadable credentials must be rejected"
+        );
+        assert!(!peer_uid_allowed(Some(&[]), Some(0)));
+    }
+
+    #[test]
+    fn sec09_root_user_resolves_via_getpwnam() {
+        assert_eq!(lookup_user_uid("root"), Some(0));
+        assert_eq!(lookup_user_uid("af-no-such-user-xyz"), None);
+        assert_eq!(lookup_user_uid("bad\0name"), None);
+    }
+
+    #[tokio::test]
+    async fn sec09_so_peercred_allowlist_admits_own_uid_and_rejects_others() {
+        let euid = current_euid();
+        let (_client, server) = UnixStream::pair().unwrap();
+        let peer_uid = server.peer_cred().ok().map(|cred| cred.uid());
+        assert_eq!(peer_uid, Some(euid));
+        let defaults = default_allowed_peer_uids(euid, lookup_user_uid);
+        assert!(peer_uid_allowed(Some(&defaults), peer_uid));
+        let other = euid.wrapping_add(4242);
+        assert!(!peer_uid_allowed(Some(&[other]), peer_uid));
+    }
+
+    #[tokio::test]
+    async fn sec09_worker_drops_connections_from_disallowed_peer_uids() {
+        let dir = env::temp_dir().join(format!(
+            "af-transcode-peercred-{}-{}",
+            std::process::id(),
+            TEMP_SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let socket = dir.join("w.sock");
+        let mut cfg = WorkerConfig::for_paths(socket.clone(), PathBuf::from("/bin/true"));
+        cfg.allowed_peer_uids = Some(vec![current_euid().wrapping_add(4242)]);
+        let bound = bind_worker_socket(&cfg).unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_worker_listener(
+            bound,
+            cfg,
+            PathBuf::from("/bin/true"),
+            async move {
+                let _ = rx.await;
+            },
+        ));
+        let mut client = UnixStream::connect(&socket).await.unwrap();
+        let mut buf = [0u8; 16];
+        let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+            .await
+            .expect("disallowed peer must be disconnected promptly");
+        assert!(
+            matches!(read, Ok(0) | Err(_)),
+            "disallowed peer must receive EOF without any frame: {read:?}"
+        );
+        let _ = tx.send(());
+        server.await.unwrap().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

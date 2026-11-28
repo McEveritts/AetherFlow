@@ -2,7 +2,7 @@ use crate::auth::{
     api_error, blocking_response, decode_session_claims, secure_cookie_enabled, SubjectStatusError,
 };
 use crate::ws::{build_set_cookie, extract_cookie};
-use axum::extract::Query;
+use axum::extract::{ConnectInfo, Query};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::Utc;
@@ -11,6 +11,7 @@ use rand::RngCore;
 use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::net::{IpAddr, SocketAddr};
 
 pub(super) fn safe_login_return_to(raw: &str) -> Option<String> {
     if raw.len() > 2048
@@ -122,10 +123,13 @@ static GOOGLE_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
 });
 
 pub async fn google_callback(
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let mut response = complete_google_callback(headers, q).await;
+    // SEC-09: carry the real TCP peer so login history uses `extract_client_ip_for_peer`.
+    let peer_ip = connect_info.map(|ConnectInfo(addr)| addr.ip());
+    let mut response = complete_google_callback(headers, peer_ip, q).await;
     clear_google_cookies(&mut response);
     response
 }
@@ -137,7 +141,11 @@ pub(super) fn valid_google_state(state: &str, cookie_state: &str) -> bool {
         && af_models::constant_time_eq(state.as_bytes(), cookie_state.as_bytes())
 }
 
-async fn complete_google_callback(headers: HeaderMap, q: HashMap<String, String>) -> Response {
+async fn complete_google_callback(
+    headers: HeaderMap,
+    peer_ip: Option<IpAddr>,
+    q: HashMap<String, String>,
+) -> Response {
     if let Some(err_param) = q.get("error") {
         if !err_param.is_empty() {
             return google_login_error(&headers, err_param);
@@ -202,7 +210,7 @@ async fn complete_google_callback(headers: HeaderMap, q: HashMap<String, String>
     if !info_resp_status_success {
         return google_login_error(&headers, "userinfo_failed");
     }
-    blocking_response(move || complete_google_login(&headers, &user_info)).await
+    blocking_response(move || complete_google_login(&headers, peer_ip, &user_info)).await
 }
 
 pub(super) fn google_email_allowed(email: &str, emails: &str, domains: &str) -> bool {
@@ -340,7 +348,11 @@ pub(super) fn resolve_google_user(
     Ok(Some(user))
 }
 
-pub(super) fn complete_google_login(headers: &HeaderMap, info: &serde_json::Value) -> Response {
+pub(super) fn complete_google_login(
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    info: &serde_json::Value,
+) -> Response {
     let authenticated_user_id = crate::auth::resolve_raw_token(headers)
         .and_then(|raw| decode_session_claims(&raw, false).ok())
         .filter(|claims| {
@@ -420,7 +432,7 @@ pub(super) fn complete_google_login(headers: &HeaderMap, info: &serde_json::Valu
                 "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
                 params![
                     user_id,
-                    crate::ws::extract_client_ip(headers),
+                    crate::ws::extract_client_ip_for_peer(headers, peer_ip),
                     headers
                         .get(header::USER_AGENT)
                         .and_then(|v| v.to_str().ok())

@@ -37,6 +37,7 @@ pub(crate) use revocation::{
     finalize_user_credential_revocation, oidc_session_tag, resolve_session_family_id,
     revoke_all_user_credentials_in_tx,
 };
+pub use revocation::{spawn_rotation_state_sweeper, sweep_expired_rotation_state};
 
 #[cfg(test)]
 pub use sessions::refresh_session;

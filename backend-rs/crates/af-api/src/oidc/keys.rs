@@ -1,4 +1,5 @@
 use crate::auth::blocking_response;
+use af_models::secret_zeroize::SecretBytes;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -144,12 +145,40 @@ pub(super) fn read_oidc_key(path: &StdPath) -> anyhow::Result<OidcKeyMaterial> {
     read_oidc_material(options.open(path)?)
 }
 
-fn read_oidc_material(mut file: fs::File) -> anyhow::Result<OidcKeyMaterial> {
-    let mut pem = String::new();
-    file.read_to_string(&mut pem)?;
-    let private_key = PrivateKey::from_pkcs1_pem(&pem)?;
-    build_material_from_private_key(&private_key, &pem)
+/// Upper bound for an on-disk OIDC RSA PEM (a 2048-bit PKCS#1 PEM is ~1.7 KiB).
+const MAX_OIDC_PEM_BYTES: u64 = 64 * 1024;
+
+fn read_oidc_material(file: fs::File) -> anyhow::Result<OidcKeyMaterial> {
+    let pem = read_oidc_pem(file)?;
+    let pem_str = std::str::from_utf8(pem.expose_secret())
+        .map_err(|_| anyhow::anyhow!("OIDC key must be UTF-8 PEM"))?;
+    let private_key = PrivateKey::from_pkcs1_pem(pem_str)?;
+    build_material_from_private_key(&private_key, pem_str)
         .ok_or_else(|| anyhow::anyhow!("Invalid OIDC signing key"))
+}
+
+/// Reads the private-key PEM into a zeroize-on-drop buffer (`SEC-05`).
+///
+/// The buffer is pre-sized from file metadata so reading does not reallocate (which would leave
+/// an unzeroized copy behind), and it is wrapped before any error is propagated so partial reads
+/// are wiped too.
+fn read_oidc_pem(mut file: fs::File) -> anyhow::Result<SecretBytes> {
+    let declared = file.metadata()?.len();
+    anyhow::ensure!(
+        declared <= MAX_OIDC_PEM_BYTES,
+        "OIDC key file exceeds {MAX_OIDC_PEM_BYTES} bytes"
+    );
+    let mut raw = Vec::with_capacity(declared as usize + 1);
+    let read_res = (&mut file)
+        .take(MAX_OIDC_PEM_BYTES + 1)
+        .read_to_end(&mut raw);
+    let pem = SecretBytes::new(raw);
+    read_res?;
+    anyhow::ensure!(
+        pem.len() as u64 <= MAX_OIDC_PEM_BYTES,
+        "OIDC key file exceeds {MAX_OIDC_PEM_BYTES} bytes"
+    );
+    Ok(pem)
 }
 
 pub(super) fn load_or_generate_oidc_key_at(path: &StdPath) -> anyhow::Result<OidcKeyMaterial> {
@@ -165,7 +194,27 @@ pub(super) fn load_or_generate_oidc_key_at(path: &StdPath) -> anyhow::Result<Oid
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| StdPath::new("."));
-    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        if let Ok(meta) = fs::symlink_metadata(parent) {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                anyhow::bail!(
+                    "OIDC key parent directory {} is a symlink or non-directory",
+                    parent.display()
+                );
+            }
+        } else {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(parent)?;
+    }
     let private_key = PrivateKey::new(&mut OsCryptoRng, 2048)?;
     let pem = private_key.to_pkcs1_pem(LineEnding::LF)?;
     // Write and fsync a private file, then publish it without replacing another process's key.
@@ -176,7 +225,9 @@ pub(super) fn load_or_generate_oidc_key_at(path: &StdPath) -> anyhow::Result<Oid
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
         let mut file = options.open(&temporary)?;
         file.write_all(pem.as_bytes())?;
@@ -465,4 +516,40 @@ fn oidc_jwks_blocking() -> Response {
         }]
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod pem_zeroize_tests {
+    use super::*;
+
+    fn temp_file(name: &str, contents: &[u8]) -> PathBuf {
+        let dir = env::temp_dir().join(format!("af-oidc-pem-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn sec05_oidc_pem_is_read_into_redacted_secret_bytes() {
+        let body = concat!(
+            "-----BEGIN ",
+            "RSA PRIVATE KEY-----\nMIIEtestfixture\n-----END ",
+            "RSA PRIVATE KEY-----\n"
+        )
+        .as_bytes();
+        let path = temp_file("k.pem", body);
+        let pem = read_oidc_pem(fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(pem.expose_secret(), body);
+        assert_eq!(format!("{pem:?}"), "[REDACTED]");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn sec05_oidc_pem_rejects_oversized_files() {
+        let path = temp_file("big.pem", &vec![b'A'; (MAX_OIDC_PEM_BYTES + 1) as usize]);
+        let err = read_oidc_pem(fs::File::open(&path).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "{err}");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
 }

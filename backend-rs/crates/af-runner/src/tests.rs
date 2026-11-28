@@ -720,7 +720,7 @@ fn test_dispatcharr_runtime_port_and_package_fallback() {
 fn test_dispatcharr_credential_sync_drops_privileges_and_preserves_literals() {
     let username = "user'\"$`\\";
     let password = "p'\"\\$(touch /tmp/not-executed)\npassword";
-    let command = dispatcharr_credentials_command(username, password);
+    let command = dispatcharr_credentials_command();
     let command = command.as_std();
     assert_eq!(command.get_program(), "runuser");
     let args: Vec<_> = command
@@ -728,24 +728,32 @@ fn test_dispatcharr_credential_sync_drops_privileges_and_preserves_literals() {
         .map(|arg| arg.to_string_lossy())
         .collect();
     assert_eq!(&args[..5], &["-u", "dispatcharr", "--", "/bin/bash", "-ec"]);
-    assert!(args
-        .last()
-        .unwrap()
-        .contains("source /etc/dispatcharr/dispatcharr.env"));
+    assert!(args[5].contains("source /etc/dispatcharr/dispatcharr.env"));
+    assert!(args[5].contains("/opt/dispatcharr/env/bin/python -E manage.py shell -c"));
+    assert_eq!(args[7], DISPATCHARR_ADMIN_SCRIPT);
     assert!(!args
         .iter()
         .any(|arg| arg.contains(password) || arg.contains(username)));
     let variables: HashMap<_, _> = command.get_envs().collect();
+    // SEC-02 / AF-AUDIT-01: env_clear() + strict allowlist ensures neither admin credentials nor
+    // control-plane secrets (JWT_SECRET, AES_MASTER_KEY, etc.) cross into the dispatcharr user.
+    assert_eq!(variables.len(), 6);
     assert_eq!(
-        variables[std::ffi::OsStr::new("AF_ADMIN_USER")],
-        Some(std::ffi::OsStr::new(username))
+        variables.get(std::ffi::OsStr::new("USER")),
+        Some(&Some(std::ffi::OsStr::new("dispatcharr")))
     );
     assert_eq!(
-        variables[std::ffi::OsStr::new("AF_ADMIN_PASS")],
-        Some(std::ffi::OsStr::new(password))
+        variables.get(std::ffi::OsStr::new("PYTHONNOUSERSITE")),
+        Some(&Some(std::ffi::OsStr::new("1")))
     );
+    assert!(!variables.contains_key(std::ffi::OsStr::new("AF_ADMIN_USER")));
+    assert!(!variables.contains_key(std::ffi::OsStr::new("AF_ADMIN_PASS")));
+    assert!(!variables.contains_key(std::ffi::OsStr::new("AF_ADMIN_EMAIL")));
+    assert!(!variables.contains_key(std::ffi::OsStr::new("JWT_SECRET")));
+    assert!(!variables.contains_key(std::ffi::OsStr::new("AES_MASTER_KEY")));
     assert!(DISPATCHARR_ADMIN_SCRIPT.contains("user.user_level = 10"));
-    assert!(DISPATCHARR_ADMIN_SCRIPT.contains("os.environ[\"AF_ADMIN_PASS\"]"));
+    assert!(DISPATCHARR_ADMIN_SCRIPT.contains("json.load(sys.stdin)"));
+    assert!(!DISPATCHARR_ADMIN_SCRIPT.contains("AF_ADMIN_PASS"));
 }
 
 #[tokio::test]
@@ -765,15 +773,18 @@ async fn test_dispatcharr_sync_rejects_invalid_credentials_before_execution() {
 #[tokio::test]
 async fn test_handle_package_rejects_purge_for_non_remove_actions() {
     for action in ["install", "update"] {
-        let response = handle_package(Json(PackageRunnerRequest {
-            action: action.to_string(),
-            package_id: "sonarr".to_string(),
-            script_name: "installpackage-sonarr".to_string(),
-            lifecycle_job_id: String::new(),
-            app_port: 0,
-            delete_data: true,
-            ..Default::default()
-        }))
+        let response = handle_package(
+            None,
+            Json(PackageRunnerRequest {
+                action: action.to_string(),
+                package_id: "sonarr".to_string(),
+                script_name: "installpackage-sonarr".to_string(),
+                lifecycle_job_id: String::new(),
+                app_port: 0,
+                delete_data: true,
+                ..Default::default()
+            }),
+        )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{}", action);
     }
@@ -2114,7 +2125,8 @@ async fn load_runner_config_or_embedded_prefers_canonical_over_legacy_relative()
         assert!(
             err_msg.contains("Failed to open config")
                 || err_msg.contains("ELOOP")
-                || err_msg.contains("Too many levels"),
+                || err_msg.contains("Too many levels")
+                || err_msg.contains("non-symlinked"),
             "unexpected symlink error: {err_msg}"
         );
         env::remove_var("AETHERFLOW_TEST_CFG_PATH");
@@ -3126,5 +3138,64 @@ async fn rclone_app_metadata_parses_split_port_gui_dropin_and_ignores_env_api_po
         Some(v) => env::set_var("AETHERFLOW_FS_ROOT", v),
         None => env::remove_var("AETHERFLOW_FS_ROOT"),
     }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn w1b_01_open_and_read_regular_config_allows_managed_current_symlink_and_rejects_escape() {
+    use std::os::unix::fs::symlink;
+
+    let root = env::temp_dir().join(format!(
+        "af-runner-w1b01-current-symlink-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let rel_cfg = root.join("opt/AetherFlow/releases/100/config");
+    fs::create_dir_all(&rel_cfg).unwrap();
+    fs::write(rel_cfg.join("packages.json"), r#"[{"name":"sonarr"}]"#).unwrap();
+
+    // 1. Absolute managed symlink `<root>/opt/AetherFlow/current -> <root>/opt/AetherFlow/releases/100`
+    let current = root.join("opt/AetherFlow/current");
+    symlink(root.join("opt/AetherFlow/releases/100"), &current).unwrap();
+    let cfg_via_current = current.join("config/packages.json");
+    let loaded = open_and_read_regular_config(&cfg_via_current).unwrap();
+    assert_eq!(loaded, r#"[{"name":"sonarr"}]"#);
+
+    let via_root = try_load_runner_config_or_embedded_in_root(
+        "AETHERFLOW_W1B01_UNUSED_ENV",
+        "packages.json",
+        "[]",
+        Some(&root),
+    )
+    .unwrap();
+    assert_eq!(via_root, r#"[{"name":"sonarr"}]"#);
+
+    // 2. Relative managed symlink `current -> releases/100`
+    fs::remove_file(&current).unwrap();
+    symlink("releases/100", &current).unwrap();
+    assert_eq!(
+        open_and_read_regular_config(&cfg_via_current).unwrap(),
+        r#"[{"name":"sonarr"}]"#
+    );
+
+    // 3. Malicious symlink pointing outside `releases/` must fail closed (never fall back to embedded)
+    let outside = root.join("outside/config");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("packages.json"), r#"[{"name":"evil"}]"#).unwrap();
+    fs::remove_file(&current).unwrap();
+    symlink(root.join("outside"), &current).unwrap();
+    let err = open_and_read_regular_config(&cfg_via_current).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        try_load_runner_config_or_embedded_in_root(
+            "AETHERFLOW_W1B01_UNUSED_ENV",
+            "packages.json",
+            "[]",
+            Some(&root),
+        )
+        .is_err(),
+        "escaped current symlink must fail closed rather than silently falling back"
+    );
+
     let _ = fs::remove_dir_all(&root);
 }

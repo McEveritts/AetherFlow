@@ -38,7 +38,6 @@
 #[path = "teardown_regressions.rs"]
 mod teardown_regressions;
 
-use crate::legacy_stream_output::BoundedLines;
 use crate::package_lifecycle::snapshot_policy::{
     configured_max_snapshot_bytes, ensure_snapshot_free_space, snapshot_filesystem_capacity,
     SnapshotBudget, SNAPSHOT_RESERVE_BYTES,
@@ -92,7 +91,6 @@ pub(crate) use apache_ingress::{
     update_legacy_apache_vhost, RunnerBlueprintConfigChanges,
 };
 
-pub(crate) use command_env::terminate_child_process_group;
 pub use command_env::*;
 
 pub use declarative_recipes::*;

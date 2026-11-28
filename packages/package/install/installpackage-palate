@@ -23,6 +23,7 @@ ENV_FILE="${CONFIG_DIR}/palate.env"
 UNIT_FILE=/etc/systemd/system/af-palate.service
 REQUESTED_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-}}"
 BUILD_DIR=""
+RUNTIME_STAGE=""
 BACKUP_DIR=""
 ENV_BACKUP=""
 OLD_APP_MOVED=0
@@ -99,6 +100,7 @@ cleanup() {
         fi
     fi
     [[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"
+    [[ -z "$RUNTIME_STAGE" ]] || rm -rf "$RUNTIME_STAGE"
     if [[ "$restore_failed" == true ]]; then
         status=1
         print_warn "Rollback incomplete; recovery backup preserved at ${BACKUP_DIR:-${ENV_BACKUP:-unknown}}"
@@ -111,10 +113,67 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [[ -f "$ENV_FILE" ]]; then
-    # This administrator-owned file is also consumed by systemd and build commands.
-    # shellcheck source=/dev/null
-    source "$ENV_FILE"
+read_palate_env_key() {
+    local env_path="$1"
+    local key_name="$2"
+    python3 -I - "$env_path" "$key_name" <<'PYENV' 2>/dev/null || true
+import os, pathlib, stat, sys
+
+env_path = os.path.abspath(sys.argv[1])
+key_name = sys.argv[2]
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+p = pathlib.PurePosixPath(env_path)
+if ".." in p.parts or not p.name:
+    raise SystemExit(0)
+try:
+    cur_fd = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+except OSError:
+    raise SystemExit(0)
+try:
+    for part in p.parts[1:-1]:
+        nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt
+    fd = os.open(p.name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=cur_fd)
+except OSError:
+    os.close(cur_fd)
+    raise SystemExit(0)
+os.close(cur_fd)
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 65536:
+        raise SystemExit(0)
+    raw = os.read(fd, 65537)
+    if len(raw) > 65536:
+        raise SystemExit(0)
+finally:
+    os.close(fd)
+
+val = ""
+for line in raw.decode("utf-8", errors="replace").splitlines():
+    s = line.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.startswith("export "):
+        s = s[7:].strip()
+    if "=" not in s:
+        continue
+    k, v = s.split("=", 1)
+    if k.strip() == key_name:
+        v = v.strip().strip("\r\n")
+        if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+            v = v[1:-1]
+        val = v
+print(val)
+PYENV
+}
+
+if [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
+    PORT="$(read_palate_env_key "$ENV_FILE" "PORT")"
     ENV_BACKUP="$(mktemp "${CONFIG_DIR}/.palate-env.XXXXXX")"
     cp -a "$ENV_FILE" "$ENV_BACKUP"
 fi
@@ -139,56 +198,259 @@ install -d -m 750 -o root -g af-palate "$CONFIG_DIR"
 resolve_palate_app_url() {
     local app_port="$1"
     local base_domain="$2"
-    local db_path="" cand=""
-    for cand in "${AF_DB_PATH:-}" "${DB_PATH:-}" "${AETHERFLOW_DB_PATH:-}" \
-        /var/lib/aetherflow/aetherflow.sqlite \
-        /opt/AetherFlow/current/data/aetherflow.sqlite \
-        /opt/AetherFlow/data/aetherflow.sqlite \
-        /opt/AetherFlow/backend/data/aetherflow.sqlite; do
-        if [[ -n "$cand" && -f "$cand" ]]; then
-            db_path="$cand"
-            break
-        fi
-    done
+    local -a db_candidates=(
+        "${AF_DB_PATH:-}"
+        "${DB_PATH:-}"
+        "${AETHERFLOW_DB_PATH:-}"
+        "${AETHERFLOW_DATA_DIR:+${AETHERFLOW_DATA_DIR%/}/aetherflow.sqlite}"
+        /var/lib/aetherflow/aetherflow.sqlite
+        /opt/AetherFlow/current/data/aetherflow.sqlite
+        /opt/AetherFlow/data/aetherflow.sqlite
+        /opt/AetherFlow/backend/data/aetherflow.sqlite
+    )
     local aether_local="0"
     if grep -qiE '(\.|[[:space:]])aether\.local([[:space:]]|$)' /etc/hosts 2>/dev/null || \
        grep -rqi 'aether\.local' /etc/apache2/sites-available /etc/apache2/sites-enabled 2>/dev/null; then
         aether_local="1"
     fi
-    python3 - "$db_path" "$app_port" "$base_domain" "$aether_local" <<'PYEOF'
-import sqlite3, sys
+    python3 -I - "$app_port" "$base_domain" "$aether_local" "${db_candidates[@]}" <<'PYEOF'
+import os, pathlib, re, sqlite3, stat, sys, time, uuid
 
-db_path, app_port, base_domain, aether_local = sys.argv[1:5]
+app_port, base_domain, aether_local = sys.argv[1:4]
+db_candidates = sys.argv[4:]
+DOMAIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$")
+base_domain = base_domain.strip().lstrip("*.")
+if not DOMAIN_RE.fullmatch(base_domain):
+    base_domain = ""
 external_enabled = 0
 custom_domain = ""
 tls_enabled = 0
 
-if db_path:
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+MAX_SCRATCH_BYTES = 2 * 1024 * 1024 * 1024
+is_root = os.geteuid() == 0
+
+def open_dir_nofollow(dir_str):
+    p = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if ".." in p.parts:
+        return -1
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_ingress_configs'")
-        if cur.fetchone():
-            cols = {row[1] for row in cur.execute("PRAGMA table_info(app_ingress_configs)")}
-            ext_col = "external_access_enabled" if "external_access_enabled" in cols else ("external_enabled" if "external_enabled" in cols else "")
-            dom_col = "public_domain" if "public_domain" in cols else ("custom_domain" if "custom_domain" in cols else "")
-            tls_col = "tls_enabled" if "tls_enabled" in cols else ""
-            if ext_col:
-                sel = [
-                    ext_col,
-                    dom_col if dom_col else "''",
-                    tls_col if tls_col else "0",
-                ]
-                row = cur.execute(
-                    f"SELECT {', '.join(sel)} FROM app_ingress_configs WHERE LOWER(app_name) = 'palate' LIMIT 1"
-                ).fetchone()
-                if row:
-                    external_enabled = int(bool(row[0] or 0))
-                    custom_domain = (row[1] or "").strip()
-                    tls_enabled = int(bool(row[2] or 0))
-        conn.close()
-    except sqlite3.Error:
-        pass
+        cur_fd = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    except OSError:
+        return -1
+    try:
+        for part in p.parts[1:]:
+            nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = nxt
+        return cur_fd
+    except OSError:
+        os.close(cur_fd)
+        return -1
+
+def is_trusted_root_dir(dir_str, allow_sticky):
+    dp = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if not dp.is_absolute() or ".." in dp.parts:
+        return False
+    cur_p = pathlib.Path("/")
+    for part in dp.parts:
+        cur_p = pathlib.Path("/") if part == "/" else cur_p / part
+        try:
+            cst = os.lstat(cur_p)
+        except OSError:
+            return False
+        if stat.S_ISLNK(cst.st_mode) or not stat.S_ISDIR(cst.st_mode) or cst.st_uid != 0:
+            return False
+        writable = (cst.st_mode & 0o022) != 0
+        sticky = (cst.st_mode & getattr(stat, "S_ISVTX", 0o1000)) != 0
+        if writable and not (allow_sticky and sticky):
+            return False
+    return True
+
+def create_root_scratch(min_free):
+    sc_name = f".af-palate-db.{os.getpid()}.{uuid.uuid4().hex}"
+    for cand in ("/var/tmp", "/tmp", "/run"):
+        if not is_trusted_root_dir(cand, allow_sticky=True):
+            continue
+        cand_fd = -1
+        try:
+            cand_fd = os.open(cand, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            vfs = os.fstatvfs(cand_fd)
+            avail = vfs.f_bavail * (vfs.f_frsize or vfs.f_bsize)
+            if avail < min_free:
+                os.close(cand_fd)
+                continue
+            os.mkdir(sc_name, 0o700, dir_fd=cand_fd)
+            sc_fd = os.open(sc_name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cand_fd)
+            st = os.fstat(sc_fd)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+                os.close(sc_fd)
+                os.rmdir(sc_name, dir_fd=cand_fd)
+                os.close(cand_fd)
+                continue
+            os.fchmod(sc_fd, 0o700)
+            return cand_fd, sc_fd, sc_name, os.path.join(cand, sc_name)
+        except OSError:
+            if cand_fd >= 0:
+                os.close(cand_fd)
+    return None
+
+def copy_fd_bounded(in_fd, out_dir_fd, out_name, remaining):
+    out_fd = os.open(out_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=out_dir_fd)
+    copied = 0
+    tail8 = b""
+    try:
+        while True:
+            chunk = os.read(in_fd, 65536)
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > remaining:
+                raise OSError("scratch copy cap exceeded")
+            tail8 = (tail8 + chunk)[-8:]
+            view = memoryview(chunk)
+            while view:
+                w = os.write(out_fd, view)
+                if w <= 0:
+                    raise OSError("short write")
+                view = view[w:]
+        if out_name.endswith("-journal") and copied >= 16 and tail8 == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7":
+            raise OSError("forbidden SQLite super-journal trailer")
+        return remaining - copied
+    finally:
+        os.close(out_fd)
+
+def db_files_root_owned_safe(parent_fd, leaf_name):
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            st = os.stat(leaf_name + suffix, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            st = None
+        if st is not None and (st.st_uid != 0 or (st.st_mode & 0o022) != 0):
+            return False
+    return True
+
+def inspect_palate_ingress(db_cand):
+    db_abs = os.path.abspath(db_cand)
+    parent_str = os.path.dirname(db_abs)
+    leaf_name = os.path.basename(db_abs)
+    if not leaf_name:
+        return None
+    parent_fd = open_dir_nofollow(parent_str)
+    if parent_fd < 0:
+        return None
+    try:
+        use_scratch = is_root and (
+            not is_trusted_root_dir(parent_str, allow_sticky=False)
+            or not db_files_root_owned_safe(parent_fd, leaf_name)
+        )
+        attempts = 3 if use_scratch else 1
+        for attempt in range(attempts):
+            db_fd = wal_fd = jrn_fd = -1
+            sc = None
+            try:
+                db_fd = os.open(leaf_name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+                st = os.fstat(db_fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    return None
+                if os.read(db_fd, 16) != b"SQLite format 3\x00":
+                    return None
+                total_sz = st.st_size
+                for suffix in ("-wal", "-shm", "-journal"):
+                    try:
+                        sfd = os.open(leaf_name + suffix, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        continue
+                    sst = os.fstat(sfd)
+                    if not stat.S_ISREG(sst.st_mode) or sst.st_nlink != 1:
+                        os.close(sfd)
+                        return None
+                    if suffix == "-wal":
+                        wal_fd = sfd
+                        total_sz += sst.st_size
+                    elif suffix == "-journal":
+                        if sst.st_size >= 16:
+                            os.lseek(sfd, -8, os.SEEK_END)
+                            jtail = os.read(sfd, 8)
+                            os.lseek(sfd, 0, os.SEEK_SET)
+                            if jtail == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7":
+                                os.close(sfd)
+                                return None
+                        jrn_fd = sfd
+                        total_sz += sst.st_size
+                    else:
+                        os.close(sfd)
+                if use_scratch:
+                    if total_sz > MAX_SCRATCH_BYTES:
+                        return None
+                    sc = create_root_scratch(total_sz * 2 + 16 * 1024 * 1024)
+                    if sc is None:
+                        return None
+                    _, sc_fd, _, sc_path = sc
+                    os.lseek(db_fd, 0, os.SEEK_SET)
+                    rem = copy_fd_bounded(db_fd, sc_fd, "palate.sqlite", MAX_SCRATCH_BYTES)
+                    if wal_fd >= 0:
+                        rem = copy_fd_bounded(wal_fd, sc_fd, "palate.sqlite-wal", rem)
+                    if jrn_fd >= 0:
+                        copy_fd_bounded(jrn_fd, sc_fd, "palate.sqlite-journal", rem)
+                    conn = sqlite3.connect(os.path.join(sc_path, "palate.sqlite"), timeout=2)
+                else:
+                    conn = sqlite3.connect(pathlib.Path(db_abs).as_uri() + "?mode=ro", uri=True, timeout=2)
+                try:
+                    conn.execute("PRAGMA trusted_schema = OFF;")
+                    cur = conn.cursor()
+                    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_ingress_configs'")
+                    if cur.fetchone():
+                        cur.execute("SELECT * FROM app_ingress_configs WHERE LOWER(app_name) = ? LIMIT 1", ("palate",))
+                        row = cur.fetchone()
+                        if row and cur.description:
+                            row_map = {col[0]: row[idx] for idx, col in enumerate(cur.description)}
+                            ext_val = row_map.get("external_access_enabled", row_map.get("external_enabled", 0))
+                            dom_val = row_map.get("public_domain", row_map.get("custom_domain", ""))
+                            tls_val = row_map.get("tls_enabled", 0)
+                            return int(bool(ext_val or 0)), str(dom_val or "").strip(), int(bool(tls_val or 0))
+                    return 0, "", 0
+                finally:
+                    conn.close()
+            except sqlite3.DatabaseError:
+                if attempt + 1 < attempts:
+                    time.sleep(0.025)
+                    continue
+                return None
+            except OSError:
+                return None
+            finally:
+                for fd in (db_fd, wal_fd, jrn_fd):
+                    if fd >= 0:
+                        os.close(fd)
+                if sc is not None:
+                    sc_base_fd, sc_fd, sc_name, _ = sc
+                    for nm in ("palate.sqlite", "palate.sqlite-wal", "palate.sqlite-shm", "palate.sqlite-journal"):
+                        try:
+                            os.unlink(nm, dir_fd=sc_fd)
+                        except FileNotFoundError:
+                            _ = nm
+                    os.close(sc_fd)
+                    try:
+                        os.rmdir(sc_name, dir_fd=sc_base_fd)
+                    except OSError:
+                        _ = sc_name
+                    os.close(sc_base_fd)
+    finally:
+        os.close(parent_fd)
+    return None
+
+for cand in db_candidates:
+    if not cand:
+        continue
+    res = inspect_palate_ingress(cand)
+    if res is not None:
+        external_enabled, raw_custom_domain, tls_enabled = res
+        custom_domain = raw_custom_domain if DOMAIN_RE.fullmatch(raw_custom_domain) else ""
+        break
 
 managed_url = ""
 if external_enabled:
@@ -211,7 +473,7 @@ _PALATE_URL_INFO="$(resolve_palate_app_url "$APP_PORT" "$BASE_DOMAIN")"
 MANAGED_APP_URL="$(printf '%s\n' "$_PALATE_URL_INFO" | sed -n '1p')"
 INGRESS_CUSTOM_DOMAIN="$(printf '%s\n' "$_PALATE_URL_INFO" | sed -n '2p')"
 if [[ ! -f "$ENV_FILE" ]]; then
-    DB_PORT="$(runuser -u postgres -- psql -XAt -d postgres -c 'SHOW port')"
+    DB_PORT="$(runuser -u postgres -- env -i PATH="/usr/local/bin:/usr/bin:/bin" LANG="C.UTF-8" psql -XAt -d postgres -c 'SHOW port')"
     PALATE_DB_PASSWORD="$(openssl rand -hex 32)"
     APP_URL="$MANAGED_APP_URL"
     umask 077
@@ -234,8 +496,7 @@ EOF
 fi
 chown root:af-palate "$ENV_FILE"
 chmod 640 "$ENV_FILE"
-# shellcheck source=/dev/null
-source "$ENV_FILE"
+PALATE_DB_PASSWORD="$(read_palate_env_key "$ENV_FILE" "PALATE_DB_PASSWORD")"
 if [[ ! "${PALATE_DB_PASSWORD:-}" =~ ^[a-f0-9]{64}$ ]]; then
     print_error "The managed database password in ${ENV_FILE} is missing or invalid."
     exit 1
@@ -288,7 +549,7 @@ PY
 
 report_progress 20 "Preparing Palate's PostgreSQL database..."
 # Passwords travel over stdin, never in process arguments or progress messages.
-af_logged runuser -u postgres -- psql -Xq -v ON_ERROR_STOP=1 -d postgres <<SQL
+af_logged runuser -u postgres -- env -i PATH="/usr/local/bin:/usr/bin:/bin" LANG="C.UTF-8" psql -Xq -v ON_ERROR_STOP=1 -d postgres <<SQL
 SELECT 'CREATE ROLE af_palate LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'af_palate') \gexec
 ALTER ROLE af_palate PASSWORD '${PALATE_DB_PASSWORD}';
 SELECT 'CREATE DATABASE af_palate OWNER af_palate' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'af_palate') \gexec
@@ -318,62 +579,314 @@ else
     fi
 fi
 
-# Use an application-private, checksum-verified Node.js 22 runtime.
+# Stage the application-private, checksum-verified Node.js 22 runtime outside $BUILD_DIR
+# so it remains strictly root-owned and cannot be renamed or swapped while af-palate owns $BUILD_DIR.
 case "$(uname -m)" in
     x86_64) NODE_ARCH=x64 ;;
     aarch64|arm64) NODE_ARCH=arm64 ;;
     *) print_error "Palate supports amd64 and arm64 hosts."; exit 1 ;;
 esac
-curl --proto '=https' --proto-redir '=https' -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt -o "$BUILD_DIR/node-shasums.txt"
-NODE_ARCHIVE="$(awk -v suffix="-linux-${NODE_ARCH}.tar.xz" 'index($2, suffix) && substr($2, length($2)-length(suffix)+1) == suffix {print $2}' "$BUILD_DIR/node-shasums.txt")"
+RUNTIME_STAGE="$(mktemp -d /opt/.palate-runtime.XXXXXX)"
+chmod 755 "$RUNTIME_STAGE"
+curl --proto '=https' --proto-redir '=https' -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt -o "$RUNTIME_STAGE/node-shasums.txt"
+NODE_ARCHIVE="$(awk -v suffix="-linux-${NODE_ARCH}.tar.xz" 'index($2, suffix) && substr($2, length($2)-length(suffix)+1) == suffix {print $2}' "$RUNTIME_STAGE/node-shasums.txt")"
 if [[ ! "$NODE_ARCHIVE" =~ ^node-v22\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.xz$ ]]; then
     print_error "Unable to resolve Palate's Node.js 22 runtime."
     exit 1
 fi
-download_file "https://nodejs.org/dist/latest-v22.x/${NODE_ARCHIVE}" "$BUILD_DIR/$NODE_ARCHIVE"
-(cd "$BUILD_DIR"; awk -v name="$NODE_ARCHIVE" '$2 == name {print}' node-shasums.txt | sha256sum --check --status)
-af_validate_tar_archive --allow-intra-symlinks --strip-components=1 "$BUILD_DIR/$NODE_ARCHIVE"
-mkdir "$BUILD_DIR/.runtime"
-tar -xJf "$BUILD_DIR/$NODE_ARCHIVE" --strip-components=1 --no-same-owner --no-same-permissions -C "$BUILD_DIR/.runtime"
-rm -f "$BUILD_DIR/$NODE_ARCHIVE" "$BUILD_DIR/node-shasums.txt"
-"$BUILD_DIR/.runtime/bin/node" -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major !== 22 || minor < 13) process.exit(1)'
+download_file "https://nodejs.org/dist/latest-v22.x/${NODE_ARCHIVE}" "$RUNTIME_STAGE/$NODE_ARCHIVE"
+(cd "$RUNTIME_STAGE"; awk -v name="$NODE_ARCHIVE" '$2 == name {print}' node-shasums.txt | sha256sum --check --status)
+af_validate_tar_archive --allow-intra-symlinks --strip-components=1 "$RUNTIME_STAGE/$NODE_ARCHIVE"
+tar -xJf "$RUNTIME_STAGE/$NODE_ARCHIVE" --strip-components=1 --no-same-owner --no-same-permissions -C "$RUNTIME_STAGE"
+rm -f "$RUNTIME_STAGE/$NODE_ARCHIVE" "$RUNTIME_STAGE/node-shasums.txt"
+chown -hRP root:root "$RUNTIME_STAGE"
+chmod -R go-w,a+rX "$RUNTIME_STAGE"
+"$RUNTIME_STAGE/bin/node" -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major !== 22 || minor < 13) process.exit(1)'
 
-if [[ ! -d "$DATA_DIR/vault" ]]; then
-    cp -a "$BUILD_DIR/vault" "$DATA_DIR/vault"
-fi
-rm -rf "$BUILD_DIR/vault"
-ln -s "$DATA_DIR/vault" "$BUILD_DIR/vault"
-chmod 755 "$BUILD_DIR"
-chown -hRP af-palate:af-palate "$BUILD_DIR" "$DATA_DIR"
-
-run_app() {
-    runuser -u af-palate -- env "PATH=$BUILD_DIR/.runtime/bin:$PATH" "HOME=$DATA_DIR" NEXT_TELEMETRY_DISABLED=1 \
-        /bin/bash -c 'set -e; set -a; source "$1"; set +a; cd "$2"; shift 2; exec "$@"' -- "$ENV_FILE" "$BUILD_DIR" "$@"
-}
-report_progress 50 "Building Palate ${TAG} as its dedicated service user..."
-af_logged node_build run_app npm ci --include=dev --no-audit --no-fund
-af_logged run_app node node_modules/prisma/build/index.js generate
-af_logged node_build run_app npm run build
-test -s "$BUILD_DIR/.next/BUILD_ID"
-VERSION="$("$BUILD_DIR/.runtime/bin/node" -p "require('${BUILD_DIR}/package.json').version")"
+# Parse package.json strictly as data (O_NOFOLLOW, python3 -I) BEFORE granting build ownership
+# to af-palate so root never executes af-palate-writable Node binaries or JS modules.
+VERSION="$(python3 -I - "$BUILD_DIR/package.json" <<'PYVER'
+import json, os, pathlib, stat, sys
+p = pathlib.PurePosixPath(os.path.abspath(sys.argv[1]))
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+cur_fd = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+try:
+    for part in p.parts[1:-1]:
+        nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt
+    fd = os.open(p.parts[-1], os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=cur_fd)
+finally:
+    os.close(cur_fd)
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 1048576:
+        raise SystemExit(1)
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 8192)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > 1048576:
+            raise SystemExit(1)
+        chunks.append(chunk)
+    ver = json.loads(b"".join(chunks).decode("utf-8")).get("version", "")
+    if not isinstance(ver, str) or not ver.strip():
+        raise SystemExit(1)
+    print(ver.strip())
+finally:
+    os.close(fd)
+PYVER
+)"
 [[ "$VERSION" == "${TAG#v}" ]] || { print_error "Palate's package version does not match ${TAG}."; exit 1; }
-queue_app_version "$APP_DIR/.af-version" "$VERSION"
 
-report_progress 80 "Backing up data and applying Palate's database schema..."
+# Stop any running af-palate.service and take quiescent backups BEFORE touching $DATA_DIR
+# or transferring $BUILD_DIR ownership to af-palate so no live process can race root operations.
+report_progress 45 "Quiescing Palate service and backing up existing state..."
 validate_config_paths /var/backups/.af-backup-root
 BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-palate.XXXXXX)"
 chmod 700 "$BACKUP_DIR"
 cp -a "${ENV_BACKUP:-$ENV_FILE}" "$BACKUP_DIR/palate.env"
 if [[ -f "$UNIT_FILE" ]]; then
     cp -a "$UNIT_FILE" "$BACKUP_DIR/af-palate.service"
-    if systemctl is-active --quiet af-palate.service; then WAS_ACTIVE=1; fi
-    af_logged systemctl stop af-palate.service
-    SERVICE_STOPPED=1
 fi
+if systemctl is-active --quiet af-palate.service; then WAS_ACTIVE=1; fi
+stop_systemd_unit af-palate.service
+SERVICE_STOPPED=1
+pkill -9 -u af-palate 2>/dev/null || true
 backup_postgresql_database "$BACKUP_DIR" af_palate
 cp -a -- "$DATA_DIR" "$BACKUP_DIR/app-state"
+
+[[ ! -L "$DATA_DIR" && ! -L "$DATA_DIR/vault" ]] || { print_error "Unsafe symlink in ${DATA_DIR}."; exit 1; }
+if [[ ! -e "$DATA_DIR/vault" ]]; then
+    cp -aT -- "$BUILD_DIR/vault" "$DATA_DIR/vault"
+elif [[ ! -d "$DATA_DIR/vault" ]]; then
+    print_error "Unexpected non-directory at ${DATA_DIR}/vault."
+    exit 1
+fi
+rm -rf "$BUILD_DIR/vault"
+ln -s "$DATA_DIR/vault" "$BUILD_DIR/vault"
+
+BUILD_HOME="$BUILD_DIR/.build-home"
+mkdir -p "$BUILD_HOME"
+chmod 755 "$BUILD_DIR"
+chmod 700 "$BUILD_HOME"
+chown -hRP af-palate:af-palate "$BUILD_DIR" "$DATA_DIR"
+
+run_app() {
+    runuser -u af-palate -- env -i \
+        "PATH=$RUNTIME_STAGE/bin:/usr/local/bin:/usr/bin:/bin" \
+        "HOME=$BUILD_HOME" \
+        "USER=af-palate" \
+        "LOGNAME=af-palate" \
+        "LANG=C.UTF-8" \
+        "NPM_CONFIG_USERCONFIG=/dev/null" \
+        "NEXT_TELEMETRY_DISABLED=1" \
+        /bin/bash -c 'set -e; set -a; source "$1"; set +a; cd "$2"; shift 2; exec "$@"' -- "$ENV_FILE" "$BUILD_DIR" "$@"
+}
+report_progress 55 "Building Palate ${TAG} as its dedicated service user..."
+af_logged node_build run_app npm ci --include=dev --no-audit --no-fund
+af_logged run_app node node_modules/prisma/build/index.js generate
+af_logged node_build run_app npm run build
+test -s "$BUILD_DIR/.next/BUILD_ID"
+queue_app_version "$APP_DIR/.af-version" "$VERSION"
+
+report_progress 80 "Applying Palate's database schema and hardening build permissions..."
 # Refuse destructive schema changes: never pass --accept-data-loss or --force-reset.
 af_logged run_app node node_modules/prisma/build/index.js db push
+pkill -9 -u af-palate 2>/dev/null || true
+
+# Reclaim $BUILD_DIR strictly via dirfd + O_NOFOLLOW (rejecting any escaping/chained symlink, fake
+# .runtime, or symlinked .next/.next/cache) before attaching the root-owned Node.js runtime.
+python3 -I - "$BUILD_DIR" "$DATA_DIR" <<'PYFIN'
+import os, pathlib, pwd, stat, sys
+
+build_root = os.path.abspath(sys.argv[1])
+data_root = os.path.abspath(sys.argv[2])
+vault_target = os.path.join(data_root, "vault")
+pw = pwd.getpwnam("af-palate")
+palate_uid, palate_gid = pw.pw_uid, pw.pw_gid
+
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+def open_dir_nofollow(path_str):
+    p = pathlib.PurePosixPath(os.path.abspath(path_str))
+    if ".." in p.parts:
+        raise RuntimeError(f"traversal in {path_str}")
+    cur = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    try:
+        for part in p.parts[1:]:
+            nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur)
+            os.close(cur)
+            cur = nxt
+        return cur
+    except BaseException:
+        os.close(cur)
+        raise
+
+def rmtree_dirfd(parent_fd, name):
+    st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISDIR(st.st_mode):
+        dfd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=parent_fd)
+        try:
+            for entry in os.listdir(dfd):
+                rmtree_dirfd(dfd, entry)
+        finally:
+            os.close(dfd)
+        os.rmdir(name, dir_fd=parent_fd)
+    else:
+        os.unlink(name, dir_fd=parent_fd)
+
+def norm_go_w_a_rx(mode, is_dir):
+    perm = stat.S_IMODE(mode) & 0o755
+    perm |= 0o444
+    if is_dir or (perm & 0o111):
+        perm |= 0o111
+    return perm
+
+def verify_relative_target_confined(root_fd, rel_parts, target):
+    if os.path.isabs(target):
+        return False
+    stack = list(rel_parts)
+    for part in pathlib.PurePosixPath(target).parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not stack:
+                return False
+            stack.pop()
+        else:
+            stack.append(part)
+    if not stack or stack[0] == "vault":
+        return False
+    cur = os.dup(root_fd)
+    try:
+        for comp in stack[:-1]:
+            nxt = os.open(comp, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur)
+            os.close(cur)
+            cur = nxt
+        try:
+            st = os.stat(stack[-1], dir_fd=cur, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)
+    except OSError:
+        return False
+    finally:
+        os.close(cur)
+
+def reclaim_tree(root_fd, dfd, rel_parts):
+    os.fchown(dfd, 0, 0)
+    dst = os.fstat(dfd)
+    os.fchmod(dfd, norm_go_w_a_rx(dst.st_mode, True))
+    for name in os.listdir(dfd):
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        child_rel = rel_parts + (name,)
+        if stat.S_ISLNK(st.st_mode):
+            target = os.readlink(name, dir_fd=dfd)
+            if child_rel == ("vault",) and target == vault_target:
+                os.chown(name, 0, 0, dir_fd=dfd, follow_symlinks=False)
+                continue
+            if not verify_relative_target_confined(root_fd, rel_parts, target):
+                raise RuntimeError(f"forbidden symlink in build dir: {'/'.join(child_rel)} -> {target}")
+            os.chown(name, 0, 0, dir_fd=dfd, follow_symlinks=False)
+        elif stat.S_ISDIR(st.st_mode):
+            sub_fd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=dfd)
+            try:
+                reclaim_tree(root_fd, sub_fd, child_rel)
+            finally:
+                os.close(sub_fd)
+        elif stat.S_ISREG(st.st_mode):
+            ffd = os.open(name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=dfd)
+            try:
+                fst = os.fstat(ffd)
+                if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1:
+                    raise RuntimeError(f"non-regular or hardlinked file in build dir: {'/'.join(child_rel)}")
+                os.fchown(ffd, 0, 0)
+                os.fchmod(ffd, norm_go_w_a_rx(fst.st_mode, False))
+            finally:
+                os.close(ffd)
+        else:
+            raise RuntimeError(f"forbidden special file in build dir: {'/'.join(child_rel)}")
+
+def fchown_tree_no_symlinks(dfd, uid, gid):
+    os.fchown(dfd, uid, gid)
+    for name in os.listdir(dfd):
+        st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode):
+            raise RuntimeError(f"forbidden symlink in writable dir: {name}")
+        if stat.S_ISDIR(st.st_mode):
+            sub_fd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=dfd)
+            try:
+                fchown_tree_no_symlinks(sub_fd, uid, gid)
+            finally:
+                os.close(sub_fd)
+        elif stat.S_ISREG(st.st_mode):
+            ffd = os.open(name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=dfd)
+            try:
+                fst = os.fstat(ffd)
+                if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1:
+                    raise RuntimeError(f"non-regular or hardlinked file in writable dir: {name}")
+                os.fchown(ffd, uid, gid)
+            finally:
+                os.close(ffd)
+        else:
+            raise RuntimeError(f"forbidden special file in writable dir: {name}")
+
+build_fd = open_dir_nofollow(build_root)
+try:
+    try:
+        os.stat(".build-home", dir_fd=build_fd, follow_symlinks=False)
+        has_build_home = True
+    except FileNotFoundError:
+        has_build_home = False
+    if has_build_home:
+        rmtree_dirfd(build_fd, ".build-home")
+    try:
+        os.stat(".runtime", dir_fd=build_fd, follow_symlinks=False)
+        has_runtime = True
+    except FileNotFoundError:
+        has_runtime = False
+    if has_runtime:
+        raise RuntimeError("unexpected .runtime directory created during unprivileged build")
+    reclaim_tree(build_fd, build_fd, ())
+
+    next_fd = os.open(".next", os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=build_fd)
+    try:
+        try:
+            os.mkdir("cache", 0o750, dir_fd=next_fd)
+        except FileExistsError:
+            cache_exists = True
+        else:
+            cache_exists = True
+        if cache_exists:
+            cache_fd = os.open("cache", os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=next_fd)
+            try:
+                fchown_tree_no_symlinks(cache_fd, palate_uid, palate_gid)
+            finally:
+                os.close(cache_fd)
+    finally:
+        os.close(next_fd)
+finally:
+    os.close(build_fd)
+
+data_fd = open_dir_nofollow(data_root)
+try:
+    fchown_tree_no_symlinks(data_fd, palate_uid, palate_gid)
+finally:
+    os.close(data_fd)
+PYFIN
+
+mv "$RUNTIME_STAGE" "$BUILD_DIR/.runtime"
+RUNTIME_STAGE=""
 
 if [[ -d "$APP_DIR" ]]; then
     mv "$APP_DIR" "$BACKUP_DIR/app"

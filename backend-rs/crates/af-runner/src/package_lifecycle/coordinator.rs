@@ -19,8 +19,178 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+/// Scoped SQLite handle that executes synchronous DB operations and `sqlite3_close()`
+/// (including `-wal`/`-shm`/`-journal` sidecar checkpoint/unlink) under the immutable open-time
+/// DB parent directory owner's Linux per-thread `fsuid`/`fsgid` when running as `root`.
+pub(super) struct OwnerScopedConnection {
+    conn: Option<Connection>,
+    db_path: Option<PathBuf>,
+    owner_creds: Option<(u32, u32)>,
+}
+
+impl OwnerScopedConnection {
+    pub(super) fn open_hardened(path: &Path, read_write: bool) -> Result<Self> {
+        let owner_creds = af_release::fs_security::resolve_path_owner_fsuid(path)?;
+        let conn = match owner_creds {
+            Some((uid, gid)) => af_release::fs_security::with_uid_gid_fsuid(uid, gid, || {
+                af_release::fs_security::open_sqlite_nofollow_hardened(path, read_write)
+            })?,
+            None => af_release::fs_security::open_sqlite_nofollow_hardened(path, read_write)?,
+        };
+        Ok(Self {
+            conn: Some(conn),
+            db_path: Some(path.to_path_buf()),
+            owner_creds,
+        })
+    }
+
+    fn new(conn: Connection) -> Result<Self> {
+        let db_path = conn
+            .path()
+            .filter(|p| !p.is_empty() && *p != ":memory:")
+            .map(PathBuf::from);
+        let owner_creds = match db_path.as_deref() {
+            Some(path) => match af_release::fs_security::resolve_path_owner_fsuid(path) {
+                Ok(creds) => creds,
+                Err(err) => {
+                    #[cfg(unix)]
+                    if unsafe { libc::geteuid() } == 0 {
+                        tracing::error!(
+                            path = %path.display(),
+                            "refusing to close SQLite handle as root after path owner validation failure"
+                        );
+                        std::mem::forget(conn);
+                    }
+                    return Err(err.into());
+                }
+            },
+            None => None,
+        };
+        Ok(Self {
+            conn: Some(conn),
+            db_path,
+            owner_creds,
+        })
+    }
+
+    fn run_scoped<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T>,
+    {
+        match (self.owner_creds, self.db_path.as_deref()) {
+            (Some((uid, gid)), _) => {
+                let mut outcome: Option<Result<T>> = None;
+                af_release::fs_security::with_uid_gid_fsuid(uid, gid, || {
+                    outcome = Some(f());
+                    Ok(())
+                })?;
+                outcome.expect("closure executed")
+            }
+            (None, Some(path)) => {
+                let mut outcome: Option<Result<T>> = None;
+                af_release::fs_security::with_path_owner_fsuid(path, || {
+                    outcome = Some(f());
+                    Ok(())
+                })?;
+                outcome.expect("closure executed")
+            }
+            (None, None) => f(),
+        }
+    }
+
+    fn with_db<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let conn = self.conn.as_ref().expect("connection active until Drop");
+        self.run_scoped(|| f(conn))
+    }
+
+    fn with_db_mut<T, F>(&mut self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Connection) -> Result<T>,
+    {
+        let owner_creds = self.owner_creds;
+        let db_path = self.db_path.clone();
+        let conn = self.conn.as_mut().expect("connection active until Drop");
+        match (owner_creds, db_path.as_deref()) {
+            (Some((uid, gid)), _) => {
+                let mut outcome: Option<Result<T>> = None;
+                af_release::fs_security::with_uid_gid_fsuid(uid, gid, || {
+                    outcome = Some(f(conn));
+                    Ok(())
+                })?;
+                outcome.expect("closure executed")
+            }
+            (None, Some(path)) => {
+                let mut outcome: Option<Result<T>> = None;
+                af_release::fs_security::with_path_owner_fsuid(path, || {
+                    outcome = Some(f(conn));
+                    Ok(())
+                })?;
+                outcome.expect("closure executed")
+            }
+            (None, None) => f(conn),
+        }
+    }
+
+    fn db_path_str(&self) -> Option<&str> {
+        self.db_path.as_deref().and_then(|p| p.to_str())
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for OwnerScopedConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn.as_ref().expect("connection active until Drop")
+    }
+}
+
+impl Drop for OwnerScopedConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let mut held = Some(conn);
+            match (self.owner_creds, self.db_path.as_deref()) {
+                (Some((uid, gid)), _) => {
+                    let _ = af_release::fs_security::with_uid_gid_fsuid(uid, gid, || {
+                        drop(held.take());
+                        Ok(())
+                    });
+                    if let Some(unclosed) = held {
+                        // Never invoke `sqlite3_close()` at fsuid=0 if credential drop failed.
+                        tracing::error!(
+                            uid,
+                            gid,
+                            "refusing to close unprivileged SQLite handle as root after fsuid failure"
+                        );
+                        std::mem::forget(unclosed);
+                    }
+                }
+                (None, Some(path)) => {
+                    let _ = af_release::fs_security::with_path_owner_fsuid(path, || {
+                        drop(held.take());
+                        Ok(())
+                    });
+                    if let Some(unclosed) = held {
+                        tracing::error!(
+                            path = %path.display(),
+                            "refusing to close SQLite handle as root after path owner validation failure"
+                        );
+                        std::mem::forget(unclosed);
+                    }
+                }
+                (None, None) => {
+                    drop(held);
+                }
+            }
+        }
+    }
+}
+
 pub(super) struct CoordinatedOperation {
-    pub(super) conn: Connection,
+    pub(super) conn: OwnerScopedConnection,
     pub(super) request: PackageRunnerRequest,
     package: Package,
     units: Vec<String>,
@@ -28,11 +198,18 @@ pub(super) struct CoordinatedOperation {
     _owner: OwnerLease,
 }
 
-fn effective_fs_root_for_conn(conn: &Connection) -> Option<std::path::PathBuf> {
+impl Drop for CoordinatedOperation {
+    fn drop(&mut self) {
+        let owner = &mut self._owner;
+        let _ = self.conn.with_db(|conn| owner.retire_with_conn(conn));
+    }
+}
+
+fn effective_fs_root_for_db_path(db_path: Option<&str>) -> Option<std::path::PathBuf> {
     if let Some(root) = crate::PackageExecutionEnv::default().fs_root {
         return Some(root);
     }
-    conn.path().map(Path::new).and_then(|p| {
+    db_path.map(Path::new).and_then(|p| {
         p.ancestors().find_map(|anc| {
             let rel = p.strip_prefix(anc).ok()?;
             if anc != Path::new("/")
@@ -49,8 +226,19 @@ fn effective_fs_root_for_conn(conn: &Connection) -> Option<std::path::PathBuf> {
 }
 
 impl CoordinatedOperation {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn admit(
-        mut conn: Connection,
+        conn: Connection,
+        request: PackageRunnerRequest,
+        package: Package,
+        units: Vec<String>,
+    ) -> Result<Self> {
+        let conn = OwnerScopedConnection::new(conn)?;
+        Self::admit_scoped(conn, request, package, units)
+    }
+
+    pub(super) fn admit_scoped(
+        mut conn: OwnerScopedConnection,
         mut request: PackageRunnerRequest,
         package: Package,
         mut units: Vec<String>,
@@ -79,8 +267,11 @@ impl CoordinatedOperation {
                 request.app_port
             );
         }
-        conn.busy_timeout(Duration::from_secs(5))?;
-        lifecycle::initialize_schema(&conn)?;
+        conn.with_db(|c| {
+            c.busy_timeout(Duration::from_secs(5))?;
+            lifecycle::initialize_schema(c)?;
+            Ok(())
+        })?;
         if matches!(request.action.as_str(), "install" | "reinstall") {
             let conflicting_dns = match request.package_id.as_str() {
                 "pihole" => Some(("adguardhome", "AdGuard Home", "/install/.adguardhome.lock")),
@@ -110,8 +301,9 @@ impl CoordinatedOperation {
             }
         }
         if request.action != "remove" {
-            let fs_root = effective_fs_root_for_conn(&conn);
-            let mut reserved = af_db::list_reserved_ports_excluding(&conn, &request.package_id)?;
+            let fs_root = effective_fs_root_for_db_path(conn.db_path_str());
+            let mut reserved =
+                conn.with_db(|c| af_db::list_reserved_ports_excluding(c, &request.package_id))?;
             reserved.extend(crate::rclone_extra_reserved_ports(
                 &request.package_id,
                 fs_root.as_deref(),
@@ -119,7 +311,7 @@ impl CoordinatedOperation {
             let candidate_port = if request.app_port > 0 {
                 Some(request.app_port)
             } else {
-                af_db::load_lifecycle_ingress(&conn, &request.package_id)?
+                conn.with_db(|c| af_db::load_lifecycle_ingress(c, &request.package_id))?
                     .map(|cfg| cfg.listen_port)
                     .filter(|p| *p > 0)
             };
@@ -150,11 +342,13 @@ impl CoordinatedOperation {
                     );
                     Some(request.secondary_port)
                 } else {
-                    af_db::load_lifecycle_secondary_port(
-                        &conn,
-                        "rclone",
-                        af_models::RCLONE_RC_API_PORT_ROLE,
-                    )?
+                    conn.with_db(|c| {
+                        af_db::load_lifecycle_secondary_port(
+                            c,
+                            "rclone",
+                            af_models::RCLONE_RC_API_PORT_ROLE,
+                        )
+                    })?
                     .or_else(|| {
                         crate::extract_rclone_runtime_api_port_for_root(fs_root.as_deref())
                             .map(i32::from)
@@ -208,15 +402,17 @@ impl CoordinatedOperation {
         ) {
             anyhow::bail!("Cannot start {}: {}", request.action, reason);
         }
-        let owner = lifecycle::admit_job_with_target(
-            &mut conn,
-            &request.package_id,
-            &request.lifecycle_job_id,
-            &request.action,
-            &started_at,
-            &units,
-            request.expected_target_version.as_deref(),
-        )?;
+        let owner = conn.with_db_mut(|c| {
+            lifecycle::admit_job_with_target(
+                c,
+                &request.package_id,
+                &request.lifecycle_job_id,
+                &request.action,
+                &started_at,
+                &units,
+                request.expected_target_version.as_deref(),
+            )
+        })?;
         Ok(Self {
             conn,
             request,
@@ -252,11 +448,14 @@ impl CoordinatedOperation {
         .unwrap_or(false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_port_in_tx(
         request: &PackageRunnerRequest,
         package: &Package,
-        fs_root: Option<&Path>,
         installed_or_legacy: bool,
+        extra_reserved: &std::collections::BTreeSet<i32>,
+        pre_runtime_port: i32,
+        pre_receipt_port: Option<i32>,
         conn: &Connection,
         base_reserved: &std::collections::BTreeSet<i32>,
         backend: &impl LifecycleBackend,
@@ -265,17 +464,14 @@ impl CoordinatedOperation {
             return Ok(0);
         }
         let mut reserved = base_reserved.clone();
-        reserved.extend(crate::rclone_extra_reserved_ports(
-            &request.package_id,
-            fs_root,
-        ));
+        reserved.extend(extra_reserved.iter().copied());
         let ingress = af_db::load_lifecycle_ingress(conn, &request.package_id)?;
         let saved = ingress
             .as_ref()
             .map(|config| config.listen_port)
             .unwrap_or(0);
         if request.action == "update" {
-            let runtime = backend.runtime_port(&request.package_id);
+            let runtime = pre_runtime_port;
             if runtime > 0 {
                 anyhow::ensure!(
                     (1024..=65535).contains(&runtime),
@@ -331,7 +527,7 @@ impl CoordinatedOperation {
             return Ok(saved);
         }
         if installed_or_legacy {
-            let runtime = backend.runtime_port(&request.package_id);
+            let runtime = pre_runtime_port;
             if runtime > 0 {
                 anyhow::ensure!(
                     (1024..=65535).contains(&runtime),
@@ -341,12 +537,7 @@ impl CoordinatedOperation {
                     return Ok(runtime);
                 }
             }
-            let env_cfg = crate::PackageExecutionEnv::default();
-            if let Ok(Some(receipt_port)) = af_models::read_package_receipt_port(
-                &package.name,
-                Some(&package.lock_file),
-                env_cfg.fs_root.as_deref(),
-            ) {
+            if let Some(receipt_port) = pre_receipt_port {
                 if (1024..=65535).contains(&receipt_port)
                     && !reserved.contains(&receipt_port)
                     && (request.action == "reinstall" || backend.available_port(receipt_port))
@@ -389,27 +580,55 @@ impl CoordinatedOperation {
         }
         let fs_root = self.effective_fs_root();
         let installed_or_legacy = self.is_installed_on_disk() || self.has_legacy_upgrade_receipt();
+        // Pre-resolve all host filesystem config/receipt reads at effective credentials BEFORE
+        // dropping thread fsuid for SQLite writes so private service-owned configs (0600/0750)
+        // remain readable by root runner.
+        let extra_reserved =
+            crate::rclone_extra_reserved_ports(&self.request.package_id, fs_root.as_deref());
+        let pre_runtime_port = if self.request.action == "update" || installed_or_legacy {
+            backend.runtime_port(&self.request.package_id)
+        } else {
+            0
+        };
+        let pre_receipt_port = if installed_or_legacy {
+            let env_cfg = crate::PackageExecutionEnv::default();
+            af_models::read_package_receipt_port(
+                &self.package.name,
+                Some(&self.package.lock_file),
+                env_cfg.fs_root.as_deref(),
+            )
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
         let request = &self.request;
         let package = &self.package;
-        let chosen = af_db::reserve_lifecycle_port_in_tx(
-            &mut self.conn,
-            &request.package_id,
-            &request.lifecycle_job_id,
-            Some(&request.action),
-            |tx, reserved| {
-                let port = Self::resolve_port_in_tx(
-                    request,
-                    package,
-                    fs_root.as_deref(),
-                    installed_or_legacy,
-                    tx,
-                    reserved,
-                    backend,
-                )?;
-                Ok((port > 0).then_some(port))
-            },
-        )?
-        .unwrap_or(0);
+        let chosen = self
+            .conn
+            .with_db_mut(|conn| {
+                af_db::reserve_lifecycle_port_in_tx(
+                    conn,
+                    &request.package_id,
+                    &request.lifecycle_job_id,
+                    Some(&request.action),
+                    |tx, reserved| {
+                        let port = Self::resolve_port_in_tx(
+                            request,
+                            package,
+                            installed_or_legacy,
+                            &extra_reserved,
+                            pre_runtime_port,
+                            pre_receipt_port,
+                            tx,
+                            reserved,
+                            backend,
+                        )?;
+                        Ok((port > 0).then_some(port))
+                    },
+                )
+            })?
+            .unwrap_or(0);
         if let Some(res) = lifecycle::port_resource(chosen) {
             if !self.units.contains(&res) {
                 self.units.push(res);
@@ -479,7 +698,7 @@ impl CoordinatedOperation {
 
 impl CoordinatedOperation {
     fn effective_fs_root(&self) -> Option<std::path::PathBuf> {
-        effective_fs_root_for_conn(&self.conn)
+        effective_fs_root_for_db_path(self.conn.db_path_str())
     }
 
     #[cfg(test)]
@@ -766,21 +985,23 @@ impl CoordinatedOperation {
                     .map(sanitize_lifecycle_field);
                 let mut finish_res = Ok(());
                 for _ in 0..3 {
-                    finish_res = lifecycle::finish_job_with_diagnostics(
-                        &self.conn,
-                        &self.request.package_id,
-                        &self.request.lifecycle_job_id,
-                        &self.request.action,
-                        false,
-                        lifecycle::LifecycleJobDiagnostics {
-                            failure_category: "preflight",
-                            failed_stage: Some("preflight_receipt_snapshot"),
-                            exit_code: Some(1),
-                            sanitized_summary: Some(&sanitized_err),
-                            expected_target_version: sanitized_expected.as_deref(),
-                            ..Default::default()
-                        },
-                    );
+                    finish_res = self.conn.with_db(|conn| {
+                        lifecycle::finish_job_with_diagnostics(
+                            conn,
+                            &self.request.package_id,
+                            &self.request.lifecycle_job_id,
+                            &self.request.action,
+                            false,
+                            lifecycle::LifecycleJobDiagnostics {
+                                failure_category: "preflight",
+                                failed_stage: Some("preflight_receipt_snapshot"),
+                                exit_code: Some(1),
+                                sanitized_summary: Some(&sanitized_err),
+                                expected_target_version: sanitized_expected.as_deref(),
+                                ..Default::default()
+                            },
+                        )
+                    });
                     if finish_res.is_ok() {
                         break;
                     }
@@ -810,21 +1031,23 @@ impl CoordinatedOperation {
                     .map(sanitize_lifecycle_field);
                 let mut finish_res = Ok(());
                 for _ in 0..3 {
-                    finish_res = lifecycle::finish_job_with_diagnostics(
-                        &self.conn,
-                        &self.request.package_id,
-                        &self.request.lifecycle_job_id,
-                        &self.request.action,
-                        false,
-                        lifecycle::LifecycleJobDiagnostics {
-                            failure_category: "preflight",
-                            failed_stage: Some("preflight_receipt_snapshot"),
-                            exit_code: Some(1),
-                            sanitized_summary: Some(&sanitized_err),
-                            expected_target_version: sanitized_expected.as_deref(),
-                            ..Default::default()
-                        },
-                    );
+                    finish_res = self.conn.with_db(|conn| {
+                        lifecycle::finish_job_with_diagnostics(
+                            conn,
+                            &self.request.package_id,
+                            &self.request.lifecycle_job_id,
+                            &self.request.action,
+                            false,
+                            lifecycle::LifecycleJobDiagnostics {
+                                failure_category: "preflight",
+                                failed_stage: Some("preflight_receipt_snapshot"),
+                                exit_code: Some(1),
+                                sanitized_summary: Some(&sanitized_err),
+                                expected_target_version: sanitized_expected.as_deref(),
+                                ..Default::default()
+                            },
+                        )
+                    });
                     if finish_res.is_ok() {
                         break;
                     }
@@ -1123,29 +1346,32 @@ impl CoordinatedOperation {
                 } else {
                     "configuration"
                 };
-                let base: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT COALESCE(base_domain,'') FROM settings WHERE id=1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
+                let (base, planned_ingress) = self.conn.with_db(|conn| {
+                    let base: Option<String> = conn
+                        .query_row(
+                            "SELECT COALESCE(base_domain,'') FROM settings WHERE id=1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    let base_domain = base.as_deref().unwrap_or("");
+                    let planned_ingress = if self.request.action != "remove"
+                        && (1024..=65535).contains(&self.request.app_port)
+                    {
+                        let existing =
+                            af_db::load_lifecycle_ingress(conn, &self.request.package_id)?;
+                        af_db::plan_lifecycle_ingress(
+                            &self.request.package_id,
+                            self.request.app_port,
+                            base_domain,
+                            existing.as_ref(),
+                        )?
+                    } else {
+                        None
+                    };
+                    Ok((base, planned_ingress))
+                })?;
                 let base_domain = base.as_deref().unwrap_or("");
-                let planned_ingress = if self.request.action != "remove"
-                    && (1024..=65535).contains(&self.request.app_port)
-                {
-                    let existing =
-                        af_db::load_lifecycle_ingress(&self.conn, &self.request.package_id)?;
-                    af_db::plan_lifecycle_ingress(
-                        &self.request.package_id,
-                        self.request.app_port,
-                        base_domain,
-                        existing.as_ref(),
-                    )?
-                } else {
-                    None
-                };
                 if self.request.action != "remove"
                     && (1024..=65535).contains(&self.request.app_port)
                 {
@@ -1201,16 +1427,23 @@ impl CoordinatedOperation {
                 } else {
                     None
                 };
-                af_db::synchronize_lifecycle_ingress_with_secondary_port(
-                    &mut self.conn,
-                    &self.request.package_id,
-                    &self.request.action,
-                    &self.request.lifecycle_job_id,
-                    self.request.app_port,
-                    secondary_update,
-                    self.request.delete_data,
-                    base_domain,
-                )?;
+                let package_id_for_sync = self.request.package_id.clone();
+                let action_for_sync = self.request.action.clone();
+                let job_id_for_sync = self.request.lifecycle_job_id.clone();
+                let app_port_for_sync = self.request.app_port;
+                let delete_data_for_sync = self.request.delete_data;
+                self.conn.with_db_mut(|conn| {
+                    af_db::synchronize_lifecycle_ingress_with_secondary_port(
+                        conn,
+                        &package_id_for_sync,
+                        &action_for_sync,
+                        &job_id_for_sync,
+                        app_port_for_sync,
+                        secondary_update,
+                        delete_data_for_sync,
+                        base_domain,
+                    )
+                })?;
                 post_commit_ingress = planned_ingress;
                 Ok(())
             }
@@ -1324,66 +1557,69 @@ impl CoordinatedOperation {
             .as_deref()
             .map(sanitize_lifecycle_field);
         let sanitized_achieved = achieved_ver.as_deref().map(sanitize_lifecycle_field);
-        lifecycle::finish_job_with_diagnostics(
-            &self.conn,
-            &self.request.package_id,
-            &self.request.lifecycle_job_id,
-            &self.request.action,
-            success,
-            lifecycle::LifecycleJobDiagnostics {
-                failure_category: failure,
-                failed_stage: if target_match_failed {
-                    Some("target_certification_after_install_commit")
-                } else if restore_failed {
-                    Some("service_restoration")
-                } else if execution.is_err() {
-                    Some(failure)
-                } else if receipt_restore_error.is_some() {
-                    Some("rollback")
-                } else {
-                    None
-                },
-                exit_code: if target_match_failed
-                    || restore_failed
-                    || execution.is_err()
-                    || receipt_restore_error.is_some()
-                {
-                    Some(1)
-                } else {
-                    None
-                },
-                sanitized_summary: sanitized_diag_summary
-                    .as_deref()
-                    .or(if target_match_failed {
-                        Some("Post-execution installed version did not match expected target")
+        let finished_at = self.conn.with_db(|conn| {
+            lifecycle::finish_job_with_diagnostics(
+                conn,
+                &self.request.package_id,
+                &self.request.lifecycle_job_id,
+                &self.request.action,
+                success,
+                lifecycle::LifecycleJobDiagnostics {
+                    failure_category: failure,
+                    failed_stage: if target_match_failed {
+                        Some("target_certification_after_install_commit")
                     } else if restore_failed {
-                        Some("Service restart verification failed")
+                        Some("service_restoration")
                     } else if execution.is_err() {
-                        Some("Lifecycle execution failed")
+                        Some(failure)
                     } else if receipt_restore_error.is_some() {
-                        Some("Receipt restoration failed")
+                        Some("rollback")
                     } else {
                         None
-                    }),
-                expected_target_version: sanitized_expected.as_deref(),
-                achieved_version: sanitized_achieved.as_deref(),
-                recovery_state: prior_state_recovered
-                    .then_some(lifecycle::RECOVERY_STATE_PRIOR_VERIFIED),
-                retention_state: (success && self.request.action == "remove").then_some(
-                    if self.request.delete_data {
-                        lifecycle::RETENTION_STATE_PURGED
-                    } else {
-                        lifecycle::RETENTION_STATE_RETAINED
                     },
-                ),
-                ..Default::default()
-            },
-        )?;
-        let finished_at = self.conn.query_row(
-            "SELECT finished_at FROM package_lifecycle_jobs WHERE package_id=?1 AND job_id=?2",
-            rusqlite::params![self.request.package_id, self.request.lifecycle_job_id],
-            |row| row.get(0),
-        )?;
+                    exit_code: if target_match_failed
+                        || restore_failed
+                        || execution.is_err()
+                        || receipt_restore_error.is_some()
+                    {
+                        Some(1)
+                    } else {
+                        None
+                    },
+                    sanitized_summary: sanitized_diag_summary.as_deref().or(
+                        if target_match_failed {
+                            Some("Post-execution installed version did not match expected target")
+                        } else if restore_failed {
+                            Some("Service restart verification failed")
+                        } else if execution.is_err() {
+                            Some("Lifecycle execution failed")
+                        } else if receipt_restore_error.is_some() {
+                            Some("Receipt restoration failed")
+                        } else {
+                            None
+                        },
+                    ),
+                    expected_target_version: sanitized_expected.as_deref(),
+                    achieved_version: sanitized_achieved.as_deref(),
+                    recovery_state: prior_state_recovered
+                        .then_some(lifecycle::RECOVERY_STATE_PRIOR_VERIFIED),
+                    retention_state: (success && self.request.action == "remove").then_some(
+                        if self.request.delete_data {
+                            lifecycle::RETENTION_STATE_PURGED
+                        } else {
+                            lifecycle::RETENTION_STATE_RETAINED
+                        },
+                    ),
+                    ..Default::default()
+                },
+            )?;
+            let finished_at: String = conn.query_row(
+                "SELECT finished_at FROM package_lifecycle_jobs WHERE package_id=?1 AND job_id=?2",
+                rusqlite::params![self.request.package_id, self.request.lifecycle_job_id],
+                |row| row.get(0),
+            )?;
+            Ok(finished_at)
+        })?;
         Ok(LifecycleReceipt {
             job_id: self.request.lifecycle_job_id.clone(),
             package_id: self.request.package_id.clone(),

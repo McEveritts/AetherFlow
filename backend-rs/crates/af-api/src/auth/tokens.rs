@@ -1,4 +1,5 @@
 use crate::ws::{build_set_cookie, extract_client_ip, extract_cookie};
+use af_models::secret_zeroize::{SecretBytes, SecretString};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use chrono::Utc;
@@ -438,38 +439,88 @@ pub fn secure_cookie_enabled() -> bool {
         .unwrap_or(true)
 }
 
-pub fn validate_startup_jwt_secret() -> anyhow::Result<()> {
-    let secret = env::var("JWT_SECRET").unwrap_or_default();
-    if secret.trim().is_empty() {
+/// Minimum accepted `JWT_SECRET` length in bytes after trimming surrounding whitespace.
+pub(crate) const MIN_JWT_SECRET_BYTES: usize = 32;
+
+/// Validates a candidate HS256 signing secret (`SEC-06`).
+///
+/// Rejects secrets that are shorter than [`MIN_JWT_SECRET_BYTES`] once surrounding whitespace is
+/// trimmed (so `"short" + 40 spaces` cannot pass), and secrets containing ASCII control characters
+/// (`< 0x20`, including `\r`, `\n`, `\t`, or `0x7f`), which indicate a mangled env file or header
+/// injection payload. Error messages never echo the secret.
+pub(crate) fn validate_jwt_secret_value(secret: &str) -> anyhow::Result<()> {
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
         anyhow::bail!(
             "FATAL: JWT_SECRET environment variable is not set. Refusing to start without a persistent signing key."
         );
     }
-    if secret.len() < 32 {
+    if let Some(pos) = secret.bytes().position(|b| b < 0x20 || b == 0x7f) {
         anyhow::bail!(
-            "FATAL: JWT_SECRET must be at least 32 bytes long (got {} bytes).",
-            secret.len()
+            "FATAL: JWT_SECRET must not contain ASCII control characters or newlines (found one at byte offset {pos})."
+        );
+    }
+    if trimmed.len() < MIN_JWT_SECRET_BYTES {
+        anyhow::bail!(
+            "FATAL: JWT_SECRET must be at least {MIN_JWT_SECRET_BYTES} bytes long excluding surrounding whitespace (got {} bytes).",
+            trimmed.len()
         );
     }
     Ok(())
 }
 
-pub fn jwt_secret_bytes() -> Vec<u8> {
-    let secret = env::var("JWT_SECRET").unwrap_or_default();
-    if !secret.is_empty() {
-        return secret.into_bytes();
+pub fn validate_startup_jwt_secret() -> anyhow::Result<()> {
+    let secret = SecretString::new(env::var("JWT_SECRET").unwrap_or_default());
+    validate_jwt_secret_value(secret.expose_secret())
+}
+
+/// HS256 signing key material returned by [`jwt_secret_bytes`].
+///
+/// Owns a zeroize-on-drop [`SecretBytes`] (full `0..capacity` wipe) and dereferences to `[u8]`,
+/// so existing `&jwt_secret_bytes()` call sites keep compiling while every short-lived copy of the
+/// signing key is wiped as soon as it goes out of scope. `Debug` is redacted.
+#[derive(Clone)]
+pub struct JwtSigningKey(SecretBytes);
+
+impl std::ops::Deref for JwtSigningKey {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.0.expose_secret()
     }
-    static EPHEMERAL_JWT_SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    EPHEMERAL_JWT_SECRET
-        .get_or_init(|| {
-            let mut bytes = vec![0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut bytes);
-            tracing::error!(
-                "JWT_SECRET is unset; refusing the published dev fallback and using an ephemeral process secret"
-            );
-            bytes
-        })
-        .clone()
+}
+
+impl AsRef<[u8]> for JwtSigningKey {
+    fn as_ref(&self) -> &[u8] {
+        self.0.expose_secret()
+    }
+}
+
+impl std::fmt::Debug for JwtSigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JwtSigningKey([REDACTED])")
+    }
+}
+
+pub fn jwt_secret_bytes() -> JwtSigningKey {
+    // `SecretBytes::from(SecretString)` moves the env allocation without copying it.
+    let secret = SecretString::new(env::var("JWT_SECRET").unwrap_or_default());
+    if !secret.is_empty() {
+        return JwtSigningKey(SecretBytes::from(secret));
+    }
+    static EPHEMERAL_JWT_SECRET: std::sync::OnceLock<SecretBytes> = std::sync::OnceLock::new();
+    JwtSigningKey(
+        EPHEMERAL_JWT_SECRET
+            .get_or_init(|| {
+                let mut bytes = vec![0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut bytes);
+                tracing::error!(
+                    "JWT_SECRET is unset; refusing the published dev fallback and using an ephemeral process secret"
+                );
+                SecretBytes::new(bytes)
+            })
+            .clone(),
+    )
 }
 
 pub fn client_fingerprint(user_agent: &str) -> String {
@@ -640,4 +691,70 @@ pub fn decode_session_claims(token: &str, allow_expired: bool) -> anyhow::Result
         "Absolute session lifetime exceeded"
     );
     Ok(data.claims)
+}
+
+#[cfg(test)]
+mod jwt_secret_hardening_tests {
+    use super::*;
+
+    #[test]
+    fn sec06_rejects_short_or_whitespace_padded_secrets() {
+        assert!(validate_jwt_secret_value("").is_err());
+        assert!(validate_jwt_secret_value("                                        ").is_err());
+        assert!(validate_jwt_secret_value("short").is_err());
+        let padded = format!("{}{}", "a".repeat(31), " ".repeat(40));
+        assert!(padded.len() >= 32);
+        let err = validate_jwt_secret_value(&padded).unwrap_err().to_string();
+        assert!(err.contains("at least 32 bytes"), "{err}");
+        assert!(
+            !err.contains(&"a".repeat(31)),
+            "error must not echo the secret"
+        );
+        let leading = format!("{}{}", " ".repeat(16), "b".repeat(20));
+        assert!(validate_jwt_secret_value(&leading).is_err());
+    }
+
+    #[test]
+    fn sec06_accepts_strong_secrets_including_interior_spaces() {
+        assert!(validate_jwt_secret_value("test-jwt-secret-at-least-32-bytes-long").is_ok());
+        assert!(validate_jwt_secret_value(&"x".repeat(32)).is_ok());
+        assert!(validate_jwt_secret_value("correct horse battery staple + extra entropy").is_ok());
+        assert!(validate_jwt_secret_value(&format!("  {}  ", "k".repeat(32))).is_ok());
+    }
+
+    #[test]
+    fn sec06_rejects_control_characters_and_newlines() {
+        let base = "s".repeat(40);
+        for bad in [
+            format!("{base}\n"),
+            format!("{base}\r"),
+            format!("{base}\r\n"),
+            format!("abc\n{base}"),
+            format!("{base}\t"),
+            format!("{base}\0"),
+            format!("{base}\u{1b}"),
+            format!("{base}\u{7f}"),
+            format!("{base}\u{1f}"),
+        ] {
+            let err = validate_jwt_secret_value(&bad).unwrap_err().to_string();
+            assert!(err.contains("control characters"), "{bad:?}: {err}");
+            assert!(!err.contains(&base), "error must not echo the secret");
+        }
+    }
+
+    #[test]
+    fn sec05_jwt_signing_key_is_redacted_and_derefs_to_bytes() {
+        let key = JwtSigningKey(SecretBytes::from(
+            &b"super-secret-signing-key-material!!"[..],
+        ));
+        let rendered = format!("{key:?}");
+        assert!(!rendered.contains("super-secret"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"));
+        let as_slice: &[u8] = &key;
+        assert_eq!(as_slice, b"super-secret-signing-key-material!!");
+        assert_eq!(key.as_ref(), as_slice);
+        // Deref coercion keeps `&jwt_secret_bytes()` usable wherever `&[u8]` is expected.
+        let _ = EncodingKey::from_secret(&key);
+        assert!(!jwt_secret_bytes().is_empty());
+    }
 }

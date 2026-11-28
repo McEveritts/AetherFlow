@@ -55,6 +55,7 @@ mod adguard_dns;
 pub mod blueprint;
 pub mod bounded_command;
 pub mod job_receipts;
+#[cfg(test)]
 mod legacy_stream_output;
 #[cfg(all(test, unix))]
 mod lifecycle_tests;
@@ -282,11 +283,138 @@ pub fn is_runner_available() -> bool {
     }
 }
 
+#[cfg(unix)]
+pub(crate) fn runner_is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn runner_is_root() -> bool {
+    false
+}
+
+/// Verifies that a resolved runner executable or helper script is a regular file,
+/// and when executing as root (`running_as_root == true`), verifies root ownership
+/// (`uid == 0`, including any leaf symlink itself), non-group/world-writable permissions
+/// (`mode & 0o022 == 0`), and root-owned non-group/world-writable non-symlink ancestor
+/// directories (allowing only the confined `<root>/opt/AetherFlow/current -> releases/<epoch>`
+/// release symlink) (`SEC-03`).
+pub(crate) fn is_trusted_runner_target(path: &Path, running_as_root: bool) -> bool {
+    if !running_as_root {
+        return path.is_file();
+    }
+    #[cfg(unix)]
+    {
+        is_trusted_runner_target_root_depth(path, 4)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+#[cfg(unix)]
+fn normalize_lexical_target_against_symlink_free_parent(
+    parent: &Path,
+    raw_target: &Path,
+) -> Option<PathBuf> {
+    use std::path::Component;
+
+    let combined = if raw_target.is_absolute() {
+        raw_target.to_path_buf()
+    } else {
+        parent.join(raw_target)
+    };
+    let mut normalized = PathBuf::new();
+    for comp in combined.components() {
+        match comp {
+            Component::RootDir => normalized.push(Component::RootDir.as_os_str()),
+            Component::Prefix(p) => normalized.push(p.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+#[cfg(unix)]
+fn is_trusted_runner_target_root_depth(path: &Path, remaining_hops: u8) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+
+    let resolved = match resolve_managed_current_release_path(path) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    if !resolved.is_absolute()
+        || resolved
+            .components()
+            .any(|comp| matches!(comp, Component::CurDir | Component::ParentDir))
+    {
+        return false;
+    }
+    if let Some(parent) = resolved.parent() {
+        if !parent.as_os_str().is_empty() {
+            let mut cursor = PathBuf::new();
+            for comp in parent.components() {
+                cursor.push(comp.as_os_str());
+                if matches!(comp, Component::RootDir | Component::Prefix(_)) {
+                    continue;
+                }
+                let Ok(anc_meta) = fs::symlink_metadata(&cursor) else {
+                    return false;
+                };
+                if anc_meta.file_type().is_symlink()
+                    || !anc_meta.is_dir()
+                    || anc_meta.uid() != 0
+                    || (anc_meta.mode() & 0o022) != 0
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    let Ok(lmeta) = fs::symlink_metadata(resolved.as_ref()) else {
+        return false;
+    };
+    if lmeta.uid() != 0 {
+        return false;
+    }
+    if lmeta.file_type().is_symlink() {
+        if remaining_hops == 0 {
+            return false;
+        }
+        let Ok(raw_target) = fs::read_link(resolved.as_ref()) else {
+            return false;
+        };
+        let parent = resolved.parent().unwrap_or_else(|| Path::new("/"));
+        let Some(next_target) =
+            normalize_lexical_target_against_symlink_free_parent(parent, &raw_target)
+        else {
+            return false;
+        };
+        return is_trusted_runner_target_root_depth(&next_target, remaining_hops - 1);
+    }
+    lmeta.is_file() && lmeta.uid() == 0 && (lmeta.mode() & 0o022) == 0
+}
+
 pub fn resolve_package_script_path(action: &str, script_name: &str) -> Option<PathBuf> {
     resolve_package_script_in_roots(action, script_name, &package_script_roots())
 }
 
-fn package_script_roots_for_exe_dir(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+fn package_script_roots_for_exe_dir_with_root(
+    exe_dir: Option<&Path>,
+    running_as_root: bool,
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(dir) = exe_dir {
         roots.push(dir.join("packages/package"));
@@ -296,11 +424,19 @@ fn package_script_roots_for_exe_dir(exe_dir: Option<&Path>) -> Vec<PathBuf> {
         PathBuf::from("/opt/AetherFlow/current/packages/package"),
         PathBuf::from("/opt/AetherFlow/packages/package"),
         PathBuf::from("/usr/local/bin/AetherFlow/package"),
-        PathBuf::from("packages/package"),
-        PathBuf::from("../packages/package"),
-        PathBuf::from("../../packages/package"),
     ]);
+    if !running_as_root {
+        roots.extend([
+            PathBuf::from("packages/package"),
+            PathBuf::from("../packages/package"),
+            PathBuf::from("../../packages/package"),
+        ]);
+    }
     roots
+}
+
+fn package_script_roots_for_exe_dir(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    package_script_roots_for_exe_dir_with_root(exe_dir, runner_is_root())
 }
 
 fn package_script_roots() -> Vec<PathBuf> {
@@ -339,12 +475,13 @@ fn resolve_package_script_in_roots(
         &[subdir]
     };
 
+    let running_as_root = runner_is_root();
     // Finish all fallbacks within a release before consulting stale roots.
     for root in roots {
         for dir in subdirs {
             for name in &script_names {
                 let candidate = root.join(dir).join(name);
-                if candidate.is_file() {
+                if is_trusted_runner_target(&candidate, running_as_root) {
                     return Some(candidate);
                 }
             }
@@ -353,7 +490,10 @@ fn resolve_package_script_in_roots(
     None
 }
 
-pub(crate) fn release_manager_script_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+pub(crate) fn release_manager_script_candidates_with_root(
+    exe_dir: Option<&Path>,
+    running_as_root: bool,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(dir) = exe_dir {
         candidates.push(dir.join("deploy/release-manager.sh"));
@@ -362,18 +502,28 @@ pub(crate) fn release_manager_script_candidates(exe_dir: Option<&Path>) -> Vec<P
     candidates.extend([
         PathBuf::from("/opt/AetherFlow/current/deploy/release-manager.sh"),
         PathBuf::from("/opt/AetherFlow/deploy/release-manager.sh"),
-        PathBuf::from("deploy/release-manager.sh"),
-        PathBuf::from("../deploy/release-manager.sh"),
     ]);
+    if !running_as_root {
+        candidates.extend([
+            PathBuf::from("deploy/release-manager.sh"),
+            PathBuf::from("../deploy/release-manager.sh"),
+        ]);
+    }
     candidates
 }
 
+#[cfg(test)]
+pub(crate) fn release_manager_script_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    release_manager_script_candidates_with_root(exe_dir, runner_is_root())
+}
+
 pub fn resolve_release_manager_script() -> Option<PathBuf> {
+    let running_as_root = runner_is_root();
     if let Ok(explicit) = env::var("AETHERFLOW_RELEASE_MANAGER_SCRIPT") {
         let trimmed = explicit.trim();
         if !trimmed.is_empty() {
             let candidate_path = PathBuf::from(trimmed);
-            if candidate_path.is_file() {
+            if is_trusted_runner_target(&candidate_path, running_as_root) {
                 return Some(candidate_path);
             }
         }
@@ -381,17 +531,18 @@ pub fn resolve_release_manager_script() -> Option<PathBuf> {
     let exe_dir = env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    release_manager_script_candidates(exe_dir.as_deref())
+    release_manager_script_candidates_with_root(exe_dir.as_deref(), running_as_root)
         .into_iter()
-        .find(|cand| cand.is_file())
+        .find(|cand| is_trusted_runner_target(cand, running_as_root))
 }
 
 pub fn resolve_systemd_run_binary() -> Option<PathBuf> {
+    let running_as_root = runner_is_root();
     if let Ok(explicit) = env::var("AETHERFLOW_SYSTEMD_RUN_BIN") {
         let trimmed = explicit.trim();
         if !trimmed.is_empty() {
             let candidate_path = PathBuf::from(trimmed);
-            if candidate_path.is_file() {
+            if is_trusted_runner_target(&candidate_path, running_as_root) {
                 return Some(candidate_path);
             }
         }
@@ -400,7 +551,9 @@ pub fn resolve_systemd_run_binary() -> Option<PathBuf> {
         PathBuf::from("/usr/bin/systemd-run"),
         PathBuf::from("/bin/systemd-run"),
     ];
-    candidates.into_iter().find(|cand| cand.is_file())
+    candidates
+        .into_iter()
+        .find(|cand| is_trusted_runner_target(cand, running_as_root))
 }
 
 pub(crate) fn af_cli_binary_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
@@ -418,11 +571,12 @@ pub(crate) fn af_cli_binary_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
 }
 
 pub fn resolve_af_cli_binary() -> Option<PathBuf> {
+    let running_as_root = runner_is_root();
     if let Ok(explicit) = env::var("AETHERFLOW_CLI_BIN") {
         let trimmed = explicit.trim();
         if !trimmed.is_empty() {
             let candidate_path = PathBuf::from(trimmed);
-            if candidate_path.is_file() {
+            if is_trusted_runner_target(&candidate_path, running_as_root) {
                 return Some(candidate_path);
             }
         }
@@ -432,32 +586,44 @@ pub fn resolve_af_cli_binary() -> Option<PathBuf> {
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
     af_cli_binary_candidates(exe_dir.as_deref())
         .into_iter()
-        .find(|cand| cand.is_file())
+        .find(|cand| is_trusted_runner_target(cand, running_as_root))
+}
+
+pub(crate) fn af_transcode_binary_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe_dir {
+        candidates.push(dir.join("bin/af-transcode"));
+        candidates.push(dir.join("af-transcode"));
+    }
+    candidates.extend([
+        PathBuf::from("/opt/AetherFlow/current/bin/af-transcode"),
+        PathBuf::from("/opt/AetherFlow/current/af-transcode"),
+    ]);
+    candidates
+}
+
+fn is_trusted_transcode_binary(path: &Path, running_as_root: bool) -> bool {
+    peer_transcode::is_valid_transcode_binary(path)
+        && is_trusted_runner_target(path, running_as_root)
 }
 
 pub fn resolve_af_transcode_binary() -> Option<PathBuf> {
+    let running_as_root = runner_is_root();
     if let Ok(explicit) = env::var("AETHERFLOW_TRANSCODE_BIN") {
         let trimmed = explicit.trim();
         if !trimmed.is_empty() {
             let candidate_path = PathBuf::from(trimmed);
-            if peer_transcode::is_valid_transcode_binary(&candidate_path) {
+            if is_trusted_transcode_binary(&candidate_path, running_as_root) {
                 return Some(candidate_path);
             }
         }
     }
-    let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/bin/af-transcode"),
-        PathBuf::from("/opt/AetherFlow/current/af-transcode"),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("bin/af-transcode"));
-            candidates.push(exe_dir.join("af-transcode"));
-        }
-    }
-    candidates
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    af_transcode_binary_candidates(exe_dir.as_deref())
         .into_iter()
-        .find(|cand| peer_transcode::is_valid_transcode_binary(cand))
+        .find(|cand| is_trusted_transcode_binary(cand, running_as_root))
 }
 
 async fn runner_request_id_middleware(
@@ -564,7 +730,10 @@ async fn handle_health() -> Json<RunnerResponse> {
     })
 }
 
-pub(crate) fn sandbox_script_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+pub(crate) fn sandbox_script_candidates_with_root(
+    exe_dir: Option<&Path>,
+    running_as_root: bool,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(dir) = exe_dir {
         candidates.push(dir.join("deploy/security/af-systemd-sandbox"));
@@ -576,21 +745,32 @@ pub(crate) fn sandbox_script_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> 
         PathBuf::from("/opt/AetherFlow/current/packages/system/af-systemd-sandbox"),
         PathBuf::from("/opt/AetherFlow/packages/system/af-systemd-sandbox"),
         PathBuf::from("/usr/local/bin/AetherFlow/system/af-systemd-sandbox"),
-        PathBuf::from("deploy/security/af-systemd-sandbox"),
-        PathBuf::from("../deploy/security/af-systemd-sandbox"),
-        PathBuf::from("packages/system/af-systemd-sandbox"),
-        PathBuf::from("../packages/system/af-systemd-sandbox"),
         PathBuf::from("/usr/local/bin/af-systemd-sandbox"),
+        PathBuf::from("/usr/bin/af-systemd-sandbox"),
     ]);
+    if !running_as_root {
+        candidates.extend([
+            PathBuf::from("deploy/security/af-systemd-sandbox"),
+            PathBuf::from("../deploy/security/af-systemd-sandbox"),
+            PathBuf::from("packages/system/af-systemd-sandbox"),
+            PathBuf::from("../packages/system/af-systemd-sandbox"),
+        ]);
+    }
     candidates
 }
 
+#[cfg(test)]
+pub(crate) fn sandbox_script_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
+    sandbox_script_candidates_with_root(exe_dir, runner_is_root())
+}
+
 pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
+    let running_as_root = runner_is_root();
     if let Ok(explicit) = env::var("AETHERFLOW_SANDBOX_SCRIPT") {
         let trimmed = explicit.trim();
         if !trimmed.is_empty() {
             let p = PathBuf::from(trimmed);
-            if p.is_file() {
+            if is_trusted_runner_target(&p, running_as_root) {
                 return Some(p);
             }
         }
@@ -599,22 +779,188 @@ pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
     let exe_dir = env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    sandbox_script_candidates(exe_dir.as_deref())
+    sandbox_script_candidates_with_root(exe_dir.as_deref(), running_as_root)
         .into_iter()
-        .find(|c| c.is_file())
+        .find(|c| is_trusted_runner_target(c, running_as_root))
+}
+
+#[cfg(unix)]
+fn resolve_non_root_leading_parent_dirs(
+    path: &Path,
+) -> std::io::Result<std::borrow::Cow<'_, Path>> {
+    use std::path::Component;
+
+    if path.is_absolute() || runner_is_root() {
+        return Ok(std::borrow::Cow::Borrowed(path));
+    }
+    let mut comps = path.components().peekable();
+    let mut parent_pops = 0usize;
+    while matches!(comps.peek(), Some(Component::ParentDir)) {
+        comps.next();
+        parent_pops += 1;
+    }
+    if parent_pops == 0 {
+        return Ok(std::borrow::Cow::Borrowed(path));
+    }
+    let mut base = env::current_dir()?;
+    for _ in 0..parent_pops {
+        if !base.pop() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "config path traverses above filesystem root",
+            ));
+        }
+    }
+    for comp in comps {
+        match comp {
+            Component::CurDir => {}
+            Component::Normal(part) => base.push(part),
+            // Preserve embedded `..` so confined_fs rejects mid-path traversal.
+            Component::ParentDir => base.push(".."),
+            Component::RootDir | Component::Prefix(_) => {
+                return Ok(std::borrow::Cow::Borrowed(path));
+            }
+        }
+    }
+    Ok(std::borrow::Cow::Owned(base))
+}
+
+/// Safely resolves the single managed `<root>/opt/AetherFlow/current` release symlink (when
+/// present) to its direct `<root>/opt/AetherFlow/releases/<epoch>` target before passing the
+/// resulting path into `confined_fs::read_confined_text`.
+///
+/// Any symlinked ancestor above `opt/AetherFlow`, any non-root-owned `opt/AetherFlow` or `current`
+/// link under root, any `..` component in the link target, or any target outside
+/// `<root>/opt/AetherFlow/releases/<epoch>` fails closed with `PermissionDenied`.
+#[cfg(unix)]
+fn resolve_managed_current_release_path(
+    path: &Path,
+) -> std::io::Result<std::borrow::Cow<'_, Path>> {
+    use std::ffi::OsStr;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+
+    let components: Vec<Component<'_>> = path.components().collect();
+    let mut current_idx = None;
+    for idx in 2..components.len() {
+        if matches!(components[idx - 2], Component::Normal(s) if s == OsStr::new("opt"))
+            && matches!(components[idx - 1], Component::Normal(s) if s == OsStr::new("AetherFlow"))
+            && matches!(components[idx], Component::Normal(s) if s == OsStr::new("current"))
+        {
+            current_idx = Some(idx);
+            break;
+        }
+    }
+    let Some(idx) = current_idx else {
+        return Ok(std::borrow::Cow::Borrowed(path));
+    };
+    if idx + 1 >= components.len() {
+        return Ok(std::borrow::Cow::Borrowed(path));
+    }
+
+    let mut opt_af_dir = PathBuf::new();
+    for comp in &components[..idx] {
+        opt_af_dir.push(comp.as_os_str());
+    }
+    let current_link = opt_af_dir.join("current");
+    let link_meta = match fs::symlink_metadata(&current_link) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(std::borrow::Cow::Borrowed(path)),
+    };
+    if !link_meta.file_type().is_symlink() {
+        return Ok(std::borrow::Cow::Borrowed(path));
+    }
+
+    // Verify `opt_af_dir` itself is a real directory with no symlink ancestors, and root-owned
+    // + non-group/world-writable when executing as root.
+    let mut cursor = PathBuf::new();
+    for comp in opt_af_dir.components() {
+        cursor.push(comp.as_os_str());
+        if matches!(comp, Component::RootDir | Component::Prefix(_)) {
+            continue;
+        }
+        let anc_meta = fs::symlink_metadata(&cursor)?;
+        if anc_meta.file_type().is_symlink() || !anc_meta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing symlinked or non-directory release ancestor: {}",
+                    cursor.display()
+                ),
+            ));
+        }
+    }
+    let running_as_root = unsafe { libc::geteuid() == 0 };
+    if running_as_root {
+        let opt_af_meta = fs::symlink_metadata(&opt_af_dir)?;
+        if opt_af_meta.uid() != 0 || (opt_af_meta.mode() & 0o022) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing untrusted release directory ownership/mode: {}",
+                    opt_af_dir.display()
+                ),
+            ));
+        }
+        if link_meta.uid() != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing non-root-owned current release symlink: {}",
+                    current_link.display()
+                ),
+            ));
+        }
+    }
+
+    let raw_target = fs::read_link(&current_link)?;
+    if raw_target
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing parent traversal in current release symlink: {}",
+                current_link.display()
+            ),
+        ));
+    }
+    let resolved_release = if raw_target.is_absolute() {
+        raw_target
+    } else {
+        opt_af_dir.join(raw_target)
+    };
+    let expected_releases_dir = opt_af_dir.join("releases");
+    if resolved_release.parent() != Some(expected_releases_dir.as_path()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing current release symlink outside {}: {}",
+                expected_releases_dir.display(),
+                resolved_release.display()
+            ),
+        ));
+    }
+
+    let mut rebuilt = resolved_release;
+    for comp in &components[idx + 1..] {
+        rebuilt.push(comp.as_os_str());
+    }
+    Ok(std::borrow::Cow::Owned(rebuilt))
 }
 
 pub fn open_and_read_regular_config(path: &Path) -> std::io::Result<String> {
     #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(path)?
-    };
+    {
+        let resolved = resolve_non_root_leading_parent_dirs(path)?;
+        let resolved = resolve_managed_current_release_path(&resolved)?;
+        confined_fs::read_confined_text(&resolved, &[])
+    }
     #[cfg(not(unix))]
-    let mut file = {
+    {
+        use std::io::Read;
+        const LIMIT: u64 = 2 * 1024 * 1024;
         let meta = fs::symlink_metadata(path)?;
         if meta.file_type().is_symlink() {
             return Err(std::io::Error::new(
@@ -622,19 +968,23 @@ pub fn open_and_read_regular_config(path: &Path) -> std::io::Result<String> {
                 format!("config file is a symlink: {}", path.display()),
             ));
         }
-        fs::File::open(path)?
-    };
-
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("config file is not a regular file: {}", path.display()),
-        ));
+        let file = fs::File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("config file is not a regular file: {}", path.display()),
+            ));
+        }
+        let mut contents = String::new();
+        file.take(LIMIT + 1).read_to_string(&mut contents)?;
+        if contents.len() as u64 > LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "configuration exceeds 2 MiB",
+            ));
+        }
+        Ok(contents)
     }
-    let mut contents = String::new();
-    std::io::Read::read_to_string(&mut file, &mut contents)?;
-    Ok(contents)
 }
 
 pub fn is_missing_config_candidate(err: &std::io::Error) -> bool {
@@ -687,6 +1037,9 @@ pub fn canonical_config_candidates(filename: &str) -> Vec<PathBuf> {
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             candidates.push(exe_dir.join("config").join(filename));
+            if let Some(release_root) = exe_dir.parent() {
+                candidates.push(release_root.join("config").join(filename));
+            }
         }
     }
     candidates.extend(installed_config_candidates(Path::new("/"), filename));
@@ -1130,5 +1483,138 @@ mod request_id_tests {
                     && fields.get("request_id").map(String::as_str) == Some("none")
             }));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod sec03_sec04_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn sec03_resolvers_prefer_exe_dir_and_gate_cwd_fallbacks_when_root() {
+        let exe_dir = PathBuf::from("/opt/AetherFlow/releases/20261126-slot");
+
+        // af-transcode must prefer current_exe().parent() ahead of /opt/AetherFlow/current/...
+        let tc = af_transcode_binary_candidates(Some(&exe_dir));
+        assert_eq!(tc[0], exe_dir.join("bin/af-transcode"));
+        assert_eq!(tc[1], exe_dir.join("af-transcode"));
+        assert_eq!(
+            tc[2],
+            PathBuf::from("/opt/AetherFlow/current/bin/af-transcode")
+        );
+
+        // setdisk must prefer current_exe().parent() ahead of /opt/AetherFlow/current/...
+        // and omit relative CWD fallbacks when running as root.
+        let sd_root =
+            network_quota_handlers::setdisk_script_candidates_with_root(Some(&exe_dir), true);
+        assert_eq!(sd_root[0], exe_dir.join("packages/system/setdisk"));
+        assert_eq!(sd_root[1], exe_dir.join("../packages/system/setdisk"));
+        assert_eq!(
+            sd_root[2],
+            PathBuf::from("/opt/AetherFlow/current/packages/system/setdisk")
+        );
+        assert!(
+            sd_root.iter().all(|p| p.is_absolute()),
+            "root setdisk resolver must not include relative CWD fallbacks: {sd_root:?}"
+        );
+        let sd_non_root =
+            network_quota_handlers::setdisk_script_candidates_with_root(Some(&exe_dir), false);
+        assert!(sd_non_root.contains(&PathBuf::from("packages/system/setdisk")));
+
+        // All 3 root resolvers in lib.rs must omit relative CWD fallbacks when running as root.
+        let pkg_root = package_script_roots_for_exe_dir_with_root(Some(&exe_dir), true);
+        assert!(
+            pkg_root.iter().all(|p| p.is_absolute()),
+            "root package script resolver must omit relative CWD paths: {pkg_root:?}"
+        );
+        let rm_root = release_manager_script_candidates_with_root(Some(&exe_dir), true);
+        assert!(
+            rm_root.iter().all(|p| p.is_absolute()),
+            "root release-manager resolver must omit relative CWD paths: {rm_root:?}"
+        );
+        let sb_root = sandbox_script_candidates_with_root(Some(&exe_dir), true);
+        assert!(
+            sb_root.iter().all(|p| p.is_absolute()),
+            "root sandbox script resolver must omit relative CWD paths: {sb_root:?}"
+        );
+        assert!(sb_root.contains(&PathBuf::from("/usr/local/bin/af-systemd-sandbox")));
+    }
+
+    #[test]
+    fn sec03_root_target_validation_rejects_non_root_and_world_writable_files() {
+        let dir = env::temp_dir().join(format!("af-sec03-target-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("helper");
+        fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Non-root test mode accepts regular file.
+        assert!(is_trusted_runner_target(&file, false));
+        // Under root check: non-root owned file (when test runs unprivileged) OR group/world-writable must be rejected.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            !is_trusted_runner_target(&file, true),
+            "root target verifier must reject world-writable files"
+        );
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(
+            !is_trusted_runner_target(&file, true),
+            "root target verifier must reject group-writable files"
+        );
+        if !runner_is_root() {
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                !is_trusted_runner_target(&file, true),
+                "root target verifier must reject non-root-owned files"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sec04_open_and_read_regular_config_enforces_confinement_nlink_and_2mib_cap() {
+        let root = env::temp_dir().join(format!("af-sec04-cfg-{}", uuid::Uuid::new_v4()));
+        let real_dir = root.join("real");
+        fs::create_dir_all(&real_dir).unwrap();
+
+        let valid = real_dir.join("ok.json");
+        fs::write(&valid, "{\"ok\":true}").unwrap();
+        assert_eq!(
+            open_and_read_regular_config(&valid).unwrap(),
+            "{\"ok\":true}"
+        );
+
+        // Leaf symlink rejected
+        let leaf_sym = real_dir.join("leaf-sym.json");
+        std::os::unix::fs::symlink(&valid, &leaf_sym).unwrap();
+        assert!(open_and_read_regular_config(&leaf_sym).is_err());
+
+        // Ancestor directory symlink rejected (O_NOFOLLOW | O_DIRECTORY)
+        let dir_sym = root.join("sym-dir");
+        std::os::unix::fs::symlink(&real_dir, &dir_sym).unwrap();
+        assert!(
+            open_and_read_regular_config(&dir_sym.join("ok.json")).is_err(),
+            "ancestor directory symlink must be rejected"
+        );
+
+        // Hardlink (st_nlink > 1) rejected
+        let hard_orig = real_dir.join("hard-a.json");
+        let hard_alias = real_dir.join("hard-b.json");
+        fs::write(&hard_orig, "[]").unwrap();
+        fs::hard_link(&hard_orig, &hard_alias).unwrap();
+        assert!(
+            open_and_read_regular_config(&hard_orig).is_err(),
+            "hardlinked config with st_nlink > 1 must be rejected"
+        );
+
+        // Oversized (> 2 MiB) rejected with InvalidData
+        let oversized = real_dir.join("big.json");
+        let big_data = vec![b' '; (2 * 1024 * 1024) + 1];
+        fs::write(&oversized, &big_data).unwrap();
+        let err = open_and_read_regular_config(&oversized).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

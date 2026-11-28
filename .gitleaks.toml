@@ -6,6 +6,10 @@ useDefault = true
 [[rules]]
 id = "generic-api-key"
 
+  # ── Active v4 Working-Tree Test & Script Allowlists ──────────────────────
+  # Scoped strictly to synthetic fixtures and benign parser tokens in active
+  # v4 Rust crates, Python regression suites, and deployment scripts.
+
   [[rules.allowlists]]
   description = "Allow RFC 6455 sample Sec-WebSocket-Key nonce in af-api middleware unit test"
   condition = "AND"
@@ -14,30 +18,6 @@ id = "generic-api-key"
     '''^backend-rs/crates/af-api/src/middlewares(?:/tests)?\.rs$''',
   ]
   regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
-
-  # Historical git-history allowlist (retired from working tree)
-  [[rules.allowlists]]
-  description = "Allow synthetic VALID_TOKEN share fixture in share unit tests"
-  condition = "AND"
-  regexTarget = "line"
-  paths = [
-    '''^frontend/src/app/share/page\.test\.tsx$''',
-    '''^frontend/src/lib/mcbrowser-share\.test\.ts$''',
-  ]
-  regexes = [
-    '''^\s*const VALID_TOKEN = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd';\s*$''',
-  ]
-
-  [[rules.allowlists]]
-  description = "Allow synthetic sessionKey fixture in StreamingTab unit test"
-  condition = "AND"
-  regexTarget = "line"
-  paths = [
-    '''^frontend/src/components/tabs/StreamingTab\.test\.tsx$''',
-  ]
-  regexes = [
-    '''^\s*sessionKey: 'hist-2-legacy',\s*$''',
-  ]
 
   [[rules.allowlists]]
   description = "Synthetic lifecycle redaction canary in the API persistence regression"
@@ -56,11 +36,81 @@ id = "generic-api-key"
   ]
   regexes = ['''^0123456789abcdef0123456789abcdef$''']
 
-  # NOTE: The `commits`-pinned `backend/*` allowlists below apply strictly to immutable
-  # pre-Zero-Go git history commits scanned during full-history `gitleaks git .` runs.
-  # Zero `.go`, `go.mod`, or `go.sum` files exist in the working tree (`backend/` is retired).
   [[rules.allowlists]]
-  description = "Historical synthetic AES_MASTER_KEY test fixture in retired Go config unit test"
+  description = "Synthetic env flag and helper identifier false positives in catalog lifecycle tests"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''^tests/test_marketplace_catalog_lifecycle_matrix\.py$''']
+  regexes = ['''^(?:AF_KEEP_EXISTING_SECRETS=|generate_qbittorrent_pbkdf2)$''']
+
+  [[rules.allowlists]]
+  description = "Shell variable assignment following empty ENV_FILE_GITHUB_TOKEN initializer in release-manager.sh"
+  condition = "AND"
+  regexTarget = "secret"
+  paths = ['''^deploy/release-manager\.sh$''']
+  regexes = ['''^EFFECTIVE_SKIP_PROVENANCE_VERIFY=$''']
+
+  [[rules.allowlists]]
+  description = "Historical synthetic sequential-hex ruTorrent proxy token fixture in v4 middleware unit test commits"
+  condition = "AND"
+  regexTarget = "secret"
+  commits = [
+    '''45ea145693e7edc35bef8d8635bd359a499cc494''',
+    '''8d1bb7228b3148528f6b0d9203aca4665c9cb37d''',
+  ]
+  paths = ['''^backend-rs/crates/af-api/src/middlewares/tests\.rs$''']
+  regexes = ['''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''']
+
+  [[rules.allowlists]]
+  description = "Historical serde deserialize_with attribute false positive after isOauth alias in v4 contracts.rs commit"
+  condition = "AND"
+  regexTarget = "secret"
+  commits = ['''fda09f793e808399e8b3acb13159377cf9fe052d''']
+  paths = ['''^frontend-rs/crates/af-web-app/src/tabs/contracts\.rs$''']
+  regexes = ['''^deserialize_with=$''']
+
+  # ── Historical Commit-Pinned Pre-v4 Allowlists (Retired Go / Next.js / Legacy Configs) ──
+  # Every retired pre-v4 path below (`backend/*`, `frontend/*`, `setup/configs/headphones/*`,
+  # `rutorrent/*`) is absent from the v4 working tree and pinned to exact immutable git
+  # history commits scanned during full-history `gitleaks git .` runs. Active v4 paths
+  # (`backend-rs/`, `frontend-rs/`, `apps/`, `packages/`, `deploy/`, `setup/`, `scripts/`)
+  # retain full secret-scanning coverage.
+
+  [[rules.allowlists]]
+  description = "Historical synthetic VALID_TOKEN share fixture in retired v3 Next.js share unit tests"
+  condition = "AND"
+  regexTarget = "line"
+  commits = [
+    '''e1cf37d4afd40f72229daefd44b377c36d025622''',
+    '''b6d92fa8db3c9198188e01f9b2e070e03318dc04''',
+    '''bbb3e38442467955830920a36bd1d85dbcf3fcbb''',
+  ]
+  paths = [
+    '''^frontend/src/app/share/page\.test\.tsx$''',
+    '''^frontend/src/lib/mcbrowser-share\.test\.ts$''',
+  ]
+  regexes = [
+    '''^\s*const VALID_TOKEN = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd';\s*$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Historical synthetic sessionKey fixture in retired v3 Next.js StreamingTab unit test"
+  condition = "AND"
+  regexTarget = "line"
+  commits = [
+    '''e1cf37d4afd40f72229daefd44b377c36d025622''',
+    '''b6d92fa8db3c9198188e01f9b2e070e03318dc04''',
+    '''37e288b98a2f5a6abf6dd9f6b3381a4b5cc3eaad''',
+  ]
+  paths = [
+    '''^frontend/src/components/tabs/StreamingTab\.test\.tsx$''',
+  ]
+  regexes = [
+    '''^\s*sessionKey: 'hist-2-legacy',\s*$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Historical synthetic AES_MASTER_KEY test fixture in retired v3 Go config unit test"
   condition = "AND"
   regexTarget = "secret"
   commits = [
@@ -82,7 +132,7 @@ id = "generic-api-key"
   regexes = ['''^0123456789abcdef0123456789abcdef$''']
 
   [[rules.allowlists]]
-  description = "Historical synthetic AIza test string in retired Go crypto unit test"
+  description = "Historical synthetic AIza test string in retired v3 Go crypto unit test"
   condition = "AND"
   regexTarget = "secret"
   commits = [
@@ -104,7 +154,7 @@ id = "generic-api-key"
   regexes = ['''^AIzaSyA_test_key_12345$''']
 
   [[rules.allowlists]]
-  description = "Historical synthetic CSRF test tokens in retired Go auth and revocation tests"
+  description = "Historical synthetic CSRF test tokens in retired v3 Go auth and revocation tests"
   condition = "AND"
   regexTarget = "secret"
   commits = [
@@ -129,7 +179,7 @@ id = "generic-api-key"
   regexes = ['''^(?:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4|f7e8d9c0b1a23456789abcdef0123456)$''']
 
   [[rules.allowlists]]
-  description = "Historical synthetic API key fixtures in retired Go app credentials unit tests"
+  description = "Historical synthetic API key fixtures in retired v3 Go app credentials unit tests"
   condition = "AND"
   regexTarget = "secret"
   commits = [
@@ -151,14 +201,7 @@ id = "generic-api-key"
   regexes = ['''^(?:sabnzbd-key-abcdef123456|tautulli-secret-key-42|jackett-api-key-xyz987)$''']
 
   [[rules.allowlists]]
-  description = "Synthetic env flag and helper identifier false positives in catalog lifecycle tests"
-  condition = "AND"
-  regexTarget = "secret"
-  paths = ['''^tests/test_marketplace_catalog_lifecycle_matrix\.py$''']
-  regexes = ['''^(?:AF_KEEP_EXISTING_SECRETS=|generate_qbittorrent_pbkdf2)$''']
-
-  [[rules.allowlists]]
-  description = "Historical synthetic unsigned/invalid-signature JWT test fixture in retired Go auth security test"
+  description = "Historical synthetic unsigned/invalid-signature JWT test fixture in retired v3 Go auth security test"
   condition = "AND"
   regexTarget = "secret"
   commits = [
@@ -181,42 +224,22 @@ id = "generic-api-key"
     '''^eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9\.eyJ1c2VyX2lkIjoxLCJleHAiOjk5OTk5OTk5OTl9\.invalid-signature$''',
   ]
 
-  # Historical git-history allowlist (retired from working tree)
   [[rules.allowlists]]
-  description = "Upstream Headphones public default songkick_apikey template placeholder"
+  description = "Historical upstream Headphones public default songkick_apikey template placeholder in retired setup config"
   condition = "AND"
   regexTarget = "secret"
+  commits = [
+    '''e1cf37d4afd40f72229daefd44b377c36d025622''',
+    '''45e281b81cf28f23ffc706ba983eaeb9fcaa1001''',
+    '''cf89c9e78194d65a7fb34f2aff6f143750919e4f''',
+    '''c053761908f839ba3d3ad40da362d9b03557a932''',
+    '''de16d1477187fa56ccff52f9534bbe62399a5c7a''',
+  ]
   paths = ['''^setup/configs/headphones/config\.ini$''']
   regexes = ['''^nd1We7dFW2RqxPw8$''']
 
   [[rules.allowlists]]
-  description = "Shell variable assignment following empty ENV_FILE_GITHUB_TOKEN initializer in release-manager.sh"
-  condition = "AND"
-  regexTarget = "secret"
-  paths = ['''^deploy/release-manager\.sh$''']
-  regexes = ['''^EFFECTIVE_SKIP_PROVENANCE_VERIFY=$''']
-
-  [[rules.allowlists]]
-  description = "Historical synthetic sequential-hex ruTorrent proxy token fixture in middleware unit test"
-  condition = "AND"
-  regexTarget = "secret"
-  commits = [
-    '''45ea145693e7edc35bef8d8635bd359a499cc494''',
-    '''8d1bb7228b3148528f6b0d9203aca4665c9cb37d''',
-  ]
-  paths = ['''^backend-rs/crates/af-api/src/middlewares/tests\.rs$''']
-  regexes = ['''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''']
-
-  [[rules.allowlists]]
-  description = "Historical serde deserialize_with attribute false positive after isOauth alias in contracts.rs"
-  condition = "AND"
-  regexTarget = "secret"
-  commits = ['''fda09f793e808399e8b3acb13159377cf9fe052d''']
-  paths = ['''^frontend-rs/crates/af-web-app/src/tabs/contracts\.rs$''']
-  regexes = ['''^deserialize_with=$''']
-
-  [[rules.allowlists]]
-  description = "RFC 4648 Base32 alphabet string in legacy 2017 ruTorrent util.php base32decode helper"
+  description = "Historical RFC 4648 Base32 alphabet string in retired 2017 ruTorrent util.php base32decode helper"
   condition = "AND"
   regexTarget = "secret"
   commits = ['''d19530cf9d5ab281dbd04ba8378febf47a04ab4e''']
@@ -226,8 +249,10 @@ id = "generic-api-key"
 [[rules]]
 id = "jwt"
 
+  # ── Historical Commit-Pinned Pre-v4 Allowlists (Retired Go Auth Tests) ───
+
   [[rules.allowlists]]
-  description = "Historical synthetic unsigned/invalid-signature JWT test fixture in retired Go auth security test"
+  description = "Historical synthetic unsigned/invalid-signature JWT test fixture in retired v3 Go auth security test"
   condition = "AND"
   regexTarget = "secret"
   commits = [
@@ -250,6 +275,8 @@ id = "jwt"
 
 [[rules]]
 id = "curl-auth-header"
+
+  # ── Active v4 Working-Tree Test Allowlists ───────────────────────────────
 
   [[rules.allowlists]]
   description = "Synthetic bearer canary in the authenticated WebSocket redaction regression"
@@ -274,6 +301,8 @@ id = "curl-auth-header"
 
 [[rules]]
 id = "curl-auth-user"
+
+  # ── Active v4 Working-Tree Test Allowlists ───────────────────────────────
 
   [[rules.allowlists]]
   description = "Exact synthetic curl credentials in lifecycle and diagnostic redaction regressions"
@@ -305,8 +334,12 @@ id = "curl-auth-user"
 [[rules]]
 id = "private-key"
 
+  # ── Historical Commit-Pinned Allowlists (Retired Commits & Pre-v4 Go Dev Keys) ──
+  # Both PEM entries below are absent from the working tree and restricted strictly
+  # to the exact historical commits where synthetic/ephemeral dev fixtures existed.
+
   [[rules.allowlists]]
-  description = "Historical truncated synthetic PEM redaction test fixture in retired commit"
+  description = "Historical truncated synthetic PEM redaction test fixture in retired v4 commit"
   condition = "AND"
   regexTarget = "line"
   commits = ['''d0642207b26532da09192818e36d73f21719f817''']
@@ -314,7 +347,7 @@ id = "private-key"
   regexes = ['''MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7''']
 
   [[rules.allowlists]]
-  description = "Legacy dev OIDC PEM files purged from working tree in historical commits"
+  description = "Historical ephemeral dev OIDC PEM files in retired v3 Go backend commits (purged from working tree)"
   condition = "AND"
   commits = [
     '''d4ee685901bb8f7f6ec098defd5898410e8584d0''',

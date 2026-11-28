@@ -23,7 +23,7 @@ PACKAGES_JSON_LOADED=0
 if [[ -n "$PACKAGES_JSON" ]] && command -v python3 >/dev/null 2>&1; then
     while IFS= read -r valid_app; do
         [[ -n "$valid_app" ]] && ALLOWED_WEB_APPS["$valid_app"]=1
-    done < <(python3 - "$PACKAGES_JSON" <<'PYEOF' 2>/dev/null || true
+    done < <(python3 -I - "$PACKAGES_JSON" <<'PYEOF' 2>/dev/null || true
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     entries = json.load(fh)
@@ -76,6 +76,10 @@ if [[ -w /etc/hosts && ! -L /etc/hosts ]]; then
             echo "[af-certbot-sync] Refusing unsafe hosts lock path" >&2
             exit 1
         }
+        if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+            chown root:aetherflow /run/aetherflow
+            chmod 0750 /run/aetherflow
+        fi
         exec 8>>"$HOSTS_LOCK"
         HOSTS_LOCK_FD="/proc/${BASHPID}/fd/8"
         [[ ! -L "$HOSTS_LOCK" && "$HOSTS_LOCK" -ef "$HOSTS_LOCK_FD" ]] &&
@@ -134,40 +138,351 @@ if ! command -v certbot >/dev/null 2>&1; then
     exit 0
 fi
 
+af_certbot_read_env_values() {
+    python3 -I - /etc/aetherflow/aetherflow.env <<'PYENV' 2>/dev/null || true
+import os, pathlib, stat, sys
+
+env_path = os.path.abspath(sys.argv[1])
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+p = pathlib.PurePosixPath(env_path)
+if ".." in p.parts or not p.name:
+    raise SystemExit(0)
+try:
+    cur_fd = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+except OSError:
+    raise SystemExit(0)
+try:
+    for part in p.parts[1:-1]:
+        nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt
+    fd = os.open(p.name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=cur_fd)
+except OSError:
+    os.close(cur_fd)
+    raise SystemExit(0)
+os.close(cur_fd)
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 65536:
+        raise SystemExit(0)
+    raw = os.read(fd, 65537)
+    if len(raw) > 65536:
+        raise SystemExit(0)
+finally:
+    os.close(fd)
+
+env_db = ""
+env_data_dir = ""
+env_base_domain = ""
+for line in raw.decode("utf-8", errors="replace").splitlines():
+    s = line.strip()
+    if not s or s.startswith("#"):
+        continue
+    if s.startswith("export "):
+        s = s[7:].strip()
+    if "=" not in s:
+        continue
+    k, v = s.split("=", 1)
+    k = k.strip()
+    v = v.strip().strip("\r\n")
+    if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+        v = v[1:-1]
+    if k in ("AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"):
+        env_db = v
+    elif k == "DATA_DIR":
+        env_data_dir = v
+    elif k == "AETHERFLOW_BASE_DOMAIN":
+        env_base_domain = v
+
+print(env_db)
+print(env_data_dir)
+print(env_base_domain)
+PYENV
+}
+
+# FD-confined, root-scratch-isolated read-only SQLite snapshot reader for af-certbot-sync.
+# Never opens live /var/lib/aetherflow/aetherflow.sqlite (or -wal/-shm/-journal sidecars) as root.
+af_certbot_inspect_db() {
+    python3 -I - "$@" <<'PYDB' 2>/dev/null || true
+import json, os, pathlib, sqlite3, stat, sys, time, uuid
+
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+MAX_SCRATCH_BYTES = 2 * 1024 * 1024 * 1024
+is_root = os.geteuid() == 0
+
+def open_dir_nofollow(dir_str):
+    p = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if ".." in p.parts:
+        return -1
+    try:
+        cur_fd = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    except OSError:
+        return -1
+    try:
+        for part in p.parts[1:]:
+            nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = nxt
+        return cur_fd
+    except OSError:
+        os.close(cur_fd)
+        return -1
+
+def is_trusted_root_dir(dir_str, allow_sticky):
+    dp = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if not dp.is_absolute() or ".." in dp.parts:
+        return False
+    cur_p = pathlib.Path("/")
+    for part in dp.parts:
+        cur_p = pathlib.Path("/") if part == "/" else cur_p / part
+        try:
+            cst = os.lstat(cur_p)
+        except OSError:
+            return False
+        if stat.S_ISLNK(cst.st_mode) or not stat.S_ISDIR(cst.st_mode) or cst.st_uid != 0:
+            return False
+        writable = (cst.st_mode & 0o022) != 0
+        sticky = (cst.st_mode & getattr(stat, "S_ISVTX", 0o1000)) != 0
+        if writable and not (allow_sticky and sticky):
+            return False
+    return True
+
+def create_root_scratch(min_free):
+    sc_name = f".af-certbot-db.{os.getpid()}.{uuid.uuid4().hex}"
+    for cand in ("/var/tmp", "/tmp", "/run"):
+        if not is_trusted_root_dir(cand, allow_sticky=True):
+            continue
+        cand_fd = -1
+        try:
+            cand_fd = os.open(cand, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            vfs = os.fstatvfs(cand_fd)
+            avail = vfs.f_bavail * (vfs.f_frsize or vfs.f_bsize)
+            if avail < min_free:
+                os.close(cand_fd)
+                continue
+            os.mkdir(sc_name, 0o700, dir_fd=cand_fd)
+            sc_fd = os.open(sc_name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cand_fd)
+            st = os.fstat(sc_fd)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+                os.close(sc_fd)
+                os.rmdir(sc_name, dir_fd=cand_fd)
+                os.close(cand_fd)
+                continue
+            os.fchmod(sc_fd, 0o700)
+            return cand_fd, sc_fd, sc_name, os.path.join(cand, sc_name)
+        except OSError:
+            if cand_fd >= 0:
+                os.close(cand_fd)
+    return None
+
+def copy_fd_bounded(in_fd, out_dir_fd, out_name, remaining):
+    out_fd = os.open(out_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=out_dir_fd)
+    copied = 0
+    tail8 = b""
+    try:
+        while True:
+            chunk = os.read(in_fd, 65536)
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > remaining:
+                raise OSError("scratch copy cap exceeded")
+            tail8 = (tail8 + chunk)[-8:]
+            view = memoryview(chunk)
+            while view:
+                w = os.write(out_fd, view)
+                if w <= 0:
+                    raise OSError("short write")
+                view = view[w:]
+        if out_name.endswith("-journal") and copied >= 16 and tail8 == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7":
+            raise OSError("forbidden SQLite super-journal trailer")
+        return remaining - copied
+    finally:
+        os.close(out_fd)
+
+def read_certbot_snapshot(conn):
+    base_domain = ""
+    has_settings = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings')"
+    ).fetchone()
+    if has_settings and has_settings[0]:
+        row = conn.execute("SELECT base_domain FROM settings WHERE id = 1").fetchone()
+        if row and row[0]:
+            base_domain = str(row[0]).strip()
+    public_domains = []
+    enabled_apps = []
+    has_ingress = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_ingress_configs')"
+    ).fetchone()
+    if has_ingress and has_ingress[0]:
+        pub_rows = conn.execute(
+            "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain != ''"
+        ).fetchall()
+        app_rows = conn.execute(
+            "SELECT LOWER(app_name), LOWER(COALESCE(public_domain, '')) FROM app_ingress_configs WHERE external_access_enabled = 1"
+        ).fetchall()
+        public_domains = [str(dom).strip() for (dom,) in pub_rows if dom]
+        enabled_apps = [[str(app_name), str(pub_dom or "")] for app_name, pub_dom in app_rows if app_name]
+    return {
+        "base_domain": base_domain,
+        "public_domains": public_domains,
+        "enabled_apps": enabled_apps,
+    }
+
+def db_files_root_owned_safe(parent_fd, leaf_name):
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            st = os.stat(leaf_name + suffix, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            st = None
+        if st is not None and (st.st_uid != 0 or (st.st_mode & 0o022) != 0):
+            return False
+    return True
+
+def inspect_candidate(db_cand):
+    db_abs = os.path.abspath(db_cand)
+    parent_str = os.path.dirname(db_abs)
+    leaf_name = os.path.basename(db_abs)
+    if not leaf_name:
+        return None
+    parent_fd = open_dir_nofollow(parent_str)
+    if parent_fd < 0:
+        return None
+    try:
+        use_scratch = is_root and (
+            not is_trusted_root_dir(parent_str, allow_sticky=False)
+            or not db_files_root_owned_safe(parent_fd, leaf_name)
+        )
+        attempts = 3 if use_scratch else 1
+        for attempt in range(attempts):
+            db_fd = wal_fd = jrn_fd = -1
+            sc = None
+            try:
+                db_fd = os.open(leaf_name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+                st = os.fstat(db_fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    return None
+                if os.read(db_fd, 16) != b"SQLite format 3\x00":
+                    return None
+                total_sz = st.st_size
+                for suffix in ("-wal", "-shm", "-journal"):
+                    try:
+                        sfd = os.open(leaf_name + suffix, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        continue
+                    sst = os.fstat(sfd)
+                    if not stat.S_ISREG(sst.st_mode) or sst.st_nlink != 1:
+                        os.close(sfd)
+                        return None
+                    if suffix == "-wal":
+                        wal_fd = sfd
+                        total_sz += sst.st_size
+                    elif suffix == "-journal":
+                        if sst.st_size >= 16:
+                            os.lseek(sfd, -8, os.SEEK_END)
+                            jtail = os.read(sfd, 8)
+                            os.lseek(sfd, 0, os.SEEK_SET)
+                            if jtail == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7":
+                                os.close(sfd)
+                                return None
+                        jrn_fd = sfd
+                        total_sz += sst.st_size
+                    else:
+                        os.close(sfd)
+                if use_scratch:
+                    if total_sz > MAX_SCRATCH_BYTES:
+                        return None
+                    sc = create_root_scratch(total_sz * 2 + 16 * 1024 * 1024)
+                    if sc is None:
+                        return None
+                    _, sc_fd, _, sc_path = sc
+                    os.lseek(db_fd, 0, os.SEEK_SET)
+                    rem = copy_fd_bounded(db_fd, sc_fd, "certbot.sqlite", MAX_SCRATCH_BYTES)
+                    if wal_fd >= 0:
+                        rem = copy_fd_bounded(wal_fd, sc_fd, "certbot.sqlite-wal", rem)
+                    if jrn_fd >= 0:
+                        copy_fd_bounded(jrn_fd, sc_fd, "certbot.sqlite-journal", rem)
+                    conn = sqlite3.connect(os.path.join(sc_path, "certbot.sqlite"), timeout=5)
+                else:
+                    conn = sqlite3.connect(pathlib.Path(db_abs).as_uri() + "?mode=ro", uri=True, timeout=5)
+                try:
+                    conn.execute("PRAGMA trusted_schema = OFF;")
+                    return read_certbot_snapshot(conn)
+                finally:
+                    conn.close()
+            except sqlite3.DatabaseError:
+                if attempt + 1 < attempts:
+                    time.sleep(0.025)
+                    continue
+                return None
+            except OSError:
+                return None
+            finally:
+                for fd in (db_fd, wal_fd, jrn_fd):
+                    if fd >= 0:
+                        os.close(fd)
+                if sc is not None:
+                    sc_base_fd, sc_fd, sc_name, _ = sc
+                    for nm in ("certbot.sqlite", "certbot.sqlite-wal", "certbot.sqlite-shm", "certbot.sqlite-journal"):
+                        try:
+                            os.unlink(nm, dir_fd=sc_fd)
+                        except FileNotFoundError:
+                            _ = nm
+                    os.close(sc_fd)
+                    try:
+                        os.rmdir(sc_name, dir_fd=sc_base_fd)
+                    except OSError:
+                        _ = sc_name
+                    os.close(sc_base_fd)
+    finally:
+        os.close(parent_fd)
+    return None
+
+for cand in sys.argv[1:]:
+    if not cand:
+        continue
+    res = inspect_candidate(cand)
+    if res is not None:
+        print(json.dumps(res))
+        break
+PYDB
+}
+
 ENV_DB=""
 ENV_DATA_DIR=""
-if [[ -f /etc/aetherflow/aetherflow.env ]]; then
-    ENV_DB="$(grep -E '^(AF_DB_PATH|DB_PATH|AETHERFLOW_DB_PATH)=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
-    ENV_DATA_DIR="$(grep -E '^DATA_DIR=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r\n' || true)"
+ENV_BASE_DOMAIN=""
+_ENV_PARSED="$(af_certbot_read_env_values)"
+if [[ -n "$_ENV_PARSED" ]]; then
+    ENV_DB="$(printf '%s\n' "$_ENV_PARSED" | sed -n '1p')"
+    ENV_DATA_DIR="$(printf '%s\n' "$_ENV_PARSED" | sed -n '2p')"
+    ENV_BASE_DOMAIN="$(printf '%s\n' "$_ENV_PARSED" | sed -n '3p')"
 fi
-DB=""
-for cand in \
+
+DB_SNAPSHOT_JSON="$(af_certbot_inspect_db \
     "${AF_DB_PATH:-}" \
     "${DB_PATH:-}" \
     "${AETHERFLOW_DB_PATH:-}" \
     "$ENV_DB" \
-    "${DATA_DIR:+${DATA_DIR%/}/aetherflow.sqlite}" \
+    "${AETHERFLOW_DATA_DIR:+${AETHERFLOW_DATA_DIR%/}/aetherflow.sqlite}" \
     "${ENV_DATA_DIR:+${ENV_DATA_DIR%/}/aetherflow.sqlite}" \
     /var/lib/aetherflow/aetherflow.sqlite \
     /opt/AetherFlow/current/data/aetherflow.sqlite \
     /opt/AetherFlow/data/aetherflow.sqlite \
-    /opt/AetherFlow/backend/data/aetherflow.sqlite; do
-    if [[ -n "$cand" && -f "$cand" ]]; then
-        DB="$cand"
-        break
-    fi
-done
+    /opt/AetherFlow/backend/data/aetherflow.sqlite)"
 
 BASE_DOMAIN=""
-if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
-    BASE_DOMAIN="$(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
+if [[ -n "$DB_SNAPSHOT_JSON" ]]; then
+    BASE_DOMAIN="$(python3 -I -c 'import json, sys; d = json.loads(sys.argv[1]); print((d.get("base_domain") or "").strip())' "$DB_SNAPSHOT_JSON" 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
 fi
-if [[ -z "$BASE_DOMAIN" && -f /etc/aetherflow/aetherflow.env ]]; then
-    BASE_DOMAIN="$(grep -E '^AETHERFLOW_BASE_DOMAIN=' /etc/aetherflow/aetherflow.env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '[:space:]' || true)"
-    case "$BASE_DOMAIN" in
-        \"*\") BASE_DOMAIN="${BASE_DOMAIN:1:${#BASE_DOMAIN}-2}" ;;
-        \'*\') BASE_DOMAIN="${BASE_DOMAIN:1:${#BASE_DOMAIN}-2}" ;;
-    esac
+if [[ -z "$BASE_DOMAIN" && -n "$ENV_BASE_DOMAIN" ]]; then
+    BASE_DOMAIN="$(printf '%s' "$ENV_BASE_DOMAIN" | tr -d '[:space:]')"
     BASE_DOMAIN="${BASE_DOMAIN#\*.}"
 fi
 DOMAIN_REGEX='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'
@@ -221,14 +536,14 @@ for sub in "www.${BASE_DOMAIN}" "direct.${BASE_DOMAIN}"; do
     fi
 done
 
-if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+if [[ -n "$DB_SNAPSHOT_JSON" ]]; then
     while IFS= read -r dom; do
         dom="$(echo "$dom" | tr -d '[:space:]')"
         [[ -z "$dom" ]] && continue
         if [[ "$dom" =~ $DOMAIN_REGEX ]] && public_dns_resolves "$dom"; then
             DOMAINS+=("$dom")
         fi
-    done < <(sqlite3 -cmd ".timeout 5000" "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain != '';" 2>/dev/null || true)
+    done < <(python3 -I -c 'import json, sys; d = json.loads(sys.argv[1]); [print(x) for x in d.get("public_domains", [])]' "$DB_SNAPSHOT_JSON" 2>/dev/null || true)
 fi
 
 for lock in /install/.*.lock; do
@@ -240,10 +555,16 @@ for lock in /install/.*.lock; do
     [[ "$app" =~ ^[a-z0-9_-]+$ ]] || continue
     cand="${app}.${BASE_DOMAIN}"
     ext_enabled=""
-    if [[ -n "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
-        ext_enabled="$(sqlite3 -readonly -cmd ".timeout 5000" -cmd ".parameter init" \
-            -cmd ".parameter set @app \"'$app'\"" -cmd ".parameter set @domain \"'$cand'\"" "$DB" \
-            "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER(@app) AND external_access_enabled = 1 AND (public_domain = '' OR LOWER(public_domain) = LOWER(@domain)) LIMIT 1;" 2>/dev/null || true)"
+    if [[ -n "$DB_SNAPSHOT_JSON" ]]; then
+        ext_enabled="$(python3 -I -c 'import json, sys
+d = json.loads(sys.argv[1])
+app = sys.argv[2].lower()
+cand = sys.argv[3].lower()
+for a, pub in d.get("enabled_apps", []):
+    if a == app and (pub == "" or pub == cand):
+        print("1")
+        break
+' "$DB_SNAPSHOT_JSON" "$app" "$cand" 2>/dev/null || true)"
     fi
     [[ -n "$ext_enabled" ]] || continue
     if public_dns_resolves "$cand"; then

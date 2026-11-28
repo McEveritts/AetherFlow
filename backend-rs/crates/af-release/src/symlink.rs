@@ -96,66 +96,137 @@ fn atomic_replace_symlink_unchecked(
     target_path: &Path,
     suffix_tag: &str,
 ) -> ReleaseResult<()> {
-    if let Some(parent) = current_link.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            ReleaseError::io(
-                format!("creating parent directory for symlink {}", parent.display()),
-                e,
-            )
-        })?;
-    }
+    let parent = match current_link.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    crate::fs_security::create_dir_all_no_symlinks(parent, 0o755)?;
 
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let tmp_link = PathBuf::from(format!(
-        "{}.{}.{}.{}",
-        current_link.display(),
-        suffix_tag,
-        nanos,
-        uuid::Uuid::new_v4()
-    ));
 
-    create_symlink_or_pointer(&tmp_link, target_path).map_err(|e| ReleaseError::SymlinkSwap {
-        link: current_link.to_path_buf(),
-        target: target_path.to_path_buf(),
-        reason: format!(
-            "failed to create temporary symlink {}: {}",
-            tmp_link.display(),
-            e
-        ),
-    })?;
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::AsRawFd;
+
+        let leaf = current_link
+            .file_name()
+            .ok_or_else(|| ReleaseError::SymlinkSwap {
+                link: current_link.to_path_buf(),
+                target: target_path.to_path_buf(),
+                reason: "symlink path has no leaf component".to_string(),
+            })?;
+        let leaf_c = CString::new(leaf.as_bytes()).map_err(|_| ReleaseError::SymlinkSwap {
+            link: current_link.to_path_buf(),
+            target: target_path.to_path_buf(),
+            reason: "symlink leaf name contains NUL byte".to_string(),
+        })?;
+        let target_c = CString::new(target_path.as_os_str().as_bytes()).map_err(|_| {
+            ReleaseError::SymlinkSwap {
+                link: current_link.to_path_buf(),
+                target: target_path.to_path_buf(),
+                reason: "symlink target path contains NUL byte".to_string(),
+            }
+        })?;
+        let tmp_name = format!(
+            "{}.{}.{}.{}",
+            leaf.to_string_lossy(),
+            suffix_tag,
+            nanos,
+            uuid::Uuid::new_v4()
+        );
+        let tmp_c = CString::new(tmp_name.as_bytes()).map_err(|_| ReleaseError::SymlinkSwap {
+            link: current_link.to_path_buf(),
+            target: target_path.to_path_buf(),
+            reason: "temporary symlink name contains NUL byte".to_string(),
+        })?;
+
+        let parent_dir = crate::fs_security::open_dir_nofollow(parent)?;
+        let parent_dfd = parent_dir.as_raw_fd();
+
+        if unsafe { libc::symlinkat(target_c.as_ptr(), parent_dfd, tmp_c.as_ptr()) } != 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(ReleaseError::SymlinkSwap {
+                link: current_link.to_path_buf(),
+                target: target_path.to_path_buf(),
+                reason: format!(
+                    "failed to create temporary symlink {}: {}",
+                    parent.join(&tmp_name).display(),
+                    err
+                ),
+            });
+        }
+
+        if unsafe { libc::renameat(parent_dfd, tmp_c.as_ptr(), parent_dfd, leaf_c.as_ptr()) } != 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                libc::unlinkat(parent_dfd, tmp_c.as_ptr(), 0);
+            }
+            return Err(ReleaseError::SymlinkSwap {
+                link: current_link.to_path_buf(),
+                target: target_path.to_path_buf(),
+                reason: format!(
+                    "failed to atomically replace {} -> {}: {}",
+                    parent.join(&tmp_name).display(),
+                    current_link.display(),
+                    err
+                ),
+            });
+        }
+
+        crate::fs_security::sync_dir_fd(parent_dfd, parent)?;
+        Ok(())
+    }
 
     #[cfg(not(unix))]
     {
+        let tmp_link = PathBuf::from(format!(
+            "{}.{}.{}.{}",
+            current_link.display(),
+            suffix_tag,
+            nanos,
+            uuid::Uuid::new_v4()
+        ));
+
+        create_symlink_or_pointer(&tmp_link, target_path).map_err(|e| {
+            ReleaseError::SymlinkSwap {
+                link: current_link.to_path_buf(),
+                target: target_path.to_path_buf(),
+                reason: format!(
+                    "failed to create temporary symlink {}: {}",
+                    tmp_link.display(),
+                    e
+                ),
+            }
+        })?;
+
         // On Windows, renaming a directory symlink over an existing directory symlink can fail
         // with AccessDenied unless the destination symlink is removed first.
         if fs::symlink_metadata(current_link).is_ok() {
             let _ = fs::remove_dir(current_link).or_else(|_| fs::remove_file(current_link));
         }
+
+        fs::rename(&tmp_link, current_link).map_err(|e| {
+            let _ = fs::remove_file(&tmp_link);
+            ReleaseError::SymlinkSwap {
+                link: current_link.to_path_buf(),
+                target: target_path.to_path_buf(),
+                reason: format!(
+                    "failed to atomically replace {} -> {}: {}",
+                    tmp_link.display(),
+                    current_link.display(),
+                    e
+                ),
+            }
+        })?;
+
+        crate::fs_security::sync_parent_dir_best_effort(parent);
+        Ok(())
     }
-
-    fs::rename(&tmp_link, current_link).map_err(|e| {
-        let _ = fs::remove_file(&tmp_link);
-        ReleaseError::SymlinkSwap {
-            link: current_link.to_path_buf(),
-            target: target_path.to_path_buf(),
-            reason: format!(
-                "failed to atomically replace {} -> {}: {}",
-                tmp_link.display(),
-                current_link.display(),
-                e
-            ),
-        }
-    })?;
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_symlink_or_pointer(link_path: &Path, target_dir: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target_dir, link_path)
 }
 
 #[cfg(windows)]
@@ -197,7 +268,7 @@ pub fn perform_symlink_swap(
             crate::fs_security::atomic_write_bytes_with_mode(
                 &prev_file,
                 format!("{}\n", prev_target.display()).as_bytes(),
-                0o600,
+                0o644,
             )?;
         }
     }
@@ -214,30 +285,124 @@ pub fn write_previous_release(releases_dir: &Path, target_dir: &Path) -> Release
     crate::fs_security::atomic_write_bytes_with_mode(
         &prev_file,
         format!("{}\n", target_dir.display()).as_bytes(),
-        0o600,
+        0o644,
     )
 }
 
-/// Reads and validates `${RELEASES_DIR}/.previous_release`, ensuring the recorded directory still exists
-/// and is not a symlink.
+/// Validates that `prev_path` is an absolute, non-symlink real directory directly beneath one of
+/// `allowed_releases_dirs` (with no `.` or `..` components).
+pub fn validate_previous_release_target(
+    prev_path: &Path,
+    allowed_releases_dirs: &[&Path],
+) -> ReleaseResult<PathBuf> {
+    use std::path::Component;
+
+    if !prev_path.is_absolute()
+        || prev_path.file_name().is_none()
+        || prev_path
+            .components()
+            .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+    {
+        return Err(ReleaseError::Rollback(format!(
+            "Previous release target {} is not a canonical absolute path",
+            prev_path.display()
+        )));
+    }
+    let trimmed_path = prev_path.to_string_lossy();
+    if trimmed_path.ends_with('/') {
+        return Err(ReleaseError::Rollback(format!(
+            "Previous release target {} must not end with a trailing slash",
+            prev_path.display()
+        )));
+    }
+    let prev_meta = fs::symlink_metadata(prev_path).map_err(|_| {
+        ReleaseError::Rollback(format!(
+            "Previous release directory missing: {}",
+            prev_path.display()
+        ))
+    })?;
+    if prev_meta.file_type().is_symlink() || !prev_meta.is_dir() {
+        return Err(ReleaseError::Rollback(format!(
+            "Previous release target is a symlink or non-directory: {}",
+            prev_path.display()
+        )));
+    }
+    let canon_prev = canonicalize_preserve_normal(prev_path);
+    let in_allowed_root = allowed_releases_dirs.iter().any(|allowed_dir| {
+        let canon_allowed = canonicalize_preserve_normal(allowed_dir);
+        canon_prev.parent() == Some(canon_allowed.as_path())
+    });
+    if !in_allowed_root {
+        return Err(ReleaseError::Rollback(format!(
+            "Previous release target {} escapes allowed releases directories",
+            prev_path.display()
+        )));
+    }
+    Ok(prev_path.to_path_buf())
+}
+
+/// Reads and validates `${RELEASES_DIR}/.previous_release`, ensuring the recorded directory still exists,
+/// is not a symlink, and resides directly beneath `releases_dir`.
 pub fn read_previous_release(releases_dir: &Path) -> ReleaseResult<PathBuf> {
+    read_previous_release_in_roots(releases_dir, &[releases_dir])
+}
+
+/// Reads and validates `${RELEASES_DIR}/.previous_release`, ensuring the recorded directory still exists,
+/// is not a symlink, and resides directly beneath one of `allowed_releases_dirs` (e.g., both the
+/// dry-run releases directory and the live base releases directory during `--dry-run` rollbacks).
+pub fn read_previous_release_in_roots(
+    releases_dir: &Path,
+    allowed_releases_dirs: &[&Path],
+) -> ReleaseResult<PathBuf> {
+    use std::io::Read;
+
     let prev_file = releases_dir.join(".previous_release");
-    if let Ok(meta) = fs::symlink_metadata(&prev_file) {
-        if meta.file_type().is_symlink() || !meta.is_file() {
+    match fs::symlink_metadata(&prev_file) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return Err(ReleaseError::Rollback(format!(
+                    "Previous release file {} is a symlink or non-regular file",
+                    prev_file.display()
+                )));
+            }
+        }
+        Err(_) => {
             return Err(ReleaseError::Rollback(format!(
-                "Previous release file {} is a symlink or non-regular file",
+                "No previous release record found at {}",
                 prev_file.display()
             )));
         }
-    } else {
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let file = opts
+        .open(&prev_file)
+        .map_err(|e| ReleaseError::io(format!("reading {}", prev_file.display()), e))?;
+    let fmeta = file
+        .metadata()
+        .map_err(|e| ReleaseError::io(format!("stat {}", prev_file.display()), e))?;
+    if !fmeta.is_file() {
         return Err(ReleaseError::Rollback(format!(
-            "No previous release record found at {}",
+            "Previous release file {} is not a regular file",
             prev_file.display()
         )));
     }
-    let raw = fs::read_to_string(&prev_file)
+    let mut raw = String::new();
+    file.take(65_537)
+        .read_to_string(&mut raw)
         .map_err(|e| ReleaseError::io(format!("reading {}", prev_file.display()), e))?;
-    let trimmed = raw.trim();
+    if raw.len() > 65_536 {
+        return Err(ReleaseError::Rollback(format!(
+            "Previous release file {} exceeds 64 KiB cap",
+            prev_file.display()
+        )));
+    }
+    let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err(ReleaseError::Rollback(format!(
             "Previous release file is empty at {}",
@@ -245,13 +410,7 @@ pub fn read_previous_release(releases_dir: &Path) -> ReleaseResult<PathBuf> {
         )));
     }
     let prev_path = PathBuf::from(trimmed);
-    if !prev_path.is_dir() {
-        return Err(ReleaseError::Rollback(format!(
-            "Previous release directory missing: {}",
-            prev_path.display()
-        )));
-    }
-    Ok(prev_path)
+    validate_previous_release_target(&prev_path, allowed_releases_dirs)
 }
 
 /// Executes Stage 5 Housekeeping (`cleanup_old_releases`), retaining at least `max_releases`
@@ -281,11 +440,9 @@ pub(crate) fn prune_old_releases(
     }
 
     let current_target = read_current_link_target(current_link);
-    let previous_target = fs::read_to_string(releases_dir.join(".previous_release"))
+    let previous_target = read_previous_release(releases_dir)
         .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(|s| canonicalize_preserve_normal(Path::new(&s)));
+        .map(|p| canonicalize_preserve_normal(&p));
 
     let entries = fs::read_dir(releases_dir).map_err(|e| {
         ReleaseError::io(
@@ -363,4 +520,49 @@ pub(crate) fn prune_old_releases(
     }
 
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod crate09_symlink_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn crate09_atomic_symlink_swap_uses_dirfd_renameat_sync_and_rejects_symlink_parent() {
+        let root = std::env::temp_dir().join(format!("af-symlink-test-{}", uuid::Uuid::new_v4()));
+        let rel_a = root.join("releases/100");
+        let rel_b = root.join("releases/200");
+        fs::create_dir_all(&rel_a).unwrap();
+        fs::create_dir_all(&rel_b).unwrap();
+
+        let current = root.join("opt/current");
+        atomic_replace_symlink(&current, &rel_a, "epoch100").unwrap();
+        assert_eq!(
+            read_current_link_target(&current),
+            Some(canonicalize_preserve_normal(&rel_a))
+        );
+
+        atomic_replace_symlink(&current, &rel_b, "epoch200").unwrap();
+        assert_eq!(
+            read_current_link_target(&current),
+            Some(canonicalize_preserve_normal(&rel_b))
+        );
+
+        // No temporary symlink entries may remain in parent directory.
+        let entries: Vec<String> = fs::read_dir(current.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["current".to_string()]);
+
+        // Symlinked parent directory must be refused cleanly.
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let sym_parent = root.join("sym-parent");
+        symlink(&outside, &sym_parent).unwrap();
+        let err = atomic_replace_symlink(&sym_parent.join("current"), &rel_b, "bad").unwrap_err();
+        assert!(matches!(err, ReleaseError::PathValidation { .. }));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

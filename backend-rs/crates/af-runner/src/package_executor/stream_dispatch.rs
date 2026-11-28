@@ -199,6 +199,25 @@ pub(crate) fn apply_legacy_package_environment(cmd: &mut Command, req: &PackageR
     } else {
         default_env.keep_existing_secrets
     };
+    if let Ok(runner_data_dir) = std::env::var("DATA_DIR") {
+        let trimmed = runner_data_dir.trim();
+        if !trimmed.is_empty() && std::env::var_os("AETHERFLOW_DATA_DIR").is_none() {
+            cmd.env("AETHERFLOW_DATA_DIR", trimmed);
+        }
+    }
+    cmd.env_remove("DATA_DIR")
+        .env_remove("JWT_SECRET")
+        .env_remove("AES_MASTER_KEY")
+        .env_remove("GOOGLE_CLIENT_SECRET")
+        .env_remove("METRICS_BEARER_TOKEN")
+        .env_remove("AF_SETUP_BOOTSTRAP_TOKEN")
+        .env_remove("AF_SESSION_SECRET")
+        .env_remove("PYTHONPATH")
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONSTARTUP")
+        .env_remove("PYTHONUSERBASE")
+        .env("PYTHONSAFEPATH", "1")
+        .env("PYTHONNOUSERSITE", "1");
     cmd.env("DEBIAN_FRONTEND", "noninteractive")
         .env("AF_PACKAGE_ACTION", req.action.as_str())
         .env("AF_LIFECYCLE_ACTION", req.action.as_str())
@@ -362,9 +381,10 @@ pub fn check_disk_space(
     let is_magic_tmpfs = f_type_u64 == 0x01021994;
     let is_magic_ramfs = f_type_u64 == 0x858458f6 || (f_type_u64 as u32) == 0x858458f6;
 
-    let df_out = std::process::Command::new("df")
-        .args(["-PT", &check_path.to_string_lossy()])
-        .output();
+    let mut df_cmd = Command::new("df");
+    df_cmd.args(["-PT", &check_path.to_string_lossy()]);
+    let df_out =
+        crate::bounded_command::output_blocking(df_cmd, None, Duration::from_secs(10), 64 * 1024);
 
     let fs_type = match df_out {
         Ok(out) if out.status.success() => {
@@ -958,16 +978,35 @@ pub fn execute_package_request_stream(
             }
         }
 
-        let mut cmd = Command::new("bash");
-        cmd.arg(&script_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        {
-            cmd.process_group(0);
+        const LEGACY_SCRIPT_MAX_DURATION: Duration = Duration::from_secs(3600);
+        const LEGACY_STREAM_MAX_RAW_LINE_BYTES: usize = 4 * 1024 * 1024;
+        const LEGACY_STREAM_MAX_OUTPUT_LINE_BYTES: usize = 64 * 1024;
+        const LEGACY_STREAM_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+        const LEGACY_STREAM_CHANNEL_CAPACITY: usize = 128;
+
+        struct ReapNotifyGuard {
+            _lease: Arc<af_release::ReleaseLockGuard>,
+            reaped: Arc<(std::sync::atomic::AtomicBool, tokio::sync::Notify)>,
         }
+
+        impl Drop for ReapNotifyGuard {
+            fn drop(&mut self) {
+                self.reaped
+                    .0
+                    .store(true, std::sync::atomic::Ordering::Release);
+                self.reaped.1.notify_waiters();
+            }
+        }
+
+        let script_arg = if script_path.is_absolute() {
+            script_path.clone()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&script_path))
+                .unwrap_or_else(|_| script_path.clone())
+        };
+        let mut cmd = Command::new("bash");
+        cmd.arg(&script_arg).current_dir("/");
         apply_legacy_package_environment(&mut cmd, &req);
         if req.package_id == "rclone" && installs {
             configure_legacy_rclone_api_port_env(
@@ -1016,19 +1055,41 @@ pub fn execute_package_request_stream(
             return;
         }
 
-        match cmd.spawn() {
-            Ok(mut child) => {
-                let mut stdout = BoundedLines::new(child.stdout.take().unwrap());
-                let mut stderr = BoundedLines::new(child.stderr.take().unwrap());
-                let mut stdout_open = true;
-                let mut stderr_open = true;
+        let reaped = Arc::new((
+            std::sync::atomic::AtomicBool::new(false),
+            tokio::sync::Notify::new(),
+        ));
+        let reap_guard = ReapNotifyGuard {
+            _lease: maintenance_guard.clone(),
+            reaped: reaped.clone(),
+        };
+        let limits = crate::bounded_command::StreamLimits {
+            budget: LEGACY_SCRIPT_MAX_DURATION,
+            max_line_bytes: LEGACY_STREAM_MAX_RAW_LINE_BYTES,
+            max_total_bytes: LEGACY_STREAM_MAX_TOTAL_BYTES,
+            channel_capacity: LEGACY_STREAM_CHANNEL_CAPACITY,
+        };
+
+        match crate::bounded_command::spawn_streaming(cmd, limits, reap_guard) {
+            Ok(supervisor) => {
+                let crate::bounded_command::StreamingSupervisor {
+                    mut lines,
+                    outcome,
+                } = supervisor;
                 let mut diag_failure: Option<serde_json::Value> = None;
                 let mut saw_incomplete_rollback_line: Option<String> = None;
                 let mut recorded_readiness_probes: HashMap<String, Vec<RecordedReadinessProbe>> =
                     HashMap::new();
-                while stdout_open || stderr_open {
+                loop {
                     if cancel.is_cancelled() {
-                        terminate_child_process_group(&mut child).await;
+                        let notified = reaped.1.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+                        drop(outcome);
+                        drop(lines);
+                        if !reaped.0.load(std::sync::atomic::Ordering::Acquire) {
+                            let _ = tokio::time::timeout(Duration::from_secs(5), notified).await;
+                        }
                         let rb = rollback_legacy_sandbox_with_lease(
                             &maintenance_guard,
                             &mut sandbox_journal,
@@ -1043,9 +1104,16 @@ pub fn execute_package_request_stream(
                         ));
                         return;
                     }
-                    let (is_stdout, result) = tokio::select! {
+                    let next_line = tokio::select! {
                         _ = wait_for_cancellation(&cancel) => {
-                            terminate_child_process_group(&mut child).await;
+                            let notified = reaped.1.notified();
+                            tokio::pin!(notified);
+                            notified.as_mut().enable();
+                            drop(outcome);
+                            drop(lines);
+                            if !reaped.0.load(std::sync::atomic::Ordering::Acquire) {
+                                let _ = tokio::time::timeout(Duration::from_secs(5), notified).await;
+                            }
                             let rb = rollback_legacy_sandbox_with_lease(
                                 &maintenance_guard,
                                 &mut sandbox_journal,
@@ -1060,61 +1128,77 @@ pub fn execute_package_request_stream(
                             ));
                             return;
                         }
-                        result = stdout.next_line(), if stdout_open => (true, result),
-                        result = stderr.next_line(), if stderr_open => (false, result),
+                        next_line = lines.recv() => next_line,
                     };
-                    match result {
-                        Ok(Some(line)) => {
-                            if line.trim_start().starts_with(AF_READINESS_PROBE_PREFIX) {
-                                if verify_sandbox && !is_stdout {
-                                    if let Some(probe) =
-                                        parse_readiness_probe_record(&line, &sandbox_units)
-                                    {
-                                        record_readiness_probe(
-                                            &mut recorded_readiness_probes,
-                                            probe,
-                                        );
-                                    }
+                    let Some(stream_line) = next_line else {
+                        break;
+                    };
+                    let is_stdout = matches!(
+                        stream_line.source,
+                        crate::bounded_command::StreamSource::Stdout
+                    );
+                    let raw = stream_line
+                        .bytes
+                        .strip_suffix(b"\r")
+                        .unwrap_or(stream_line.bytes.as_slice());
+                    for segment in raw.split(|b| *b == b'\r') {
+                        let bounded = if segment.len() > LEGACY_STREAM_MAX_OUTPUT_LINE_BYTES {
+                            &segment[..LEGACY_STREAM_MAX_OUTPUT_LINE_BYTES]
+                        } else {
+                            segment
+                        };
+                        let mut line = String::from_utf8_lossy(bounded).into_owned();
+                        if line.len() > LEGACY_STREAM_MAX_OUTPUT_LINE_BYTES {
+                            line.truncate(
+                                line.floor_char_boundary(LEGACY_STREAM_MAX_OUTPUT_LINE_BYTES),
+                            );
+                        }
+                        if line.trim_start().starts_with(AF_READINESS_PROBE_PREFIX) {
+                            if verify_sandbox && !is_stdout {
+                                if let Some(probe) =
+                                    parse_readiness_probe_record(&line, &sandbox_units)
+                                {
+                                    record_readiness_probe(
+                                        &mut recorded_readiness_probes,
+                                        probe,
+                                    );
                                 }
-                                continue;
                             }
-                            if let Some(pos) = line.find("AF_DIAG_FAILURE=") {
-                                let json_slice = &line[pos + "AF_DIAG_FAILURE=".len()..];
-                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_slice.trim()) {
-                                    diag_failure = Some(v);
-                                }
-                            }
-                            let lower = line.to_ascii_lowercase();
-                            if crate::package_lifecycle::is_incomplete_rollback_error(&line)
-                                || lower.contains("incomplete-rollback")
-                                || lower.contains("incomplete rollback")
-                                || lower.contains("recovery backup preserved")
+                            continue;
+                        }
+                        if let Some(pos) = line.find("AF_DIAG_FAILURE=") {
+                            let json_slice = &line[pos + "AF_DIAG_FAILURE=".len()..];
+                            if let Ok(v) =
+                                serde_json::from_str::<serde_json::Value>(json_slice.trim())
                             {
-                                saw_incomplete_rollback_line = Some(crate::package_lifecycle::sanitize_lifecycle_field(line.trim()));
+                                diag_failure = Some(v);
                             }
-                            yield Ok(format!("{}\n", line));
                         }
-                        Ok(None) if is_stdout => stdout_open = false,
-                        Ok(None) => stderr_open = false,
-                        Err(error) => {
-                            terminate_child_process_group(&mut child).await;
-                            let rb = rollback_legacy_sandbox_with_lease(
-                                &maintenance_guard,
-                                &mut sandbox_journal,
-                                &sandbox_units,
-                                &sandbox_systemd_root,
-                                live_sandbox,
-                            )
-                            .await;
-                            yield Ok(format_error_with_sandbox_rollback(error.to_string(), rb));
-                            return;
+                        let lower = line.to_ascii_lowercase();
+                        if crate::package_lifecycle::is_incomplete_rollback_error(&line)
+                            || lower.contains("incomplete-rollback")
+                            || lower.contains("incomplete rollback")
+                            || lower.contains("recovery backup preserved")
+                        {
+                            saw_incomplete_rollback_line = Some(
+                                crate::package_lifecycle::sanitize_lifecycle_field(line.trim()),
+                            );
                         }
+                        yield Ok(format!("{}\n", line));
                     }
                 }
+                let mut outcome = outcome;
                 let status = tokio::select! {
                     biased;
                     _ = wait_for_cancellation(&cancel) => {
-                        terminate_child_process_group(&mut child).await;
+                        let notified = reaped.1.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+                        drop(outcome);
+                        drop(lines);
+                        if !reaped.0.load(std::sync::atomic::Ordering::Acquire) {
+                            let _ = tokio::time::timeout(Duration::from_secs(5), notified).await;
+                        }
                         let rb = rollback_legacy_sandbox_with_lease(
                             &maintenance_guard,
                             &mut sandbox_journal,
@@ -1129,7 +1213,12 @@ pub fn execute_package_request_stream(
                         ));
                         return;
                     }
-                    status = child.wait() => status,
+                    result = &mut outcome => match result {
+                        Ok(status_res) => status_res,
+                        Err(_) => Err(std::io::Error::other(
+                            "package script supervisor stopped before reporting an outcome",
+                        )),
+                    },
                 };
                 match status {
                     Ok(status) if !status.success() => {

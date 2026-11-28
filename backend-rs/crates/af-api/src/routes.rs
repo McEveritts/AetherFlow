@@ -545,10 +545,6 @@ fn build_v1_tracked_router_with_options(include_peer_routes: bool) -> TrackedRou
         .merge(ai_limited_auth)
         .route("/session", get(get_session))
         .route("/ready", get(authenticated_ready))
-        .route(
-            "/refresh",
-            post(refresh_session_with_peer).layer(middleware::from_fn(auth_rate_limit_middleware)),
-        )
         .route("/sessions", get(list_active_sessions))
         .route("/sessions/:jti", delete(revoke_session))
         .route("/logout", post(logout))
@@ -656,7 +652,20 @@ fn build_v1_tracked_router_with_options(include_peer_routes: bool) -> TrackedRou
                 .delete(proxy_plugin_wildcard_handler),
         )
         .layer(middleware::from_fn(csrf_middleware))
-        .layer(middleware::from_fn(auth_middleware));
+        .layer(middleware::from_fn(auth_middleware))
+        // SEC-10: `/auth/refresh` lives in a dedicated sub-router whose OUTERMOST layer is the
+        // auth rate limiter (layers added later wrap earlier ones). Unauthenticated / invalid-token
+        // floods are therefore throttled before `auth_middleware`, `csrf_middleware`, JWT
+        // verification, and SQLite revocation lookups. Merged after `auth_routes` is layered so
+        // the shared auth/CSRF stack is not applied twice, and because `nest` drops default
+        // fallbacks the limiter only ever wraps this route (route-layer semantics).
+        .merge(
+            TrackedRouter::new()
+                .route("/refresh", post(refresh_session_with_peer))
+                .layer(middleware::from_fn(csrf_middleware))
+                .layer(middleware::from_fn(auth_middleware))
+                .layer(middleware::from_fn(auth_rate_limit_middleware)),
+        );
 
     let quota_guarded_upload = TrackedRouter::new()
         .route("/fileshare/upload", post(upload_file))
@@ -887,6 +896,117 @@ fn build_v1_tracked_router_with_options(include_peer_routes: bool) -> TrackedRou
 // ──────────────────────────────────────────────────────────────────────────────
 // Regression & Unit Test Modules
 // ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod sec10_refresh_rate_limit_tests {
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn flood_request(path: &str, ip: &str, peer_principal: bool) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::HOST, "localhost")
+            .header(header::AUTHORIZATION, "Bearer invalid.jwt.flood-token")
+            .header(header::COOKIE, "aetherflow_session=forged.session.cookie")
+            .header("x-real-ip", ip)
+            .extension(axum::extract::ConnectInfo(
+                "127.0.0.1:42001".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+        if peer_principal {
+            // A forged peer principal without a matching run-as `AuthUser` is rejected by
+            // `auth_middleware` with 401 before the handler runs. If the limiter sat inside
+            // `auth_middleware`, these requests would never be counted and never see 429.
+            builder = builder.extension(crate::auth::PeerPrincipal {
+                link_id: "flood-link".to_string(),
+                link_name: "flood".to_string(),
+                local_server: "local".to_string(),
+                grant_id: "flood-grant".to_string(),
+                run_as_user_id: 999_001,
+                run_as_username: "peer:flood".to_string(),
+                access: af_db::peers::AccessMap::default(),
+                origin_operator: None,
+                request_id: "flood".to_string(),
+            });
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn sec10_unauthenticated_refresh_flood_hits_429_before_auth_and_revocation() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        std::env::remove_var("AF_DISABLE_RATELIMIT");
+        std::env::set_var("ALLOWED_HOSTS", "localhost");
+        let app = crate::routes::build_router();
+
+        let cases = [
+            ("/api/v1/auth/refresh", "198.51.100.71", false),
+            ("/api/auth/refresh", "198.51.100.72", false),
+            ("/api/v1/auth/refresh", "198.51.100.73", true),
+            ("/api/auth/refresh", "198.51.100.74", true),
+        ];
+        for (path, ip, peer) in cases {
+            for attempt in 0..10 {
+                let resp = app
+                    .clone()
+                    .oneshot(flood_request(path, ip, peer))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{path} peer={peer} attempt {attempt} must be rejected as unauthenticated"
+                );
+            }
+            for _ in 0..3 {
+                let limited = app
+                    .clone()
+                    .oneshot(flood_request(path, ip, peer))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    limited.status(),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "{path} peer={peer}: auth rate limit must fire before auth/revocation"
+                );
+                assert_eq!(
+                    limited
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("60")
+                );
+            }
+        }
+
+        // A different client IP is unaffected by another IP's flood.
+        let other = app
+            .clone()
+            .oneshot(flood_request(
+                "/api/v1/auth/refresh",
+                "198.51.100.75",
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(other.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn sec10_refresh_routes_are_registered_once_per_tree() {
+        let routes = crate::routes::registered_production_routes();
+        for path in ["/api/v1/auth/refresh", "/api/auth/refresh"] {
+            let count = routes
+                .iter()
+                .filter(|r| r.method == Method::POST && r.path == path)
+                .count();
+            assert_eq!(count, 1, "{path} must be registered exactly once");
+        }
+    }
+}
 
 #[cfg(test)]
 #[path = "http_lifecycle_regressions.rs"]

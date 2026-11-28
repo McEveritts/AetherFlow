@@ -457,7 +457,11 @@ fn test_dry_run_offline_never_touches_host_or_restarts_systemd() {
 
     assert!(report.dry_run);
     assert!(report.offline);
-    assert_eq!(report.release_tag, "v4.0.0-dryrun");
+    let expected_dryrun_version = format!(
+        "{}-dryrun",
+        crate::runtime::runtime_identity().version.trim()
+    );
+    assert_eq!(report.release_tag, expected_dryrun_version);
     assert_eq!(report.channel, ReleaseChannel::Nightly);
     assert!(report.release_dir.starts_with(&cfg.dry_run_root));
     assert!(report.current_link.starts_with(&cfg.dry_run_root));
@@ -1144,4 +1148,93 @@ fn transcode_worker_restarts_only_when_active() {
         fs::read_to_string(&log_path).unwrap(),
         "is-active --quiet af-transcode-worker.service\nrestart af-transcode-worker.service\n"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn w1b_r2_helper_preflight_custom_cli_dir_af_heal_cleanup_and_artifact_precedence() {
+    use std::collections::HashMap;
+    use std::os::unix::fs::symlink;
+
+    let sb = TempSandbox::new("w1b-r2-parity");
+    let mut cfg = ReleaseConfig::for_root(sb.path());
+    let custom_bin = sb.path().join("custom/bin");
+    cfg.cli_bin_dir = custom_bin.clone();
+
+    let rel_dir = cfg.releases_dir.join("100");
+    fs::create_dir_all(rel_dir.join("packages/system")).unwrap();
+    fs::write(
+        rel_dir.join("packages/system/af-certbot-sync"),
+        "#!/bin/sh\necho cb\n",
+    )
+    .unwrap();
+    fs::write(
+        rel_dir.join("packages/system/af-systemd-sandbox"),
+        "#!/bin/sh\necho sb\n",
+    )
+    .unwrap();
+    fs::write(
+        rel_dir.join("packages/system/af-heal"),
+        "#!/bin/sh\necho legacy\n",
+    )
+    .unwrap();
+    fs::write(rel_dir.join("packages/EGM.md"), "internal\n").unwrap();
+    fs::write(rel_dir.join("packages/README.md"), "readme\n").unwrap();
+
+    // Create retired /usr/bin/af-heal to confirm sync removes it.
+    let usr_bin = sb.path().join("usr/bin");
+    fs::create_dir_all(&usr_bin).unwrap();
+    fs::write(usr_bin.join("af-heal"), "old-heal").unwrap();
+
+    // 1. Pre-swap preflight rejects a symlinked destination subdirectory before any sync occurs.
+    let outside_dir = sb.path().join("outside-dir");
+    fs::create_dir_all(&outside_dir).unwrap();
+    fs::create_dir_all(&custom_bin).unwrap();
+    fs::create_dir_all(custom_bin.join("AetherFlow")).unwrap();
+    symlink(&outside_dir, custom_bin.join("AetherFlow/system")).unwrap();
+    let err =
+        crate::engine::preflight_release_packages_and_helpers(&cfg, &rel_dir, false).unwrap_err();
+    assert!(matches!(err, ReleaseError::PathValidation { .. }));
+    fs::remove_file(custom_bin.join("AetherFlow/system")).unwrap();
+
+    // 2. Legacy symlinked leaf at custom cli_bin_dir/af-certbot-sync is atomically upgraded to a
+    // regular file without modifying the symlink target (matching release-manager.sh PIPE-02),
+    // retired af-heal is removed, and EGM.md / README.md / system/af-heal are skipped.
+    let outside = sb.path().join("outside-file");
+    fs::write(&outside, "x").unwrap();
+    symlink(&outside, custom_bin.join("af-certbot-sync")).unwrap();
+    crate::engine::preflight_release_packages_and_helpers(&cfg, &rel_dir, false).unwrap();
+    crate::engine::sync_release_packages_and_helpers(&cfg, &rel_dir, false).unwrap();
+
+    assert!(!fs::symlink_metadata(custom_bin.join("af-certbot-sync"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(custom_bin.join("af-certbot-sync").is_file());
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "x");
+    assert!(custom_bin
+        .join("AetherFlow/system/af-certbot-sync")
+        .is_file());
+    assert!(!custom_bin.join("AetherFlow/EGM.md").exists());
+    assert!(!custom_bin.join("AetherFlow/README.md").exists());
+    assert!(!custom_bin.join("AetherFlow/system/af-heal").exists());
+    assert!(!usr_bin.join("af-heal").exists());
+
+    // 2b. Symlinked retired /usr/bin/af-heal is unlinked cleanly without touching its target (W1B-02).
+    symlink(&outside, usr_bin.join("af-heal")).unwrap();
+    assert!(usr_bin.join("af-heal").symlink_metadata().is_ok());
+    crate::engine::sync_release_packages_and_helpers(&cfg, &rel_dir, false).unwrap();
+    assert!(usr_bin.join("af-heal").symlink_metadata().is_err());
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "x");
+
+    // 3. ARTIFACT_NAME takes precedence over legacy RELEASE_ASSET_NAME (matching release-manager.sh).
+    let mut env_map = HashMap::new();
+    env_map.insert("AETHERFLOW_SKIP_ENV_FILES".to_string(), "1".to_string());
+    env_map.insert("ARTIFACT_NAME".to_string(), "primary.tar.gz".to_string());
+    env_map.insert(
+        "RELEASE_ASSET_NAME".to_string(),
+        "legacy.tar.gz".to_string(),
+    );
+    let loaded = ReleaseConfig::load_for_root_with_env(Some(sb.path()), None, &env_map).unwrap();
+    assert_eq!(loaded.artifact_name, "primary.tar.gz");
 }

@@ -221,23 +221,29 @@ pub fn default_release_asset_for_arch(arch: &str) -> &'static str {
 }
 
 /// Redacted secret wrapper for GitHub tokens loaded from process env or `/etc/aetherflow/aetherflow.env`.
-/// Never reveals the plaintext secret in `Debug` output and is never serialized into `.conf` or JSON.
+/// Backed by [`af_models::secret_zeroize::SecretString`] so `Debug` renders `"[REDACTED]"`,
+/// equality is constant-time, the value is never serialized into `.conf` or JSON, and its
+/// full `0..capacity` backing storage is volatile-zeroized on drop.
 #[derive(Clone, PartialEq, Eq)]
-pub struct RedactedSecret(String);
+pub struct RedactedSecret(af_models::secret_zeroize::SecretString);
 
 impl RedactedSecret {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(af_models::secret_zeroize::SecretString::new(value.into()))
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.expose_secret()
+    }
+
+    pub fn expose_secret(&self) -> &str {
+        self.0.expose_secret()
     }
 }
 
 impl fmt::Debug for RedactedSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("[REDACTED]")
+        fmt::Debug::fmt(&self.0, f)
     }
 }
 
@@ -507,14 +513,7 @@ impl ReleaseConfig {
 
         let mut parsed_entries: HashMap<String, ParsedConfEntry> = HashMap::new();
         if let Some(conf_file_path) = conf_path {
-            if conf_file_path.is_file() {
-                parsed_entries = parse_conf_file_entries(conf_file_path)?;
-            } else {
-                return Err(ReleaseError::Config(format!(
-                    "configuration file not found: {}",
-                    conf_file_path.display()
-                )));
-            }
+            parsed_entries = parse_conf_file_entries(conf_file_path, effective_root.as_deref())?;
         }
 
         if let Some(conf_root_entry) = parsed_entries.get("AETHERFLOW_RELEASE_ROOT") {
@@ -608,7 +607,9 @@ impl ReleaseConfig {
         if let Some(val) = get_var("RELEASE_CHANNEL", false) {
             cfg.release_channel = ReleaseChannel::from_str(&val)?;
         }
-        if let Some(val) = get_var("ARTIFACT_NAME", false) {
+        if let Some(val) =
+            get_var("ARTIFACT_NAME", false).or_else(|| get_var("RELEASE_ASSET_NAME", false))
+        {
             cfg.artifact_name = val;
         }
         if let Some(val) = get_var("CHECKSUM_NAME", false) {
@@ -707,15 +708,19 @@ impl ReleaseConfig {
         cfg.host_data_dir = cfg.data_dir.clone();
         cfg.isolated_root = effective_root.clone();
 
-        // Unified secret and runtime override loading from `cfg.env_file` (`/etc/aetherflow/aetherflow.env`)
-        // with exact precedence:
-        // process env > explicit --config assignment > cfg.env_file (unless AETHERFLOW_SKIP_ENV_FILES=1)
-        // > default-fallback --config line (is_default_fallback = true) > compiled default.
-        let env_file_content = load_env_file_if_enabled(&cfg.env_file, env_map);
-        let env_file_trusted_root =
-            is_trusted_root_env_file(&cfg.env_file, effective_root.as_deref());
+        // Unified secret and runtime override loading from `cfg.env_file` (`/etc/aetherflow/aetherflow.env`):
+        // - Non-secret runtime settings (e.g., `HEALTH_ENDPOINT`):
+        //   process env > explicit --config > cfg.env_file (unless AETHERFLOW_SKIP_ENV_FILES=1)
+        //   > default-fallback --config > compiled default.
+        // - Secret GitHub tokens (`AF_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`):
+        //   process env > cfg.env_file ONLY (strictly forbidden in `--config`, enforced by `ALLOWED_CONF_KEYS`).
+        // - Security-critical `AETHERFLOW_SKIP_PROVENANCE_VERIFY`:
+        //   process env > trusted root `cfg.env_file` ONLY (NEVER resolved from `--config`).
+        let (env_file_content, env_file_trusted_root) =
+            load_env_file_if_enabled_with_trust(&cfg.env_file, env_map, effective_root.as_deref());
 
-        let resolve_with_env_file = |key: &str, require_root_env_file: bool| -> Option<String> {
+        let resolve_health_endpoint = || -> Option<String> {
+            let key = "HEALTH_ENDPOINT";
             if let Some(env_val) = env_map
                 .get(key)
                 .map(|raw_val| raw_val.trim())
@@ -729,13 +734,11 @@ impl ReleaseConfig {
                     return Some(trimmed.to_string());
                 }
             }
-            if !require_root_env_file || env_file_trusted_root {
-                if let Some(ref content) = env_file_content {
-                    if let Some(val) = read_env_str_value(content, key) {
-                        let trimmed = val.trim();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed.to_string());
-                        }
+            if let Some(ref content) = env_file_content {
+                if let Some(val) = read_env_str_value(content.expose_secret(), key) {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
                     }
                 }
             }
@@ -748,7 +751,7 @@ impl ReleaseConfig {
             None
         };
 
-        if let Some(val) = resolve_with_env_file("HEALTH_ENDPOINT", false) {
+        if let Some(val) = resolve_health_endpoint() {
             cfg.health_endpoint = val;
         }
 
@@ -763,37 +766,35 @@ impl ReleaseConfig {
                     .map(str::to_string)
             })
             .or_else(|| {
-                github_token_keys.iter().find_map(|key| {
-                    parsed_entries
-                        .get(*key)
-                        .filter(|entry| {
-                            !entry.is_default_fallback && !entry.value.trim().is_empty()
-                        })
-                        .map(|entry| entry.value.trim().to_string())
-                })
-            })
-            .or_else(|| {
-                env_file_content.as_deref().and_then(|content| {
+                env_file_content.as_ref().and_then(|content| {
                     github_token_keys.iter().find_map(|key| {
-                        read_env_str_value(content, key)
+                        read_env_str_value(content.expose_secret(), key)
                             .map(|val| val.trim().to_string())
                             .filter(|trimmed| !trimmed.is_empty())
                     })
                 })
-            })
-            .or_else(|| {
-                github_token_keys.iter().find_map(|key| {
-                    parsed_entries
-                        .get(*key)
-                        .filter(|entry| entry.is_default_fallback && !entry.value.trim().is_empty())
-                        .map(|entry| entry.value.trim().to_string())
-                })
             });
         cfg.github_auth_token = resolved_token.map(RedactedSecret::new);
 
-        cfg.skip_provenance_verify =
-            resolve_with_env_file("AETHERFLOW_SKIP_PROVENANCE_VERIFY", true).as_deref()
-                == Some("1");
+        let skip_prov_val = env_map
+            .get("AETHERFLOW_SKIP_PROVENANCE_VERIFY")
+            .map(|raw| raw.trim().to_string())
+            .filter(|trimmed| !trimmed.is_empty())
+            .or_else(|| {
+                if env_file_trusted_root {
+                    env_file_content.as_ref().and_then(|content| {
+                        read_env_str_value(
+                            content.expose_secret(),
+                            "AETHERFLOW_SKIP_PROVENANCE_VERIFY",
+                        )
+                        .map(|val| val.trim().to_string())
+                        .filter(|trimmed| !trimmed.is_empty())
+                    })
+                } else {
+                    None
+                }
+            });
+        cfg.skip_provenance_verify = skip_prov_val.as_deref() == Some("1");
 
         cfg.validate()?;
 
@@ -971,9 +972,14 @@ impl ReleaseConfig {
             out.env_dir = self.dry_run_root.join("etc");
             out.env_file = self.dry_run_root.join("etc/aetherflow.env");
             out.log_file = self.dry_run_root.join("deploy.log");
-            out.cli_bin_dir = self.dry_run_root.join("bin");
+            out.cli_bin_dir = self.dry_run_root.join("usr/local/bin");
         }
         out
+    }
+
+    pub fn is_dry_run_config(&self) -> bool {
+        self.data_dir == self.dry_run_root.join("data")
+            && self.releases_dir == self.dry_run_root.join("releases")
     }
 
     pub fn validate(&self) -> ReleaseResult<()> {
@@ -1091,9 +1097,424 @@ pub fn validate_no_parent_traversal(path: &Path, label: &str) -> ReleaseResult<(
     Ok(())
 }
 
-fn parse_conf_file_entries(path: &Path) -> ReleaseResult<HashMap<String, ParsedConfEntry>> {
-    let content = fs::read_to_string(path)
+/// Exact 31-key allowlist permitted inside `release-manager.conf` (`--config`), aligned 1:1 with
+/// `deploy/release-manager.sh:398-405` (`PIPE-01`). Secret tokens (`AF_GITHUB_TOKEN`, `GITHUB_TOKEN`,
+/// `GH_TOKEN`) and security bypass flags (`AETHERFLOW_SKIP_PROVENANCE_VERIFY`) are strictly excluded.
+pub const ALLOWED_CONF_KEYS: [&str; 31] = [
+    "RELEASES_DIR",
+    "CURRENT_LINK",
+    "REPO_DIR",
+    "LEGACY_OPT_ROOT",
+    "DRY_RUN_ROOT",
+    "GITHUB_REPO",
+    "RELEASE_CHANNEL",
+    "ARTIFACT_NAME",
+    "RELEASE_ASSET_NAME",
+    "CHECKSUM_NAME",
+    "GIT_BRANCH",
+    "GIT_REMOTE",
+    "NODE_HEAP_MB",
+    "HEALTH_ENDPOINT",
+    "HEALTH_RETRIES",
+    "HEALTH_INTERVAL",
+    "MAX_RELEASES",
+    "LOG_FILE",
+    "DATA_DIR",
+    "ENV_DIR",
+    "ENV_FILE",
+    "SQLITE_DB",
+    "SNAPSHOT_TIMEOUT",
+    "SYSTEMD_UNITS_SRC",
+    "SYSTEMD_UNITS_DST",
+    "CLI_BIN_DIR",
+    "TRANSCODE_SHIM_PATH",
+    "AETHERFLOW_RELEASE_ROOT",
+    "AF_DB_PATH",
+    "DB_PATH",
+    "AETHERFLOW_DB_PATH",
+];
+
+const MAX_CONF_FILE_BYTES: u64 = 64 * 1024;
+
+#[cfg(unix)]
+fn open_conf_file_via_openat(path: &Path, isolated_root: Option<&Path>) -> ReleaseResult<fs::File> {
+    use std::ffi::{CString, OsStr, OsString};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::path::Component;
+
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| ReleaseError::io("resolving working directory for --config", err))?
+            .join(path)
+    };
+    let leaf = abs_path
+        .file_name()
+        .ok_or_else(|| ReleaseError::PathValidation {
+            path: path.to_path_buf(),
+            reason: "configuration path has no filename".to_string(),
+        })?;
+    let parent = abs_path
+        .parent()
+        .ok_or_else(|| ReleaseError::PathValidation {
+            path: path.to_path_buf(),
+            reason: "configuration path has no parent directory".to_string(),
+        })?;
+    let is_root = unsafe { libc::geteuid() == 0 };
+
+    // Anchor traversal at `isolated_root` when `path` lies inside it (matching release-manager.sh
+    // so host OS symlinks above an isolated staging root such as /var/run -> /run do not cause
+    // false rejections), otherwise anchor at `/`.
+    let (anchor_path, rel_parent): (PathBuf, PathBuf) = match isolated_root {
+        Some(root) if parent.starts_with(root) => (
+            root.to_path_buf(),
+            parent
+                .strip_prefix(root)
+                .unwrap_or(Path::new(""))
+                .to_path_buf(),
+        ),
+        _ => (
+            PathBuf::from("/"),
+            parent.strip_prefix("/").unwrap_or(parent).to_path_buf(),
+        ),
+    };
+
+    let anchor_c = CString::new(anchor_path.as_os_str().as_bytes()).map_err(|_| {
+        ReleaseError::PathValidation {
+            path: anchor_path.clone(),
+            reason: "configuration anchor path contains NUL byte".to_string(),
+        }
+    })?;
+    let anchor_fd = unsafe {
+        libc::open(
+            anchor_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if anchor_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(if err.raw_os_error() == Some(libc::ENOENT) {
+            ReleaseError::Config(format!("configuration file not found: {}", path.display()))
+        } else {
+            ReleaseError::io(
+                format!("opening configuration root {}", anchor_path.display()),
+                err,
+            )
+        });
+    }
+    let mut cur_dir = unsafe { fs::File::from_raw_fd(anchor_fd) };
+    let mut cur_path = anchor_path;
+
+    let open_child_dir_nofollow =
+        |dir: &fs::File, name: &OsStr, disp: &Path| -> ReleaseResult<fs::File> {
+            let name_c =
+                CString::new(name.as_bytes()).map_err(|_| ReleaseError::PathValidation {
+                    path: disp.to_path_buf(),
+                    reason: "configuration ancestor contains NUL byte".to_string(),
+                })?;
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name_c.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                let err = std::io::Error::last_os_error();
+                return Err(match err.raw_os_error() {
+                    Some(libc::ENOENT) => ReleaseError::Config(format!(
+                        "configuration file not found: {}",
+                        path.display()
+                    )),
+                    Some(libc::ELOOP) | Some(libc::ENOTDIR) => ReleaseError::PathValidation {
+                        path: disp.to_path_buf(),
+                        reason: "refusing symlinked or non-directory configuration ancestor"
+                            .to_string(),
+                    },
+                    _ => ReleaseError::io(
+                        format!("opening configuration ancestor {}", disp.display()),
+                        err,
+                    ),
+                });
+            }
+            Ok(unsafe { fs::File::from_raw_fd(fd) })
+        };
+
+    for comp in rel_parent.components() {
+        match comp {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => continue,
+            Component::ParentDir => {
+                return Err(ReleaseError::PathValidation {
+                    path: path.to_path_buf(),
+                    reason: "refusing parent traversal in configuration path".to_string(),
+                });
+            }
+            Component::Normal(part) => {
+                let nxt = cur_path.join(part);
+                let part_c =
+                    CString::new(part.as_bytes()).map_err(|_| ReleaseError::PathValidation {
+                        path: nxt.clone(),
+                        reason: "configuration ancestor contains NUL byte".to_string(),
+                    })?;
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe {
+                    libc::fstatat(
+                        cur_dir.as_raw_fd(),
+                        part_c.as_ptr(),
+                        &mut st,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                } != 0
+                {
+                    let err = std::io::Error::last_os_error();
+                    return Err(if err.raw_os_error() == Some(libc::ENOENT) {
+                        ReleaseError::Config(format!(
+                            "configuration file not found: {}",
+                            path.display()
+                        ))
+                    } else {
+                        ReleaseError::io(
+                            format!("inspecting configuration ancestor {}", nxt.display()),
+                            err,
+                        )
+                    });
+                }
+                if (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
+                    let is_managed_current = part == OsStr::new("current")
+                        && cur_path.file_name() == Some(OsStr::new("AetherFlow"))
+                        && cur_path.parent().and_then(Path::file_name) == Some(OsStr::new("opt"));
+                    if !is_managed_current {
+                        return Err(ReleaseError::PathValidation {
+                            path: nxt,
+                            reason: "refusing symlinked configuration ancestor directory"
+                                .to_string(),
+                        });
+                    }
+                    if is_root && st.st_uid != 0 {
+                        return Err(ReleaseError::PathValidation {
+                            path: nxt,
+                            reason: "refusing non-root-owned current release symlink".to_string(),
+                        });
+                    }
+                    let mut buf = vec![0u8; 4096];
+                    let n = unsafe {
+                        libc::readlinkat(
+                            cur_dir.as_raw_fd(),
+                            part_c.as_ptr(),
+                            buf.as_mut_ptr() as *mut libc::c_char,
+                            buf.len(),
+                        )
+                    };
+                    if n <= 0 || (n as usize) >= buf.len() {
+                        return Err(ReleaseError::io(
+                            format!("reading current release symlink {}", nxt.display()),
+                            std::io::Error::last_os_error(),
+                        ));
+                    }
+                    buf.truncate(n as usize);
+                    let raw_target = PathBuf::from(OsString::from_vec(buf));
+                    if raw_target
+                        .components()
+                        .any(|c| matches!(c, Component::ParentDir))
+                    {
+                        return Err(ReleaseError::PathValidation {
+                            path: nxt,
+                            reason: "refusing parent traversal in current release symlink"
+                                .to_string(),
+                        });
+                    }
+                    let resolved_target = if raw_target.is_absolute() {
+                        raw_target
+                    } else {
+                        cur_path.join(raw_target)
+                    };
+                    let expected_releases = cur_path.join("releases");
+                    if resolved_target.parent() != Some(expected_releases.as_path()) {
+                        return Err(ReleaseError::PathValidation {
+                            path: nxt,
+                            reason: "refusing current release symlink outside releases/"
+                                .to_string(),
+                        });
+                    }
+                    let epoch_name = resolved_target.file_name().ok_or_else(|| {
+                        ReleaseError::PathValidation {
+                            path: nxt.clone(),
+                            reason: "invalid current release symlink target".to_string(),
+                        }
+                    })?;
+                    let releases_dir = open_child_dir_nofollow(
+                        &cur_dir,
+                        OsStr::new("releases"),
+                        &expected_releases,
+                    )?;
+                    let epoch_dir =
+                        open_child_dir_nofollow(&releases_dir, epoch_name, &resolved_target)?;
+                    if is_root {
+                        for (dfd, disp) in [
+                            (releases_dir.as_raw_fd(), &expected_releases),
+                            (epoch_dir.as_raw_fd(), &resolved_target),
+                        ] {
+                            let mut hst: libc::stat = unsafe { std::mem::zeroed() };
+                            if unsafe { libc::fstat(dfd, &mut hst) } != 0
+                                || hst.st_uid != 0
+                                || (hst.st_mode & 0o022) != 0
+                            {
+                                return Err(ReleaseError::PathValidation {
+                                    path: disp.clone(),
+                                    reason: "refusing untrusted release directory ownership/mode"
+                                        .to_string(),
+                                });
+                            }
+                        }
+                    }
+                    cur_dir = epoch_dir;
+                    cur_path = resolved_target;
+                    continue;
+                }
+                cur_dir = open_child_dir_nofollow(&cur_dir, part, &nxt)?;
+                cur_path = nxt;
+            }
+        }
+    }
+
+    let leaf_c = CString::new(leaf.as_bytes()).map_err(|_| ReleaseError::PathValidation {
+        path: path.to_path_buf(),
+        reason: "configuration filename contains NUL byte".to_string(),
+    })?;
+    let leaf_fd = unsafe {
+        libc::openat(
+            cur_dir.as_raw_fd(),
+            leaf_c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if leaf_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(match err.raw_os_error() {
+            Some(libc::ENOENT) => {
+                ReleaseError::Config(format!("configuration file not found: {}", path.display()))
+            }
+            Some(libc::ELOOP) => ReleaseError::PathValidation {
+                path: path.to_path_buf(),
+                reason: "refusing symlinked configuration file".to_string(),
+            },
+            _ => ReleaseError::io(format!("opening config file {}", path.display()), err),
+        });
+    }
+    Ok(unsafe { fs::File::from_raw_fd(leaf_fd) })
+}
+
+fn read_conf_file_secure(path: &Path, isolated_root: Option<&Path>) -> ReleaseResult<String> {
+    use std::io::Read;
+
+    validate_no_parent_traversal(path, "configuration file")?;
+
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::io::AsRawFd;
+
+        let opened = open_conf_file_via_openat(path, isolated_root)?;
+
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(opened.as_raw_fd(), &mut st) } != 0 {
+            return Err(ReleaseError::io(
+                format!("fstat config file {}", path.display()),
+                std::io::Error::last_os_error(),
+            ));
+        }
+        if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+            return Err(ReleaseError::PathValidation {
+                path: path.to_path_buf(),
+                reason: "configuration path is not a regular file".to_string(),
+            });
+        }
+        if (st.st_mode & 0o002) != 0 {
+            return Err(ReleaseError::PathValidation {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "refusing world-writable configuration file (mode {:04o})",
+                    st.st_mode & 0o777
+                ),
+            });
+        }
+        if unsafe { libc::geteuid() } == 0 {
+            if st.st_uid != 0 {
+                return Err(ReleaseError::PathValidation {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "refusing non-root-owned configuration file (uid={}) while running as root",
+                        st.st_uid
+                    ),
+                });
+            }
+            if (st.st_mode & 0o022) != 0 {
+                return Err(ReleaseError::PathValidation {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "refusing group/world-writable configuration file (mode {:04o}) while running as root",
+                        st.st_mode & 0o777
+                    ),
+                });
+            }
+        }
+        if st.st_size < 0 || (st.st_size as u64) > MAX_CONF_FILE_BYTES {
+            return Err(ReleaseError::Config(format!(
+                "configuration file {} exceeds maximum size ({} bytes)",
+                path.display(),
+                MAX_CONF_FILE_BYTES
+            )));
+        }
+        opened
+    };
+
+    #[cfg(not(unix))]
+    let file = {
+        let _ = isolated_root;
+        let meta = fs::symlink_metadata(path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                ReleaseError::Config(format!("configuration file not found: {}", path.display()))
+            } else {
+                ReleaseError::io(format!("inspecting config file {}", path.display()), err)
+            }
+        })?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(ReleaseError::PathValidation {
+                path: path.to_path_buf(),
+                reason: "configuration path must be a regular non-symlink file".to_string(),
+            });
+        }
+        fs::File::open(path).map_err(|err| {
+            ReleaseError::io(format!("opening config file {}", path.display()), err)
+        })?
+    };
+
+    let mut raw = Vec::new();
+    file.take(MAX_CONF_FILE_BYTES + 1)
+        .read_to_end(&mut raw)
         .map_err(|err| ReleaseError::io(format!("reading config file {}", path.display()), err))?;
+    if (raw.len() as u64) > MAX_CONF_FILE_BYTES {
+        return Err(ReleaseError::Config(format!(
+            "configuration file {} exceeds maximum size ({} bytes)",
+            path.display(),
+            MAX_CONF_FILE_BYTES
+        )));
+    }
+    String::from_utf8(raw).map_err(|err| {
+        ReleaseError::Config(format!(
+            "configuration file {} is not valid UTF-8: {}",
+            path.display(),
+            err
+        ))
+    })
+}
+
+fn parse_conf_file_entries(
+    path: &Path,
+    isolated_root: Option<&Path>,
+) -> ReleaseResult<HashMap<String, ParsedConfEntry>> {
+    let content = read_conf_file_secure(path, isolated_root)?;
     try_parse_conf_entries(&content, path.parent())
 }
 
@@ -1145,6 +1566,12 @@ pub fn try_parse_conf_entries(
                 key, line_no
             )));
         }
+        if !ALLOWED_CONF_KEYS.contains(&key) {
+            return Err(ReleaseError::Config(format!(
+                "disallowed configuration key {:?} at line {} (not in release-manager.conf allowlist)",
+                key, line_no
+            )));
+        }
 
         let (mut val, is_default_fallback) =
             decode_quoted_or_raw_conf_value(val_raw, key, line_no)?;
@@ -1165,7 +1592,7 @@ pub fn try_parse_conf_entries(
 }
 
 pub fn parse_conf_file(path: &Path) -> ReleaseResult<HashMap<String, String>> {
-    let entries = parse_conf_file_entries(path)?;
+    let entries = parse_conf_file_entries(path, None)?;
     Ok(entries
         .into_iter()
         .map(|(entry_key, entry_val)| (entry_key, entry_val.value))
@@ -1198,7 +1625,7 @@ pub fn parse_conf_str(content: &str, script_dir: Option<&Path>) -> HashMap<Strin
             continue;
         };
         let key = key_raw.trim();
-        if key.is_empty() {
+        if key.is_empty() || !ALLOWED_CONF_KEYS.contains(&key) {
             continue;
         }
         if let Ok((mut val, is_default_fallback)) =
@@ -1215,17 +1642,79 @@ pub fn parse_conf_str(content: &str, script_dir: Option<&Path>) -> HashMap<Strin
     map
 }
 
-fn load_env_file_if_enabled(path: &Path, env_map: &HashMap<String, String>) -> Option<String> {
+fn load_env_file_if_enabled_with_trust(
+    path: &Path,
+    env_map: &HashMap<String, String>,
+    isolated_root: Option<&Path>,
+) -> (Option<af_models::secret_zeroize::SecretString>, bool) {
+    use std::io::Read;
+
     if env_map.get("AETHERFLOW_SKIP_ENV_FILES").map(|v| v.trim()) == Some("1") {
-        return None;
+        return (None, false);
     }
-    let meta = fs::symlink_metadata(path).ok()?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return None;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+
+        let Ok(file) = crate::fs_security::open_regular_file_nofollow_anchored(path, isolated_root)
+        else {
+            return (None, false);
+        };
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(file.as_raw_fd(), &mut st) } != 0
+            || (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+        {
+            return (None, false);
+        }
+
+        let parent_trusted = isolated_root.is_some()
+            || path
+                .parent()
+                .is_some_and(|p| crate::fs_security::is_trusted_root_path_dir(p, false));
+        let trusted = parent_trusted
+            && st.st_nlink == 1
+            && (st.st_mode & 0o022) == 0
+            && (st.st_uid == 0
+                || (isolated_root.is_some() && st.st_uid == unsafe { libc::geteuid() }));
+
+        let mut raw = Vec::new();
+        let read_res = file.take(MAX_CONF_FILE_BYTES + 1).read_to_end(&mut raw);
+        if read_res.is_err() || (raw.len() as u64) > MAX_CONF_FILE_BYTES {
+            let _wipe = af_models::secret_zeroize::SecretBytes::new(raw);
+            return (None, false);
+        }
+        match String::from_utf8(raw) {
+            Ok(content) => (
+                Some(af_models::secret_zeroize::SecretString::new(content)),
+                trusted,
+            ),
+            Err(err) => {
+                let _wipe = af_models::secret_zeroize::SecretBytes::new(err.into_bytes());
+                (None, false)
+            }
+        }
     }
-    fs::read_to_string(path).ok()
+
+    #[cfg(not(unix))]
+    {
+        let _ = isolated_root;
+        let Ok(meta) = fs::symlink_metadata(path) else {
+            return (None, false);
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return (None, false);
+        }
+        (
+            fs::read_to_string(path)
+                .ok()
+                .map(af_models::secret_zeroize::SecretString::new),
+            false,
+        )
+    }
 }
 
+#[cfg(test)]
 pub(crate) fn is_trusted_root_env_file(path: &Path, isolated_root: Option<&Path>) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return false;
@@ -1237,6 +1726,13 @@ pub(crate) fn is_trusted_root_env_file(path: &Path, isolated_root: Option<&Path>
     {
         use std::os::unix::fs::MetadataExt;
         if (meta.mode() & 0o022) != 0 {
+            return false;
+        }
+        if isolated_root.is_none()
+            && !path
+                .parent()
+                .is_some_and(|p| crate::fs_security::is_trusted_root_path_dir(p, false))
+        {
             return false;
         }
         let uid = meta.uid();
@@ -1255,9 +1751,53 @@ pub(crate) fn is_trusted_root_env_file(path: &Path, isolated_root: Option<&Path>
     }
 }
 
+fn read_env_file_secure(
+    path: &Path,
+    anchor_root: Option<&Path>,
+) -> Option<af_models::secret_zeroize::SecretString> {
+    use std::io::Read;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+
+        let file =
+            crate::fs_security::open_regular_file_nofollow_anchored(path, anchor_root).ok()?;
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(file.as_raw_fd(), &mut st) } != 0
+            || (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+        {
+            return None;
+        }
+        let mut raw = Vec::new();
+        let read_res = file.take(MAX_CONF_FILE_BYTES + 1).read_to_end(&mut raw);
+        if read_res.is_err() || (raw.len() as u64) > MAX_CONF_FILE_BYTES {
+            let _wipe = af_models::secret_zeroize::SecretBytes::new(raw);
+            return None;
+        }
+        match String::from_utf8(raw) {
+            Ok(content) => Some(af_models::secret_zeroize::SecretString::new(content)),
+            Err(err) => {
+                let _wipe = af_models::secret_zeroize::SecretBytes::new(err.into_bytes());
+                None
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let meta = fs::symlink_metadata(path).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return None;
+        }
+        fs::read_to_string(path)
+            .ok()
+            .map(af_models::secret_zeroize::SecretString::new)
+    }
+}
+
 pub fn read_env_file_value(path: &Path, key: &str) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    read_env_str_value(&content, key)
+    let content = read_env_file_secure(path, None)?;
+    read_env_str_value(content.expose_secret(), key)
 }
 
 pub fn read_env_str_value(content: &str, key: &str) -> Option<String> {
@@ -1432,11 +1972,24 @@ pub fn try_resolve_db_path(
     }
 
     let mut env_file_candidates: Vec<(&str, PathBuf)> = Vec::new();
-    for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
-        if let Some(val) = read_env_file_value(&config.host_env_file, key) {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                env_file_candidates.push((key, PathBuf::from(trimmed)));
+    let skip_host_env = config.isolated_root.is_none()
+        && normalize_root_cmp(&config.host_env_file) == "/etc/aetherflow/aetherflow.env"
+        && std::env::var("AETHERFLOW_SKIP_ENV_FILES")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            == Some("1");
+    if !skip_host_env {
+        if let Some(content) =
+            read_env_file_secure(&config.host_env_file, config.isolated_root.as_deref())
+        {
+            for key in ["AF_DB_PATH", "DB_PATH", "AETHERFLOW_DB_PATH"] {
+                if let Some(val) = read_env_str_value(content.expose_secret(), key) {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        env_file_candidates.push((key, PathBuf::from(trimmed)));
+                    }
+                }
             }
         }
     }
@@ -1506,5 +2059,125 @@ pub fn resolve_db_path(config: &ReleaseConfig, systemd_env_blob: Option<&str>) -
             path: config.host_data_dir.join(&config.sqlite_db),
             source: DbPathSource::DataDirDefault,
         },
+    }
+}
+
+#[cfg(test)]
+mod pipe01_pipe15_config_tests {
+    use super::*;
+
+    #[test]
+    fn pipe01_allowlist_has_exact_31_keys_and_forbids_provenance_bypass_and_secrets() {
+        assert_eq!(ALLOWED_CONF_KEYS.len(), 31);
+
+        // Every one of the 31 allowlisted keys must parse cleanly.
+        let all_allowed = ALLOWED_CONF_KEYS
+            .iter()
+            .map(|k| format!("{k}=\"value\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed = try_parse_conf_entries(&all_allowed, None).unwrap();
+        assert_eq!(parsed.len(), 31);
+
+        // Forbidden security/secret/arbitrary keys must be rejected by --config parser.
+        for forbidden in [
+            "AETHERFLOW_SKIP_PROVENANCE_VERIFY=1\n",
+            "AF_GITHUB_TOKEN=placeholder\n",
+            "GITHUB_TOKEN=placeholder\n",
+            "GH_TOKEN=placeholder\n",
+            "JWT_SECRET=placeholder\n",
+            "ARBITRARY_INJECTED_KEY=1\n",
+        ] {
+            let err = try_parse_conf_entries(forbidden, None).unwrap_err();
+            assert!(
+                matches!(&err, ReleaseError::Config(msg) if msg.contains("disallowed configuration key")),
+                "expected disallowed key rejection for {forbidden:?}, got: {err:?}"
+            );
+            // parse_conf_str fallback must also never admit forbidden keys.
+            assert!(
+                parse_conf_str(forbidden, None).is_empty(),
+                "parse_conf_str must drop disallowed key {forbidden:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe01_conf_loader_uses_o_nofollow_rejects_symlinks_fifos_and_world_writable_files() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root =
+            std::env::temp_dir().join(format!("af-pipe01-conf-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let empty_env = HashMap::new();
+
+        // 1. Symlinked --config file is rejected via O_NOFOLLOW.
+        let real_conf = root.join("real.conf");
+        fs::write(&real_conf, "RELEASE_CHANNEL=nightly\n").unwrap();
+        fs::set_permissions(&real_conf, fs::Permissions::from_mode(0o644)).unwrap();
+        let sym_conf = root.join("sym.conf");
+        symlink(&real_conf, &sym_conf).unwrap();
+        let sym_err =
+            ReleaseConfig::load_for_root_with_env(Some(&root), Some(&sym_conf), &empty_env)
+                .unwrap_err();
+        assert!(matches!(sym_err, ReleaseError::PathValidation { .. }));
+
+        // 2. FIFO passed as --config fails immediately without blocking (O_NONBLOCK + S_IFREG).
+        let fifo_conf = root.join("fifo.conf");
+        let fifo_c = CString::new(fifo_conf.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        let fifo_err =
+            ReleaseConfig::load_for_root_with_env(Some(&root), Some(&fifo_conf), &empty_env)
+                .unwrap_err();
+        assert!(matches!(fifo_err, ReleaseError::PathValidation { .. }));
+
+        // 3. World-writable --config is rejected.
+        let ww_conf = root.join("world-writable.conf");
+        fs::write(&ww_conf, "RELEASE_CHANNEL=nightly\n").unwrap();
+        fs::set_permissions(&ww_conf, fs::Permissions::from_mode(0o666)).unwrap();
+        let ww_err = ReleaseConfig::load_for_root_with_env(Some(&root), Some(&ww_conf), &empty_env)
+            .unwrap_err();
+        assert!(matches!(ww_err, ReleaseError::PathValidation { .. }));
+
+        // 4. --config attempting to set AETHERFLOW_SKIP_PROVENANCE_VERIFY or AF_GITHUB_TOKEN is rejected.
+        let bad_prov_conf = root.join("bad-prov.conf");
+        fs::write(&bad_prov_conf, "AETHERFLOW_SKIP_PROVENANCE_VERIFY=1\n").unwrap();
+        fs::set_permissions(&bad_prov_conf, fs::Permissions::from_mode(0o600)).unwrap();
+        let prov_err =
+            ReleaseConfig::load_for_root_with_env(Some(&root), Some(&bad_prov_conf), &empty_env)
+                .unwrap_err();
+        assert!(matches!(prov_err, ReleaseError::Config(_)));
+
+        // 5. Directory passed as --config is rejected as non-regular.
+        let dir_conf = root.join("dir-conf");
+        fs::create_dir(&dir_conf).unwrap();
+        let dir_err =
+            ReleaseConfig::load_for_root_with_env(Some(&root), Some(&dir_conf), &empty_env)
+                .unwrap_err();
+        assert!(matches!(dir_err, ReleaseError::PathValidation { .. }));
+
+        // 6. Valid regular non-world-writable config loads cleanly and keeps skip_provenance_verify=false.
+        let loaded =
+            ReleaseConfig::load_for_root_with_env(Some(&root), Some(&real_conf), &empty_env)
+                .unwrap();
+        assert_eq!(loaded.release_channel, ReleaseChannel::Nightly);
+        assert!(!loaded.skip_provenance_verify);
+        assert_eq!(loaded.github_auth_token_str(), None);
+
+        // 7. is_trusted_root_env_file rejects symlinks and group/world-writable files.
+        assert!(!is_trusted_root_env_file(&sym_conf, Some(&root)));
+        assert!(!is_trusted_root_env_file(&ww_conf, Some(&root)));
+        assert!(is_trusted_root_env_file(&bad_prov_conf, Some(&root)));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pipe15_with_dry_run_unifies_cli_bin_dir_with_release_manager_sh() {
+        let cfg = ReleaseConfig::default();
+        let dry = cfg.with_dry_run(true);
+        assert_eq!(dry.cli_bin_dir, cfg.dry_run_root.join("usr/local/bin"));
     }
 }

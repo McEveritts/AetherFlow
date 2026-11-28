@@ -196,9 +196,9 @@ pub(crate) fn render_systemd_sandbox_dropin_in_root(
             .unwrap_or_else(|| PathBuf::from("/etc/systemd/system").join(&norm_unit));
         let service_user = if needs_identity {
             let from_systemctl = if fs_root.is_none() && cfg!(target_os = "linux") {
-                std::process::Command::new("systemctl")
-                    .args(["show", &norm_unit, "-p", "User", "--value"])
-                    .output()
+                let mut cmd = Command::new("systemctl");
+                cmd.args(["show", &norm_unit, "-p", "User", "--value"]);
+                bounded_command::output_blocking(cmd, None, Duration::from_secs(5), 16 * 1024)
                     .ok()
                     .filter(|output| output.status.success())
                     .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -240,8 +240,9 @@ pub(crate) fn render_systemd_sandbox_dropin_in_root(
                     Some(root) => root.join(path.trim_start_matches('/')),
                     None => PathBuf::from(path),
                 };
-                fs::read_to_string(candidate)
+                af_release::fs_security::read_regular_file_bounded_nofollow(&candidate, 64 * 1024)
                     .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
                     .and_then(|credentials| sandbox_master_user(&credentials))
             })
             .unwrap_or_else(|| service_user.clone());
@@ -300,7 +301,7 @@ pub(crate) fn write_file_atomically_with_mode(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&temp_path, fs::Permissions::from_mode(mode))?;
+            temp_file.set_permissions(fs::Permissions::from_mode(mode))?;
         }
         temp_file.write_all(bytes)?;
         temp_file.sync_all()?;
@@ -435,11 +436,10 @@ pub(crate) async fn apply_package_sandbox_reserved(
         }
 
         let mut command = Command::new("bash");
-        command.args(&args).kill_on_drop(true);
+        command.args(&args);
         #[cfg(unix)]
         guard.preserve_in_child(command.as_std_mut())?;
-        let out = command
-            .output()
+        let out = bounded_command::output(command, Duration::from_secs(30), 256 * 1024)
             .await
             .map_err(|err| anyhow::anyhow!("failed to execute {}: {err}", script_path.display()))?;
         if out.status.success() {
@@ -464,11 +464,10 @@ pub(crate) async fn apply_package_sandbox_reserved(
             &pkg.sandbox_read_write,
         )?;
         let mut command = Command::new("systemctl");
-        command.arg("daemon-reload").kill_on_drop(true);
+        command.arg("daemon-reload");
         #[cfg(unix)]
         guard.preserve_in_child(command.as_std_mut())?;
-        let out = command
-            .output()
+        let out = bounded_command::output(command, Duration::from_secs(30), 64 * 1024)
             .await
             .map_err(|err| anyhow::anyhow!("failed to execute systemctl daemon-reload: {err}"))?;
         if !out.status.success() {
@@ -545,16 +544,13 @@ where
 
 pub(crate) fn open_runner_state_database(
     root: Option<&Path>,
-) -> anyhow::Result<rusqlite::Connection> {
+) -> anyhow::Result<af_release::fs_security::IsolatedSqliteReplica> {
     let env_root = resolve_self_update_isolated_root_from_env().map_err(anyhow::Error::msg)?;
     let root = root.or(env_root.as_deref());
     let conf = af_release::resolve_release_manager_conf_for_root(root);
     let config = af_release::ReleaseConfig::load_for_root_from_process_env(root, conf.as_deref())?;
     let path = af_release::config::try_resolve_db_path(&config, None)?.path;
-    let conn = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
+    let conn = af_release::fs_security::open_sqlite_isolated_readonly(&path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     Ok(conn)
 }

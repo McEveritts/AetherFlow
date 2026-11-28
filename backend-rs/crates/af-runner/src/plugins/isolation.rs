@@ -212,6 +212,34 @@ fn is_critical_os_root(path: &Path) -> bool {
     )
 }
 
+pub(super) fn collect_transcode_runtime_paths_in(run_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![
+        PathBuf::from(crate::peer_transcode::DEFAULT_DISPATCHER_RUNTIME_DIR),
+        PathBuf::from(crate::peer_transcode::DEFAULT_WORKER_RUNTIME_DIR),
+    ];
+    // systemd `InaccessiblePaths=` does not expand shell globs, so mask both
+    // canonical transcode runtime directories plus any live `/run/aetherflow-transcode*`
+    // sibling entries present under `run_dir` (`SEC-09`).
+    if let Ok(entries) = fs::read_dir(run_dir) {
+        for entry in entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("aetherflow-transcode"))
+            })
+            .take(64)
+        {
+            let path = entry.path();
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
 pub(super) fn collect_control_plane_inaccessible_paths(
     canon_plugin_dir: &Path,
     runtime_token_dir: Option<&Path>,
@@ -226,6 +254,7 @@ pub(super) fn collect_control_plane_inaccessible_paths(
         PathBuf::from("/opt/AetherFlow/backend"),
         PathBuf::from("/opt/AetherFlow/current/backend"),
     ];
+    candidates.extend(collect_transcode_runtime_paths_in(Path::new("/run")));
 
     for key in [
         "DATA_DIR",
@@ -247,6 +276,8 @@ pub(super) fn collect_control_plane_inaccessible_paths(
         "AF_DB_PATH",
         "AETHERFLOW_RUNNER_SOCK",
         "AETHERFLOW_ENV_FILE",
+        "AF_TRANSCODE_SOCKET",
+        "AF_TRANSCODE_WORKER_SOCKET",
     ] {
         if let Ok(val) = env::var(key) {
             let trimmed = val.trim();
@@ -638,19 +669,19 @@ pub(super) async fn query_unit_properties(
         "--property=UID",
         "--property=GID",
         unit_name,
-    ])
-    .kill_on_drop(true);
-    let out = tokio::time::timeout(Duration::from_secs(5), cmd.output())
+    ]);
+    let out = crate::bounded_command::output(cmd, Duration::from_secs(5), 64 * 1024)
         .await
-        .map_err(|_| {
-            PluginRunnerError::Runtime(format!(
-                "systemctl show timed out for plugin unit '{unit_name}'"
-            ))
-        })?
         .map_err(|e| {
-            PluginRunnerError::Runtime(format!(
-                "Failed to execute systemctl show for '{unit_name}': {e}"
-            ))
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                PluginRunnerError::Runtime(format!(
+                    "systemctl show timed out for plugin unit '{unit_name}'"
+                ))
+            } else {
+                PluginRunnerError::Runtime(format!(
+                    "Failed to execute systemctl show for '{unit_name}': {e}"
+                ))
+            }
         })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -758,18 +789,19 @@ pub(super) async fn stop_and_reset_unit(
     unit_name: &str,
 ) -> Result<(), PluginRunnerError> {
     let mut stop_cmd = Command::new(systemctl);
-    stop_cmd.args(["stop", unit_name]).kill_on_drop(true);
-    let stop_out = tokio::time::timeout(Duration::from_secs(20), stop_cmd.output())
+    stop_cmd.args(["stop", unit_name]);
+    let stop_out = crate::bounded_command::output(stop_cmd, Duration::from_secs(20), 64 * 1024)
         .await
-        .map_err(|_| {
-            PluginRunnerError::Runtime(format!(
-                "systemctl stop timed out for plugin unit '{unit_name}'"
-            ))
-        })?
         .map_err(|e| {
-            PluginRunnerError::Runtime(format!(
-                "Failed to execute systemctl stop for '{unit_name}': {e}"
-            ))
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                PluginRunnerError::Runtime(format!(
+                    "systemctl stop timed out for plugin unit '{unit_name}'"
+                ))
+            } else {
+                PluginRunnerError::Runtime(format!(
+                    "Failed to execute systemctl stop for '{unit_name}': {e}"
+                ))
+            }
         })?;
     if !stop_out.status.success() {
         let stderr = String::from_utf8_lossy(&stop_out.stderr);
@@ -781,13 +813,49 @@ pub(super) async fn stop_and_reset_unit(
             )));
         }
     }
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        Command::new(systemctl)
-            .args(["reset-failed", unit_name])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
+    let mut reset_cmd = Command::new(systemctl);
+    reset_cmd.args(["reset-failed", unit_name]);
+    let _ = crate::bounded_command::output(reset_cmd, Duration::from_secs(5), 64 * 1024).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod sec09_tests {
+    use super::*;
+
+    #[test]
+    fn inaccessible_paths_mask_transcode_runtime_directories() {
+        let tmp = env::temp_dir().join(format!("af-plugin-sec09-{}", Uuid::new_v4()));
+        let plugin_dir = tmp.join("plugins/demo");
+        let token_dir = tmp.join("tokens/demo/rt-1");
+        let run_dir = tmp.join("run");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::create_dir_all(&token_dir).unwrap();
+        fs::create_dir_all(run_dir.join("aetherflow-transcode-custom")).unwrap();
+        fs::create_dir_all(run_dir.join("unrelated-service")).unwrap();
+
+        let paths = collect_control_plane_inaccessible_paths(
+            &plugin_dir,
+            Some(&token_dir),
+            &tmp.join("tokens"),
+        );
+        assert!(
+            paths.iter().any(|p| p == "/run/aetherflow-transcode"),
+            "expected /run/aetherflow-transcode in InaccessiblePaths: {paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p == "/run/aetherflow-transcode-worker"),
+            "expected /run/aetherflow-transcode-worker in InaccessiblePaths: {paths:?}"
+        );
+
+        let discovered = collect_transcode_runtime_paths_in(&run_dir);
+        assert!(discovered.contains(&PathBuf::from("/run/aetherflow-transcode")));
+        assert!(discovered.contains(&PathBuf::from("/run/aetherflow-transcode-worker")));
+        assert!(discovered.contains(&run_dir.join("aetherflow-transcode-custom")));
+        assert!(!discovered.contains(&run_dir.join("unrelated-service")));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

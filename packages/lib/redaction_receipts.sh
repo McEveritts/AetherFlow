@@ -1017,7 +1017,7 @@ af_write_failure_receipt() {
         rc=1
     fi
     if command -v python3 >/dev/null 2>&1; then
-        python3 /dev/fd/3 "$rc" 3<<'PY' < <(printf '%s\0%s\0%s' "$stage" "$cat" "$msg")
+        python3 -I /dev/fd/3 "$rc" 3<<'PY' < <(printf '%s\0%s\0%s' "$stage" "$cat" "$msg")
 import os, sys, re, json
 
 SENSITIVE_KEY = (

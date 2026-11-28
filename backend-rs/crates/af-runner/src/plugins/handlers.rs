@@ -96,18 +96,14 @@ async fn handle_plugin_start_inner(
         }
     };
 
-    let launch_res = tokio::time::timeout(
-        Duration::from_secs(15),
-        Command::new(&systemd_run)
-            .args(&args)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
+    let mut launch_cmd = Command::new(&systemd_run);
+    launch_cmd.args(&args);
+    let launch_res =
+        crate::bounded_command::output(launch_cmd, Duration::from_secs(15), 256 * 1024).await;
 
     match launch_res {
-        Ok(Ok(out)) if out.status.success() => {}
-        Ok(Ok(out)) => {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
             let detail = format!(
                 "{}{}",
                 String::from_utf8_lossy(&out.stdout),
@@ -129,17 +125,17 @@ async fn handle_plugin_start_inner(
                 "Failed to start isolated plugin unit '{unit_name}': {sanitized}"
             )));
         }
-        Ok(Err(err)) => {
-            cleanup_plugin_tokens(&tokens_root, &plugin_id);
-            return Err(PluginRunnerError::Runtime(format!(
-                "Failed to execute systemd-run for '{unit_name}': {err}"
-            )));
-        }
-        Err(_) => {
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
             let _ = stop_and_reset_unit(&systemctl, &unit_name).await;
             cleanup_plugin_tokens(&tokens_root, &plugin_id);
             return Err(PluginRunnerError::Runtime(format!(
                 "Timed out launching isolated plugin unit '{unit_name}'"
+            )));
+        }
+        Err(err) => {
+            cleanup_plugin_tokens(&tokens_root, &plugin_id);
+            return Err(PluginRunnerError::Runtime(format!(
+                "Failed to execute systemd-run for '{unit_name}': {err}"
             )));
         }
     }
@@ -261,23 +257,23 @@ async fn handle_plugin_stop_inner(
                         existing_token_dir.as_deref(),
                         &tokens_root,
                     )?;
-                    let run_res = tokio::time::timeout(
+                    let mut stop_hook_cmd = Command::new(&systemd_run);
+                    stop_hook_cmd.args(&stop_args);
+                    let run_res = crate::bounded_command::output(
+                        stop_hook_cmd,
                         Duration::from_secs(10),
-                        Command::new(&systemd_run)
-                            .args(&stop_args)
-                            .kill_on_drop(true)
-                            .output(),
+                        256 * 1024,
                     )
                     .await;
                     if run_res.is_err() {
                         let _ = stop_and_reset_unit(&systemctl, &stop_unit).await;
                     } else {
-                        let _ = tokio::time::timeout(
+                        let mut reset_cmd = Command::new(&systemctl);
+                        reset_cmd.args(["reset-failed", &stop_unit]);
+                        let _ = crate::bounded_command::output(
+                            reset_cmd,
                             Duration::from_secs(3),
-                            Command::new(&systemctl)
-                                .args(["reset-failed", &stop_unit])
-                                .kill_on_drop(true)
-                                .output(),
+                            64 * 1024,
                         )
                         .await;
                     }

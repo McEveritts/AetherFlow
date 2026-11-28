@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::RwLock;
 
 use crate::pool::get_conn;
+use af_models::secret_zeroize::{SecretBytes, SecretString};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AES-256-GCM Secret Encryption
@@ -18,39 +19,56 @@ use crate::pool::get_conn;
 
 const CIPHERTEXT_PREFIX: &str = "enc:v1:";
 
-pub(crate) static AES_MASTER_KEY: Lazy<RwLock<Option<[u8; 32]>>> = Lazy::new(|| RwLock::new(None));
+const AES_KEY_BYTES: usize = 32;
 
-pub fn parse_aes_key_bytes(raw: &str) -> anyhow::Result<[u8; 32]> {
+/// Process-wide AES-256-GCM master key. Held in a zeroize-on-drop [`SecretBytes`] (`SEC-05`) so
+/// replacing or clearing the key wipes the previous key's full `0..capacity` allocation.
+pub(crate) static AES_MASTER_KEY: Lazy<RwLock<Option<SecretBytes>>> =
+    Lazy::new(|| RwLock::new(None));
+
+/// Parses `AES_MASTER_KEY` (64-char hex, base64, or 32-byte raw) directly into a zeroizing
+/// buffer. Intermediate decode buffers are wrapped too, so no plaintext key copy outlives the call.
+pub(crate) fn parse_aes_key_secret(raw: &str) -> anyhow::Result<SecretBytes> {
     let trimmed = raw.trim();
-    if trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
-        let mut arr = [0u8; 32];
-        for (idx, dst) in arr.iter_mut().enumerate() {
+    if trimmed.len() == AES_KEY_BYTES * 2 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let mut key = Vec::with_capacity(AES_KEY_BYTES);
+        for idx in 0..AES_KEY_BYTES {
             let hex_pair = &trimmed[idx * 2..idx * 2 + 2];
-            *dst = u8::from_str_radix(hex_pair, 16)?;
+            match u8::from_str_radix(hex_pair, 16) {
+                Ok(byte) => key.push(byte),
+                Err(err) => {
+                    drop(SecretBytes::new(key));
+                    return Err(err.into());
+                }
+            }
         }
-        return Ok(arr);
+        return Ok(SecretBytes::new(key));
     }
     if let Ok(decoded) = BASE64_STD.decode(trimmed) {
-        if decoded.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&decoded);
-            return Ok(arr);
+        let decoded = SecretBytes::new(decoded);
+        if decoded.len() == AES_KEY_BYTES {
+            return Ok(decoded);
         }
     }
-    if trimmed.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(trimmed.as_bytes());
-        return Ok(arr);
+    if trimmed.len() == AES_KEY_BYTES {
+        return Ok(SecretBytes::from(trimmed.as_bytes()));
     }
-    if raw.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(raw.as_bytes());
-        return Ok(arr);
+    if raw.len() == AES_KEY_BYTES {
+        return Ok(SecretBytes::from(raw.as_bytes()));
     }
     anyhow::bail!(
         "FATAL: AES_MASTER_KEY must decode to 32 bytes (32-byte raw, base64, or 64-char hex). Got {} chars.",
         trimmed.len()
     )
+}
+
+/// Backwards-compatible fixed-array parser. Prefer [`parse_aes_key_secret`] internally: the
+/// returned array is a plain copy that the caller is responsible for wiping.
+pub fn parse_aes_key_bytes(raw: &str) -> anyhow::Result<[u8; 32]> {
+    let key = parse_aes_key_secret(raw)?;
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(key.expose_secret());
+    Ok(arr)
 }
 
 pub(crate) fn aes_key_candidate_env_files() -> Vec<std::path::PathBuf> {
@@ -72,24 +90,26 @@ pub(crate) fn aes_key_candidate_env_files() -> Vec<std::path::PathBuf> {
     candidates
 }
 
-pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
+/// Resolves the active AES-256-GCM key into a zeroize-on-drop buffer (`SEC-05`).
+pub fn resolve_runtime_aes_key() -> Option<SecretBytes> {
     {
         let guard = AES_MASTER_KEY.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(key) = *guard {
-            return Some(key);
+        if let Some(key) = guard.as_ref() {
+            return Some(key.clone());
         }
     }
     if let Ok(raw) = env::var("AES_MASTER_KEY") {
-        let trimmed = raw.trim();
+        let raw = SecretString::new(raw);
+        let trimmed = raw.expose_secret().trim();
         if !trimmed.is_empty() {
-            if let Ok(key) = parse_aes_key_bytes(trimmed) {
+            if let Ok(key) = parse_aes_key_secret(trimmed) {
                 return Some(key);
             }
         }
     }
     for env_file in aes_key_candidate_env_files() {
         if let Some(clean) = read_last_aes_key_from_env_file(&env_file) {
-            if let Ok(key) = parse_aes_key_bytes(&clean) {
+            if let Ok(key) = parse_aes_key_secret(clean.expose_secret()) {
                 return Some(key);
             }
         }
@@ -97,7 +117,7 @@ pub fn resolve_runtime_aes_key() -> Option<[u8; 32]> {
     None
 }
 
-fn read_last_aes_key_from_env_file(path: &Path) -> Option<String> {
+fn read_last_aes_key_from_env_file(path: &Path) -> Option<SecretString> {
     if !path.is_absolute() {
         return None;
     }
@@ -116,11 +136,11 @@ fn read_last_aes_key_from_env_file(path: &Path) -> Option<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
     }
     let mut file = opts.open(path).ok()?;
     let fmeta = file.metadata().ok()?;
-    if !fmeta.is_file() {
+    if !fmeta.is_file() || fmeta.len() > 65_536 {
         return None;
     }
     #[cfg(unix)]
@@ -130,9 +150,17 @@ fn read_last_aes_key_from_env_file(path: &Path) -> Option<String> {
             return None;
         }
     }
-    let mut contents = String::new();
-    std::io::Read::read_to_string(&mut file, &mut contents).ok()?;
-    let mut last_raw: Option<String> = None;
+    // The env file holds the master key: keep the whole buffer zeroize-on-drop.
+    let mut buf = String::with_capacity(usize::try_from(fmeta.len()).unwrap_or(0) + 1);
+    let read_res =
+        std::io::Read::read_to_string(&mut std::io::Read::take(&mut file, 65_537), &mut buf);
+    let too_large = buf.len() > 65_536;
+    let contents = SecretString::new(buf);
+    if read_res.is_err() || too_large {
+        return None;
+    }
+    let contents = contents.expose_secret();
+    let mut last_raw: Option<SecretString> = None;
     for line in contents.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -142,14 +170,14 @@ fn read_last_aes_key_from_env_file(path: &Path) -> Option<String> {
         if let Some(val) = stripped.strip_prefix("AES_MASTER_KEY=") {
             let clean = val.trim().trim_matches('"').trim_matches('\'');
             if !clean.is_empty() {
-                last_raw = Some(clean.to_string());
+                last_raw = Some(SecretString::from(clean));
             }
         }
     }
     last_raw
 }
 
-pub(crate) fn encrypt_with_key(plaintext: &str, key: &[u8; 32]) -> anyhow::Result<String> {
+pub(crate) fn encrypt_with_key(plaintext: &str, key: &[u8]) -> anyhow::Result<String> {
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("aes cipher creation failed: {}", e))?;
     let mut nonce_bytes = [0u8; 12];
@@ -168,7 +196,7 @@ pub(crate) fn encrypt_with_key(plaintext: &str, key: &[u8; 32]) -> anyhow::Resul
     ))
 }
 
-fn decrypt_with_key(payload: &str, key: &[u8; 32]) -> anyhow::Result<String> {
+fn decrypt_with_key(payload: &str, key: &[u8]) -> anyhow::Result<String> {
     let data = BASE64_STD
         .decode(payload)
         .map_err(|e| anyhow::anyhow!("versioned ciphertext base64 decode failed: {}", e))?;
@@ -182,12 +210,16 @@ fn decrypt_with_key(payload: &str, key: &[u8; 32]) -> anyhow::Result<String> {
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
         .map_err(|e| anyhow::anyhow!("gcm decryption failed: {}", e))?;
-    String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("invalid utf8: {}", e))
+    String::from_utf8(plaintext).map_err(|e| {
+        // Wipe the rejected plaintext rather than dropping it unzeroized.
+        drop(SecretBytes::new(e.into_bytes()));
+        anyhow::anyhow!("invalid utf8 in decrypted secret")
+    })
 }
 
 pub fn encrypt_secret_if_configured(plaintext: &str) -> anyhow::Result<String> {
     match resolve_runtime_aes_key() {
-        Some(key) => encrypt_with_key(plaintext, &key),
+        Some(key) => encrypt_with_key(plaintext, key.expose_secret()),
         None => Ok(plaintext.to_string()),
     }
 }
@@ -197,17 +229,16 @@ pub fn decrypt_secret_if_needed(value: &str) -> anyhow::Result<String> {
         let key = resolve_runtime_aes_key().ok_or_else(|| {
             anyhow::anyhow!("AES_MASTER_KEY is required to decrypt enc:v1: secret")
         })?;
-        return decrypt_with_key(payload, &key);
+        return decrypt_with_key(payload, key.expose_secret());
     }
     Ok(value.to_string())
 }
 
 /// Initializes the AES-256-GCM master key from `AES_MASTER_KEY` (or `AETHERFLOW_ENV_FILE`).
 pub fn init_aes_key() -> anyhow::Result<()> {
-    let mut raw = env::var("AES_MASTER_KEY")
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let env_raw = SecretString::new(env::var("AES_MASTER_KEY").unwrap_or_default());
+    let mut raw = SecretString::from(env_raw.expose_secret().trim());
+    drop(env_raw);
     if raw.is_empty() {
         for candidate in aes_key_candidate_env_files() {
             if let Some(from_file) = read_last_aes_key_from_env_file(&candidate) {
@@ -233,7 +264,8 @@ pub fn init_aes_key() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let key_bytes = parse_aes_key_bytes(&raw)?;
+    let key_bytes = parse_aes_key_secret(raw.expose_secret())?;
+    drop(raw);
 
     *AES_MASTER_KEY.write().unwrap_or_else(|e| e.into_inner()) = Some(key_bytes);
     tracing::info!("AES-256-GCM encryption key loaded successfully.");
@@ -250,17 +282,18 @@ pub fn is_encryption_enabled() -> bool {
 /// Encrypts plaintext using AES-256-GCM with a 12-byte random nonce, returning
 /// `"enc:v1:<base64(nonce || ciphertext)>"` — byte-for-byte compatible with Go's `EncryptKey`.
 pub fn encrypt_key(plaintext: &str) -> anyhow::Result<String> {
-    let key_opt = *AES_MASTER_KEY.read().unwrap_or_else(|e| e.into_inner());
-    let Some(key) = key_opt else {
+    // Borrow the key under the read guard instead of copying it onto the stack.
+    let guard = AES_MASTER_KEY.read().unwrap_or_else(|e| e.into_inner());
+    let Some(key) = guard.as_ref() else {
         return Ok(plaintext.to_string());
     };
-    encrypt_with_key(plaintext, &key)
+    encrypt_with_key(plaintext, key.expose_secret())
 }
 
 /// Decrypts a versioned `"enc:v1:<base64>"` string produced by Go or Rust.
 pub fn decrypt_key(encoded: &str) -> anyhow::Result<String> {
-    let key_opt = *AES_MASTER_KEY.read().unwrap_or_else(|e| e.into_inner());
-    let Some(key) = key_opt else {
+    let guard = AES_MASTER_KEY.read().unwrap_or_else(|e| e.into_inner());
+    let Some(key) = guard.as_ref() else {
         anyhow::ensure!(
             !encoded.starts_with(CIPHERTEXT_PREFIX),
             "AES_MASTER_KEY is required to decrypt enc:v1: secret"
@@ -269,7 +302,7 @@ pub fn decrypt_key(encoded: &str) -> anyhow::Result<String> {
     };
 
     if let Some(payload) = encoded.strip_prefix(CIPHERTEXT_PREFIX) {
-        return decrypt_with_key(payload, &key);
+        return decrypt_with_key(payload, key.expose_secret());
     }
 
     anyhow::bail!("ciphertext tampered or missing required version prefix")
@@ -662,4 +695,64 @@ pub fn migrate_legacy_secrets() -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod secret_key_zeroize_tests {
+    use super::*;
+
+    #[test]
+    fn sec05_parse_aes_key_secret_matches_legacy_parser_and_is_redacted() {
+        let hex_key = "0123456789abcdef".repeat(4);
+        let b64_key = BASE64_STD.encode([7u8; 32]);
+        let raw_key = "0123456789abcdef0123456789abcdef";
+        for candidate in [hex_key.as_str(), b64_key.as_str(), raw_key] {
+            let secret = parse_aes_key_secret(candidate).unwrap();
+            assert_eq!(secret.len(), 32);
+            assert_eq!(
+                secret.expose_secret(),
+                &parse_aes_key_bytes(candidate).unwrap()[..]
+            );
+            assert_eq!(format!("{secret:?}"), "[REDACTED]");
+        }
+        let err = parse_aes_key_secret("too-short-key")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("too-short-key"), "{err}");
+    }
+
+    #[test]
+    fn sec05_encrypt_decrypt_roundtrip_with_borrowed_secret_key() {
+        let key = parse_aes_key_secret(&"ab".repeat(32)).unwrap();
+        let sealed = encrypt_with_key("api-key-plaintext", key.expose_secret()).unwrap();
+        assert!(sealed.starts_with(CIPHERTEXT_PREFIX));
+        let payload = sealed.strip_prefix(CIPHERTEXT_PREFIX).unwrap();
+        assert_eq!(
+            decrypt_with_key(payload, key.expose_secret()).unwrap(),
+            "api-key-plaintext"
+        );
+        let wrong = parse_aes_key_secret(&"cd".repeat(32)).unwrap();
+        assert!(decrypt_with_key(payload, wrong.expose_secret()).is_err());
+    }
+
+    #[test]
+    fn sec05_env_file_key_is_returned_in_redacted_secret_string() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("af-db-aes-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aetherflow.env");
+        let key = "fedcba9876543210".repeat(4);
+        fs::write(
+            &path,
+            format!("# comment\nAES_MASTER_KEY=old\nexport AES_MASTER_KEY=\"{key}\"\n"),
+        )
+        .unwrap();
+        let found = read_last_aes_key_from_env_file(&path).expect("key line");
+        assert_eq!(found.expose_secret(), key);
+        assert!(!format!("{found:?}").contains("fedcba"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

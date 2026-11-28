@@ -32,7 +32,10 @@ pub mod streaming_patterns;
 pub mod streaming_portability;
 pub mod ws;
 
+use axum::extract::Request;
 use axum::http::{header, HeaderName, HeaderValue, Method};
+use axum::middleware::Next;
+use axum::response::Response;
 use std::env;
 use std::path::Path;
 use std::time::Duration;
@@ -180,6 +183,19 @@ fn build_cors_layer() -> CorsLayer {
         .allow_headers(allowed_headers)
         .expose_headers(expose_headers)
         .allow_credentials(true)
+}
+
+/// Outermost request middleware (`SEC-09`).
+///
+/// `app_subdomain_proxy_middleware` (and the legacy `app_launch` handoff it calls) runs outside
+/// `routes::build_router()`, i.e. before the router's own forwarding normalisation. Normalising
+/// here first strips client-supplied `Forwarded`/`X-Forwarded-*`/`X-Real-IP` headers from
+/// untrusted TCP peers (pinning `X-Real-IP` to the peer address), so every client-IP lookup on
+/// the subdomain path resolves the same address as `extract_client_ip_for_peer`. The helper is
+/// idempotent, so the router's inner pass is a no-op.
+async fn normalize_peer_forwarding_middleware(mut req: Request, next: Next) -> Response {
+    ws::normalize_request_forwarding_for_peer(&mut req);
+    next.run(req).await
 }
 
 fn main() -> anyhow::Result<()> {
@@ -355,6 +371,12 @@ async fn async_main() -> anyhow::Result<()> {
         );
     }
 
+    // SEC-01: 60 s idle sweep of expired in-memory session-rotation state. Inserts already prune
+    // on the hot path; this bounds memory held by idle entries. Cancelled on graceful shutdown.
+    let (rotation_sweep_shutdown, rotation_sweep_rx) = tokio::sync::watch::channel(false);
+    let rotation_sweeper =
+        (!disable_workers).then(|| auth::spawn_rotation_state_sweeper(rotation_sweep_rx));
+
     let bind_addr = resolve_bind_addr(
         env::var("BIND_ADDR")
             .or_else(|_| env::var("AETHERFLOW_BIND_ADDR"))
@@ -368,6 +390,9 @@ async fn async_main() -> anyhow::Result<()> {
         .layer(build_cors_layer())
         .layer(axum::middleware::from_fn(
             middlewares::app_subdomain_proxy_middleware,
+        ))
+        .layer(axum::middleware::from_fn(
+            normalize_peer_forwarding_middleware,
         ));
 
     tracing::info!(
@@ -389,6 +414,10 @@ async fn async_main() -> anyhow::Result<()> {
     })
     .await?;
 
+    let _ = rotation_sweep_shutdown.send(true);
+    if let Some(sweeper) = rotation_sweeper {
+        let _ = tokio::time::timeout(Duration::from_secs(5), sweeper).await;
+    }
     peers::shutdown().await;
     plugins::shutdown_managed_plugins().await;
 
@@ -678,11 +707,18 @@ mod main_isolation_tests {
             "json subprocess failed: {}",
             String::from_utf8_lossy(&json_out.stderr)
         );
+        let extract_json_event = |line: &str| -> Option<serde_json::Value> {
+            let trimmed = line.trim();
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                return Some(value);
+            }
+            trimmed
+                .split_once(" ... ")
+                .and_then(|(_, rest)| serde_json::from_str::<serde_json::Value>(rest.trim()).ok())
+        };
         let json_stdout = String::from_utf8_lossy(&json_out.stdout);
-        let parsed_json_events: Vec<serde_json::Value> = json_stdout
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
-            .collect();
+        let parsed_json_events: Vec<serde_json::Value> =
+            json_stdout.lines().filter_map(extract_json_event).collect();
         assert!(
             parsed_json_events.iter().any(|event| {
                 event["level"] == "INFO"
@@ -715,11 +751,64 @@ mod main_isolation_tests {
         );
         assert!(
             !text_stdout.lines().any(|line| {
-                serde_json::from_str::<serde_json::Value>(line.trim())
-                    .ok()
+                extract_json_event(line)
                     .is_some_and(|v| v["span"]["request_id"] == "subprocess-text-req-id")
             }),
             "default text mode must not emit JSON log lines: {text_stdout}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sec09_forwarding_tests {
+    use super::normalize_peer_forwarding_middleware;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{HeaderMap, Request};
+    use axum::routing::get;
+    use axum::Router;
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
+
+    async fn resolved_ip(peer: &str, xff: &str) -> String {
+        // Mirrors the production stack: the subdomain middleware layer only sees `HeaderMap`
+        // (like `app_launch::authenticated_admin`) and sits inside the outer normalisation layer.
+        let app = Router::new()
+            .route(
+                "/probe",
+                get(|headers: HeaderMap| async move { crate::ws::extract_client_ip(&headers) }),
+            )
+            .layer(axum::middleware::from_fn(
+                normalize_peer_forwarding_middleware,
+            ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/probe")
+                    .header("x-forwarded-for", xff)
+                    .header("x-real-ip", xff)
+                    .extension(ConnectInfo(peer.parse::<SocketAddr>().unwrap()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn sec09_outer_layer_strips_spoofed_forwarding_from_untrusted_peers() {
+        if std::env::var("TRUSTED_PROXIES").is_ok_and(|v| !v.trim().is_empty()) {
+            return;
+        }
+        assert_eq!(
+            resolved_ip("203.0.113.50:4000", "10.9.8.7").await,
+            "203.0.113.50"
+        );
+        assert_eq!(
+            resolved_ip("127.0.0.1:4000", "198.51.100.8").await,
+            "198.51.100.8"
         );
     }
 }

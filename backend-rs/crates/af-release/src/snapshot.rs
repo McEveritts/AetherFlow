@@ -4,10 +4,11 @@
 use crate::artifact::{compute_file_sha256, parse_sha256_manifest};
 use crate::config::{ReleaseConfig, ResolvedDbPath};
 use crate::error::{ReleaseError, ReleaseResult};
+#[cfg(not(unix))]
+use crate::fs_security::{atomic_copy_file_with_mode, sync_parent_dir_best_effort};
 use crate::fs_security::{
-    apply_service_ownership, atomic_copy_file_with_mode, atomic_write_bytes_with_mode,
-    create_dir_all_no_symlinks, ensure_no_symlink_ancestors, open_exclusive_private_file,
-    sync_parent_dir_best_effort, OwnershipMetadata,
+    atomic_publish_staged_file_with_mode, atomic_write_bytes_with_mode, create_dir_all_no_symlinks,
+    ensure_no_symlink_ancestors, OwnershipMetadata,
 };
 use crate::lock::ReleaseLockGuard;
 use rusqlite::{backup::Backup, Connection, OpenFlags};
@@ -34,66 +35,426 @@ pub struct SnapshotReport {
     pub sha256: Option<String>,
 }
 
-/// Executes a WAL-safe online SQLite backup from `src` (opened read-only so a hot WAL is never
-/// checkpointed by a dry-run or snapshot) into `dest` using SQLite's online backup API.
+/// Executes a WAL-safe online SQLite backup from `src` (opened read-only / FD-isolated so a hot
+/// WAL is never checkpointed by a dry-run or snapshot) into `dest` using SQLite's online backup API.
 ///
-/// Writes into a fresh exclusive sibling temporary file created with `0600` permissions **before**
-/// any database pages are copied, verifies `sync_all()`, removes any destination `-wal`/`-shm`
-/// sidecars, and atomically renames the temporary file to `dest`.
+/// Snapshot outputs are owned by `root:root` mode `0600` (when running as root) so unprivileged
+/// local/service accounts cannot read backup snapshots. For live service DB migration/restore
+/// (`aetherflow:aetherflow 0600`), use `sqlite_online_backup_with_ownership`.
 pub fn sqlite_online_backup(src: &Path, dest: &Path) -> ReleaseResult<()> {
-    ensure_no_symlink_ancestors(src)?;
-    ensure_no_symlink_ancestors(dest)?;
+    sqlite_online_backup_inner(src, dest, None, true, false)
+}
 
-    if !src.is_file() {
+pub(crate) fn sqlite_online_backup_with_ownership(
+    src: &Path,
+    dest: &Path,
+    preserve_from: Option<&OwnershipMetadata>,
+    allow_replace_symlink_leaf: bool,
+) -> ReleaseResult<()> {
+    sqlite_online_backup_inner(src, dest, preserve_from, false, allow_replace_symlink_leaf)
+}
+
+fn sqlite_online_backup_inner(
+    src: &Path,
+    dest: &Path,
+    preserve_from: Option<&OwnershipMetadata>,
+    root_owned_override: bool,
+    allow_replace_symlink_leaf: bool,
+) -> ReleaseResult<()> {
+    ensure_no_symlink_ancestors(src)?;
+    let src_meta = fs::symlink_metadata(src).map_err(|_| ReleaseError::Snapshot {
+        db_path: src.to_path_buf(),
+        reason: "source database file does not exist".to_string(),
+    })?;
+    if src_meta.file_type().is_symlink() || !src_meta.is_file() {
         return Err(ReleaseError::Snapshot {
             db_path: src.to_path_buf(),
-            reason: "source database file does not exist".to_string(),
+            reason: "source database path is not a regular non-symlink file".to_string(),
         });
     }
-    let parent = dest.parent().ok_or_else(|| ReleaseError::PathValidation {
-        path: dest.to_path_buf(),
-        reason: "backup destination has no parent directory".to_string(),
+    let mut total_src_bytes = src_meta.len();
+    for suffix in ["-wal", "-journal"] {
+        let mut sc_os = src.as_os_str().to_os_string();
+        sc_os.push(suffix);
+        if let Ok(sc_meta) = fs::symlink_metadata(PathBuf::from(sc_os)) {
+            if sc_meta.is_file() && !sc_meta.file_type().is_symlink() {
+                total_src_bytes = total_src_bytes.saturating_add(sc_meta.len());
+            }
+        }
+    }
+    let min_scratch_free_bytes = total_src_bytes
+        .saturating_mul(3)
+        .saturating_add(16 * 1024 * 1024);
+
+    #[cfg(unix)]
+    let src_parent_trusted = {
+        let euid = unsafe { libc::geteuid() };
+        euid != 0 || crate::fs_security::is_trusted_root_sqlite_files(src)
+    };
+    #[cfg(not(unix))]
+    let src_parent_trusted = true;
+
+    atomic_publish_staged_file_with_mode(
+        dest,
+        0o600,
+        preserve_from,
+        root_owned_override,
+        allow_replace_symlink_leaf,
+        true,
+        min_scratch_free_bytes,
+        |staged_path| {
+            if src_parent_trusted {
+                crate::fs_security::validate_sqlite_file_and_sidecars_nofollow(src)?;
+                run_direct_sqlite_backup(src, staged_path, dest)
+            } else {
+                #[cfg(unix)]
+                {
+                    run_fd_isolated_sqlite_backup(src, staged_path, dest)
+                }
+                #[cfg(not(unix))]
+                {
+                    run_direct_sqlite_backup(src, staged_path, dest)
+                }
+            }
+        },
+    )
+}
+
+fn run_direct_sqlite_backup(src: &Path, staged_path: &Path, dest: &Path) -> ReleaseResult<()> {
+    let src_conn = Connection::open_with_flags(
+        src,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|e| ReleaseError::Snapshot {
+        db_path: src.to_path_buf(),
+        reason: format!("failed to open source DB read-only: {}", e),
     })?;
-    create_dir_all_no_symlinks(parent, 0o700)?;
-
-    let dest_name = dest
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("sqlite.bak");
-    let tmp_dest = parent.join(format!(
-        ".{}.tmp.{}.{}",
-        dest_name,
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-
-    // Pre-create the temporary destination file exclusively with 0600 permissions BEFORE opening
-    // it with rusqlite so database secrets are never exposed to a permissive default umask.
-    let tmp_file = open_exclusive_private_file(&tmp_dest, 0o600)?;
-    drop(tmp_file);
-
-    let backup_result = (|| -> ReleaseResult<()> {
-        let src_conn = Connection::open_with_flags(
-            src,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
+    src_conn
+        .pragma_update(None, "trusted_schema", "OFF")
         .map_err(|e| ReleaseError::Snapshot {
             db_path: src.to_path_buf(),
-            reason: format!("failed to open source DB read-only: {}", e),
+            reason: format!("failed to harden source DB trusted_schema: {}", e),
         })?;
-        let _ = src_conn.busy_timeout(Duration::from_secs(10));
+    let _ = src_conn.busy_timeout(Duration::from_secs(10));
 
-        let mut dst_conn = Connection::open(&tmp_dest).map_err(|e| ReleaseError::Snapshot {
+    let mut dst_conn = Connection::open(staged_path).map_err(|e| ReleaseError::Snapshot {
+        db_path: dest.to_path_buf(),
+        reason: format!(
+            "failed to open staged destination DB {}: {}",
+            staged_path.display(),
+            e
+        ),
+    })?;
+    dst_conn
+        .pragma_update(None, "trusted_schema", "OFF")
+        .map_err(|e| ReleaseError::Snapshot {
             db_path: dest.to_path_buf(),
             reason: format!(
-                "failed to open destination DB {}: {}",
-                tmp_dest.display(),
+                "failed to harden staged destination DB trusted_schema: {}",
                 e
             ),
         })?;
-        let _ = dst_conn.busy_timeout(Duration::from_secs(10));
+    let _ = dst_conn.busy_timeout(Duration::from_secs(10));
 
-        {
+    let backup = Backup::new(&src_conn, &mut dst_conn).map_err(|e| ReleaseError::Snapshot {
+        db_path: src.to_path_buf(),
+        reason: format!("failed to initialize online backup: {}", e),
+    })?;
+    backup
+        .run_to_completion(256, Duration::from_millis(10), None)
+        .map_err(|e| ReleaseError::Snapshot {
+            db_path: src.to_path_buf(),
+            reason: format!("online backup copy failed: {}", e),
+        })?;
+    Ok(())
+}
+
+/// Closes `src_path` symlink-swap TOCTOU when `root` (`euid == 0`) backs up a SQLite database
+/// residing inside a non-root-owned or non-root-writable directory (such as `aetherflow`-owned
+/// `/var/lib/aetherflow` or a user-writable legacy data directory).
+///
+/// Opens the source database and optional `-wal` sidecar strictly via `openat(src_parent_dfd, ...,
+/// O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)` + `fstat(S_IFREG)`, copies those pinned FDs
+/// into a root-owned `0700` [`crate::fs_security::TrustedRootScratchDir`], runs SQLite's online
+/// backup API strictly on the isolated scratch copy (never touching the live DB's WAL), and
+/// verifies `PRAGMA integrity_check == "ok"` (retrying up to 3 times if a live checkpoint raced
+/// with the FD copy).
+#[cfg(unix)]
+pub(crate) fn run_fd_isolated_sqlite_backup(
+    src: &Path,
+    staged_path: &Path,
+    dest: &Path,
+) -> ReleaseResult<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let src_parent = src.parent().ok_or_else(|| ReleaseError::Snapshot {
+        db_path: src.to_path_buf(),
+        reason: "source database path has no parent directory".to_string(),
+    })?;
+    let src_leaf = src.file_name().ok_or_else(|| ReleaseError::Snapshot {
+        db_path: src.to_path_buf(),
+        reason: "source database path has no filename".to_string(),
+    })?;
+    let src_leaf_c =
+        CString::new(src_leaf.as_bytes()).map_err(|_| ReleaseError::PathValidation {
+            path: src.to_path_buf(),
+            reason: "source database filename contains NUL byte".to_string(),
+        })?;
+    let build_sc = |suffix: &[u8]| -> ReleaseResult<CString> {
+        let mut bytes = src_leaf.as_bytes().to_vec();
+        bytes.extend_from_slice(suffix);
+        CString::new(bytes).map_err(|_| ReleaseError::PathValidation {
+            path: src.to_path_buf(),
+            reason: "source SQLite sidecar filename contains NUL byte".to_string(),
+        })
+    };
+    let wal_leaf_c = build_sc(b"-wal")?;
+    let shm_leaf_c = build_sc(b"-shm")?;
+    let journal_leaf_c = build_sc(b"-journal")?;
+
+    let mut last_err: Option<ReleaseError> = None;
+    for attempt in 0..3_u8 {
+        let src_parent_dir = crate::fs_security::open_dir_nofollow(src_parent)?;
+        let src_fd = unsafe {
+            libc::openat(
+                src_parent_dir.as_raw_fd(),
+                src_leaf_c.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if src_fd < 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(if err.raw_os_error() == Some(libc::ELOOP) {
+                ReleaseError::Snapshot {
+                    db_path: src.to_path_buf(),
+                    reason: "refusing symlinked source database file".to_string(),
+                }
+            } else {
+                ReleaseError::io(format!("opening source database {}", src.display()), err)
+            });
+        }
+        let mut src_file = unsafe { fs::File::from_raw_fd(src_fd) };
+        let src_meta = src_file
+            .metadata()
+            .map_err(|e| ReleaseError::io(format!("fstat source database {}", src.display()), e))?;
+        use std::os::unix::fs::MetadataExt;
+        if !src_meta.is_file() || src_meta.nlink() != 1 {
+            return Err(ReleaseError::Snapshot {
+                db_path: src.to_path_buf(),
+                reason: "source database path is not an exclusive regular non-symlink file"
+                    .to_string(),
+            });
+        }
+
+        let open_opt_sidecar =
+            |sc_c: &CString, label: &str| -> ReleaseResult<Option<(fs::File, u64)>> {
+                let fd = unsafe {
+                    libc::openat(
+                        src_parent_dir.as_raw_fd(),
+                        sc_c.as_ptr(),
+                        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                    )
+                };
+                if fd >= 0 {
+                    let f = unsafe { fs::File::from_raw_fd(fd) };
+                    let meta = f.metadata().map_err(|e| {
+                        ReleaseError::io(format!("fstat source {} for {}", label, src.display()), e)
+                    })?;
+                    if !meta.is_file() || meta.nlink() != 1 {
+                        return Err(ReleaseError::Snapshot {
+                            db_path: src.to_path_buf(),
+                            reason: format!(
+                                "source {} sidecar is not an exclusive regular non-symlink file",
+                                label
+                            ),
+                        });
+                    }
+                    Ok(Some((f, meta.len())))
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::ENOENT) {
+                        Ok(None)
+                    } else if err.raw_os_error() == Some(libc::ELOOP) {
+                        Err(ReleaseError::Snapshot {
+                            db_path: src.to_path_buf(),
+                            reason: format!("refusing symlinked source {} sidecar", label),
+                        })
+                    } else {
+                        Err(ReleaseError::io(
+                            format!("opening source {} for {}", label, src.display()),
+                            err,
+                        ))
+                    }
+                }
+            };
+
+        let mut wal_file = open_opt_sidecar(&wal_leaf_c, "WAL")?;
+        let _shm_check = open_opt_sidecar(&shm_leaf_c, "SHM")?;
+        let mut journal_file = open_opt_sidecar(&journal_leaf_c, "journal")?;
+
+        let total_declared = src_meta
+            .len()
+            .saturating_add(wal_file.as_ref().map_or(0, |(_, sz)| *sz))
+            .saturating_add(journal_file.as_ref().map_or(0, |(_, sz)| *sz));
+        let copy_cap = crate::fs_security::MAX_SQLITE_SCRATCH_COPY_BYTES;
+        if total_declared > copy_cap {
+            return Err(ReleaseError::Snapshot {
+                db_path: src.to_path_buf(),
+                reason: format!(
+                    "source database and sidecars ({} bytes) exceed root scratch copy cap ({} bytes)",
+                    total_declared, copy_cap
+                ),
+            });
+        }
+
+        let min_free = total_declared
+            .saturating_mul(3)
+            .saturating_add(16 * 1024 * 1024);
+        let mut scratch =
+            crate::fs_security::TrustedRootScratchDir::create_with_min_free(min_free)?;
+        scratch.track_file("src.sqlite");
+        scratch.track_file("src.sqlite-wal");
+        scratch.track_file("src.sqlite-shm");
+        scratch.track_file("src.sqlite-journal");
+        scratch.track_file("dst.sqlite");
+        scratch.track_file("dst.sqlite-wal");
+        scratch.track_file("dst.sqlite-shm");
+        scratch.track_file("dst.sqlite-journal");
+        let scratch_src = scratch.path().join("src.sqlite");
+        let scratch_wal = scratch.path().join("src.sqlite-wal");
+        let scratch_journal = scratch.path().join("src.sqlite-journal");
+        let scratch_dst = scratch.path().join("dst.sqlite");
+
+        let mut remaining_cap = copy_cap;
+        let mut copy_fd_to = |reader: &mut fs::File,
+                              name: &str,
+                              path: &Path|
+         -> ReleaseResult<()> {
+            let c_name = CString::new(name).expect("static scratch name has no NUL");
+            let out_fd = unsafe {
+                libc::openat(
+                    scratch.dir_fd(),
+                    c_name.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    0o600,
+                )
+            };
+            if out_fd < 0 {
+                return Err(ReleaseError::io(
+                    format!("creating scratch copy {}", path.display()),
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            use std::io::Write;
+            let mut out = unsafe { fs::File::from_raw_fd(out_fd) };
+            let cap = remaining_cap;
+            let mut copied: u64 = 0;
+            let mut tail8 = [0u8; 8];
+            let mut tail_len: usize = 0;
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = reader
+                    .read(&mut buf)
+                    .map_err(|e| ReleaseError::io(format!("reading for {}", path.display()), e))?;
+                if n == 0 {
+                    break;
+                }
+                copied = copied.saturating_add(n as u64);
+                if copied > cap {
+                    return Err(ReleaseError::Snapshot {
+                            db_path: src.to_path_buf(),
+                            reason: format!(
+                                "source database and sidecars exceeded root scratch copy cap ({} bytes)",
+                                copy_cap
+                            ),
+                        });
+                }
+                out.write_all(&buf[..n])
+                    .map_err(|e| ReleaseError::io(format!("copying into {}", path.display()), e))?;
+                if n >= 8 {
+                    tail8.copy_from_slice(&buf[n - 8..n]);
+                    tail_len = 8;
+                } else {
+                    let keep = (tail_len + n).min(8);
+                    let shift = (tail_len + n).saturating_sub(8);
+                    if shift < tail_len {
+                        tail8.copy_within(shift..tail_len, 0);
+                    }
+                    let dst_start = keep - n;
+                    tail8[dst_start..keep].copy_from_slice(&buf[..n]);
+                    tail_len = keep;
+                }
+            }
+            if name.ends_with("-journal")
+                && copied >= 16
+                && tail_len == 8
+                && tail8 == crate::fs_security::SQLITE_JOURNAL_MAGIC
+            {
+                return Err(ReleaseError::PathValidation {
+                        path: src.to_path_buf(),
+                        reason: "refusing SQLite rollback journal containing forbidden super-journal trailer".to_string(),
+                    });
+            }
+            remaining_cap = cap.saturating_sub(copied);
+            Ok(())
+        };
+
+        copy_fd_to(&mut src_file, "src.sqlite", &scratch_src)?;
+        if let Some((ref mut wf, _)) = wal_file {
+            copy_fd_to(wf, "src.sqlite-wal", &scratch_wal)?;
+        }
+        if let Some((ref mut jf, _)) = journal_file {
+            copy_fd_to(jf, "src.sqlite-journal", &scratch_journal)?;
+        }
+
+        // Open our private scratch copy read-write so SQLite cleanly recovers any copied `-wal`
+        // frames into a fresh per-attempt `dst.sqlite` inside `scratch` (preventing a corrupt
+        // retry from poisoning `staged_path`), verify `PRAGMA integrity_check == "ok"`, and only
+        // then copy the verified bytes into `staged_path`.
+        let backup_attempt = (|| -> ReleaseResult<()> {
+            let src_conn = Connection::open(&scratch_src).map_err(|e| ReleaseError::Snapshot {
+                db_path: src.to_path_buf(),
+                reason: format!("failed to open isolated scratch source DB: {}", e),
+            })?;
+            src_conn
+                .pragma_update(None, "trusted_schema", "OFF")
+                .map_err(|e| ReleaseError::Snapshot {
+                    db_path: src.to_path_buf(),
+                    reason: format!(
+                        "failed to harden isolated scratch source DB trusted_schema: {}",
+                        e
+                    ),
+                })?;
+            let _ = src_conn.busy_timeout(Duration::from_secs(10));
+
+            let mut dst_conn =
+                Connection::open(&scratch_dst).map_err(|e| ReleaseError::Snapshot {
+                    db_path: dest.to_path_buf(),
+                    reason: format!(
+                        "failed to open scratch destination DB {}: {}",
+                        scratch_dst.display(),
+                        e
+                    ),
+                })?;
+            dst_conn
+                .pragma_update(None, "trusted_schema", "OFF")
+                .map_err(|e| ReleaseError::Snapshot {
+                    db_path: dest.to_path_buf(),
+                    reason: format!(
+                        "failed to harden scratch destination DB trusted_schema: {}",
+                        e
+                    ),
+                })?;
+            let _ = dst_conn.busy_timeout(Duration::from_secs(10));
+
             let backup =
                 Backup::new(&src_conn, &mut dst_conn).map_err(|e| ReleaseError::Snapshot {
                     db_path: src.to_path_buf(),
@@ -105,70 +466,122 @@ pub fn sqlite_online_backup(src: &Path, dest: &Path) -> ReleaseResult<()> {
                     db_path: src.to_path_buf(),
                     reason: format!("online backup copy failed: {}", e),
                 })?;
+            drop(backup);
+
+            let check: String = dst_conn
+                .query_row("PRAGMA integrity_check;", [], |row| row.get(0))
+                .map_err(|e| ReleaseError::Snapshot {
+                    db_path: dest.to_path_buf(),
+                    reason: format!("integrity check on isolated backup failed: {}", e),
+                })?;
+            let cleaned: String = check
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            if cleaned != "ok" {
+                return Err(ReleaseError::IntegrityFailed {
+                    db_path: dest.to_path_buf(),
+                    result: if cleaned.is_empty() {
+                        "error".to_string()
+                    } else {
+                        cleaned
+                    },
+                });
+            }
+            drop(dst_conn);
+            drop(src_conn);
+
+            let mut verified_src = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&scratch_dst)
+                .map_err(|e| {
+                    ReleaseError::io(
+                        format!("reopening verified scratch DB {}", scratch_dst.display()),
+                        e,
+                    )
+                })?;
+            let mut staged_out = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(staged_path)
+                .map_err(|e| {
+                    ReleaseError::io(
+                        format!("opening staged output DB {}", staged_path.display()),
+                        e,
+                    )
+                })?;
+            std::io::copy(&mut verified_src, &mut staged_out).map_err(|e| {
+                ReleaseError::io(
+                    format!("writing verified backup into {}", staged_path.display()),
+                    e,
+                )
+            })?;
+            Ok(())
+        })();
+
+        match backup_attempt {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_err = Some(err);
+                if attempt + 1 < 3 {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
         }
-        Ok(())
-    })();
-
-    if let Err(err) = backup_result {
-        let _ = fs::remove_file(&tmp_dest);
-        let _ = fs::remove_file(format!("{}-wal", tmp_dest.display()));
-        let _ = fs::remove_file(format!("{}-shm", tmp_dest.display()));
-        return Err(err);
     }
 
-    if let Ok(f) = fs::File::open(&tmp_dest) {
-        let _ = f.sync_all();
-    }
-
-    // Remove any pre-existing destination sidecars and atomically rename the 0600 backup into place
-    let _ = fs::remove_file(format!("{}-wal", dest.display()));
-    let _ = fs::remove_file(format!("{}-shm", dest.display()));
-    fs::rename(&tmp_dest, dest).map_err(|e| {
-        let _ = fs::remove_file(&tmp_dest);
-        ReleaseError::io(
-            format!(
-                "renaming online backup {} -> {}",
-                tmp_dest.display(),
-                dest.display()
-            ),
-            e,
-        )
-    })?;
-    let _ = fs::remove_file(format!("{}-wal", tmp_dest.display()));
-    let _ = fs::remove_file(format!("{}-shm", tmp_dest.display()));
-    sync_parent_dir_best_effort(parent);
-
-    Ok(())
+    Err(last_err.unwrap_or_else(|| ReleaseError::Snapshot {
+        db_path: src.to_path_buf(),
+        reason: "isolated online backup failed after retries".to_string(),
+    }))
 }
 
-/// Runs `PRAGMA integrity_check;` against `db_path` (opened read-only) and returns the normalized
-/// first-line status (`"ok"` when healthy, or `"error"` / diagnostic string on corruption).
+/// Runs `PRAGMA integrity_check;` against `db_path` and returns the normalized first-line status
+/// (`"ok"` when healthy, `"missing"` when absent, or `"error"` / diagnostic string on corruption).
+///
+/// Validates symlink-free ancestors and regular non-symlink `<db>` + `-wal`/`-shm`/`-journal`
+/// sidecars (`O_NOFOLLOW | O_NONBLOCK`). When `root` (`euid == 0`) inspects a database inside a
+/// non-root-owned/writable directory (such as `aetherflow`-owned `/var/lib/aetherflow`), copies
+/// pinned `O_NOFOLLOW` FDs into a root-owned `0700` [`crate::fs_security::TrustedRootScratchDir`]
+/// so SQLite never opens live `-shm` (`O_RDWR|O_CREAT`) or blocks on a FIFO in an untrusted dir.
 pub fn sqlite_integrity(db_path: &Path) -> String {
-    if let Ok(meta) = fs::symlink_metadata(db_path) {
-        if meta.file_type().is_symlink() || !meta.is_file() {
-            return "error".to_string();
-        }
-    } else {
-        return "missing".to_string();
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let Ok(mut source) = options.open(db_path) else {
+    if ensure_no_symlink_ancestors(db_path).is_err() {
         return "error".to_string();
+    }
+    let mut source = match crate::fs_security::validate_sqlite_file_and_sidecars_nofollow(db_path) {
+        Ok(Some(file)) => file,
+        Ok(None) => return "missing".to_string(),
+        Err(_) => return "error".to_string(),
     };
     let mut header = [0_u8; 16];
-    if !source.metadata().is_ok_and(|metadata| metadata.is_file())
-        || source.read_exact(&mut header).is_err()
-        || &header != b"SQLite format 3\0"
-    {
+    if source.read_exact(&mut header).is_err() || &header != b"SQLite format 3\0" {
         return "error".to_string();
     }
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+
+    #[cfg(unix)]
+    {
+        let euid = unsafe { libc::geteuid() };
+        if euid == 0 && !crate::fs_security::is_trusted_root_sqlite_files(db_path) {
+            return sqlite_integrity_via_root_scratch(db_path);
+        }
+    }
+
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     let Ok(conn) = Connection::open_with_flags(db_path, flags) else {
         return "error".to_string();
     };
+    if conn.pragma_update(None, "trusted_schema", "OFF").is_err() {
+        return "error".to_string();
+    }
     let _ = conn.busy_timeout(Duration::from_secs(5));
     let res: Result<String, _> = conn.query_row("PRAGMA integrity_check;", [], |row| row.get(0));
     match res {
@@ -185,31 +598,98 @@ pub fn sqlite_integrity(db_path: &Path) -> String {
     }
 }
 
+#[cfg(unix)]
+pub(crate) fn sqlite_integrity_via_root_scratch(db_path: &Path) -> String {
+    let mut last_result = "error".to_string();
+    for attempt in 0..3 {
+        match crate::fs_security::open_sqlite_isolated_readonly(db_path) {
+            Ok(conn) => {
+                let res: Result<String, _> =
+                    conn.query_row("PRAGMA integrity_check;", [], |row| row.get(0));
+                match res {
+                    Ok(raw) => {
+                        let first_line = raw.lines().next().unwrap_or("");
+                        let cleaned: String =
+                            first_line.chars().filter(|c| !c.is_whitespace()).collect();
+                        if cleaned == "ok" {
+                            return cleaned;
+                        }
+                        last_result = if cleaned.is_empty() {
+                            "error".to_string()
+                        } else {
+                            cleaned
+                        };
+                    }
+                    Err(_) => {
+                        last_result = "error".to_string();
+                    }
+                }
+            }
+            Err(ReleaseError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return "missing".to_string();
+            }
+            Err(_) => {
+                last_result = "error".to_string();
+            }
+        }
+        if attempt + 1 < 3 {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    last_result
+}
+
 /// Creates a minimal dry-run placeholder SQLite database at `db_path` with `0600` permissions
-/// enforced before writing, matching:
+/// enforced before publishing via private staging (`TrustedRootScratchDir` when the parent is
+/// untrusted for root), matching:
 /// `CREATE TABLE IF NOT EXISTS _meta (key TEXT, value TEXT); INSERT INTO _meta VALUES ('version','dryrun');`
 pub fn create_dry_run_placeholder_db(db_path: &Path) -> ReleaseResult<()> {
     ensure_no_symlink_ancestors(db_path)?;
     if let Some(parent) = db_path.parent() {
         create_dir_all_no_symlinks(parent, 0o700)?;
     }
-    if !db_path.exists() {
-        let f = open_exclusive_private_file(db_path, 0o600)?;
-        drop(f);
+    match fs::symlink_metadata(db_path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                return Err(ReleaseError::PathValidation {
+                    path: db_path.to_path_buf(),
+                    reason: "dry-run placeholder database path is a symlink or non-regular file"
+                        .to_string(),
+                });
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(ReleaseError::io(
+                format!("inspecting dry-run placeholder DB {}", db_path.display()),
+                err,
+            ));
+        }
     }
-    let conn = Connection::open(db_path).map_err(|e| ReleaseError::Snapshot {
-        db_path: db_path.to_path_buf(),
-        reason: format!("failed to create dry-run placeholder DB: {}", e),
-    })?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS _meta (key TEXT, value TEXT); \
-         INSERT INTO _meta VALUES ('version','dryrun');",
+    crate::fs_security::atomic_publish_staged_file_with_mode(
+        db_path,
+        0o600,
+        None,
+        true,
+        false,
+        true,
+        16 * 1024 * 1024,
+        |staged_path| {
+            let conn = crate::fs_security::open_sqlite_nofollow_hardened(staged_path, true)?;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS _meta (key TEXT, value TEXT); \
+                 INSERT INTO _meta VALUES ('version','dryrun');",
+            )
+            .map_err(|e| ReleaseError::Snapshot {
+                db_path: db_path.to_path_buf(),
+                reason: format!("failed to seed dry-run placeholder DB: {}", e),
+            })?;
+            drop(conn);
+            Ok(())
+        },
     )
-    .map_err(|e| ReleaseError::Snapshot {
-        db_path: db_path.to_path_buf(),
-        reason: format!("failed to seed dry-run placeholder DB: {}", e),
-    })?;
-    Ok(())
 }
 
 /// Executes Stage 1.5 State Snapshot into `${RELEASE_DIR}/data-snapshot/${SQLITE_DB}.bak`,
@@ -237,7 +717,11 @@ pub fn create_state_snapshot(
         let copy = config.data_dir.join(&config.sqlite_db);
         create_dir_all_no_symlinks(&config.data_dir, 0o700)?;
 
-        if resolved.path.is_file() && resolved.path != copy {
+        ensure_no_symlink_ancestors(&resolved.path)?;
+        let resolved_exists =
+            crate::fs_security::validate_sqlite_file_and_sidecars_nofollow(&resolved.path)?
+                .is_some();
+        if resolved_exists && resolved.path != copy {
             if let Err(err) = sqlite_online_backup(&resolved.path, &copy) {
                 let _ = fs::remove_file(&copy);
                 let _ = fs::remove_file(format!("{}-wal", copy.display()));
@@ -256,7 +740,10 @@ pub fn create_state_snapshot(
         snapshot_db = copy;
     }
 
-    if !snapshot_db.is_file() {
+    ensure_no_symlink_ancestors(&snapshot_db)?;
+    let snapshot_db_exists =
+        crate::fs_security::validate_sqlite_file_and_sidecars_nofollow(&snapshot_db)?.is_some();
+    if !snapshot_db_exists {
         if dry_run {
             create_dry_run_placeholder_db(&snapshot_db)?;
         } else {
@@ -271,7 +758,7 @@ pub fn create_state_snapshot(
     }
 
     let snapshot_dir = release_dir.join("data-snapshot");
-    create_dir_all_no_symlinks(&snapshot_dir, 0o700)?;
+    crate::fs_security::apply_root_owned_dir_mode(&snapshot_dir, 0o700)?;
 
     let bak_filename = format!("{}.bak", config.sqlite_db);
     let bak_path = snapshot_dir.join(&bak_filename);
@@ -419,9 +906,20 @@ where
         });
     }
 
-    ensure_no_symlink_ancestors(db_path)?;
+    let parent = db_path.parent().ok_or_else(|| {
+        ReleaseError::Rollback(format!(
+            "database path {} has no parent directory",
+            db_path.display()
+        ))
+    })?;
+    ensure_no_symlink_ancestors(parent)?;
 
-    if !db_path.is_file() && !bak_path.is_file() {
+    let db_meta = fs::symlink_metadata(db_path).ok();
+    let bak_exists = fs::symlink_metadata(&bak_path)
+        .map(|m| !m.file_type().is_symlink() && m.is_file())
+        .unwrap_or(false);
+
+    if db_meta.is_none() && !bak_exists {
         return Ok(RestoreReport {
             live_db_healthy: true,
             restored_from_snapshot: false,
@@ -429,10 +927,10 @@ where
         });
     }
 
-    let integrity = if db_path.is_file() {
-        sqlite_integrity(db_path)
-    } else {
-        "missing".to_string()
+    let integrity = match db_meta.as_ref() {
+        None => "missing".to_string(),
+        Some(meta) if meta.file_type().is_symlink() || !meta.is_file() => "error".to_string(),
+        Some(_) => sqlite_integrity(db_path),
     };
 
     if integrity == "ok" {
@@ -443,7 +941,7 @@ where
         });
     }
 
-    if !bak_path.is_file() {
+    if !bak_exists {
         return Err(ReleaseError::Rollback(format!(
             "live database at {} failed integrity check ({}) and no snapshot exists at {}",
             db_path.display(),
@@ -473,101 +971,90 @@ where
         ))
     })?;
 
-    // 3. Capture ownership/permissions from existing DB (or parent dir) before quarantine
+    // 2.5. Re-verify integrity once writers are quiesced so a transient torn-WAL read never
+    //      causes a healthy live database to be quarantined and overwritten by an older snapshot.
+    if matches!(
+        fs::symlink_metadata(db_path),
+        Ok(ref meta) if !meta.file_type().is_symlink() && meta.is_file()
+    ) && sqlite_integrity(db_path) == "ok"
+    {
+        return Ok(RestoreReport {
+            live_db_healthy: true,
+            restored_from_snapshot: false,
+            quarantined_corrupted_path: None,
+        });
+    }
+
+    // 3. Capture ownership/permissions from existing regular DB (or parent dir) before quarantine
     let preserved_ownership = OwnershipMetadata::capture(db_path)
-        .or_else(|| db_path.parent().and_then(OwnershipMetadata::capture))
+        .or_else(|| OwnershipMetadata::capture(parent))
         .map(|mut m| {
             // Ensure restored DB is never group/world-accessible while preserving user read/write
             m.mode = 0o600;
             m
         });
 
-    let parent = db_path.parent().ok_or_else(|| {
-        ReleaseError::Rollback(format!(
-            "database path {} has no parent directory",
-            db_path.display()
-        ))
-    })?;
     create_dir_all_no_symlinks(parent, 0o700)?;
 
-    // 4. Stage .bak into an exclusive 0600 sibling temp file, fsync, verify integrity, and set ownership
+    // 4. Quarantine regular corrupted DB or unlink untrusted leaf symlink/non-regular entry, and
+    //    remove stale WAL/SHM sidecars using parent dirfd (never following leaf symlinks).
     let db_filename = db_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("aetherflow.sqlite");
-    let staged_tmp = parent.join(format!(
-        ".{}.restore.{}.{}",
-        db_filename,
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    atomic_copy_file_with_mode(&bak_path, &staged_tmp, 0o600, preserved_ownership.as_ref())?;
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let corrupted_name = format!("{db_filename}.corrupted.{epoch}.{}", uuid::Uuid::new_v4());
 
-    let staged_integrity = sqlite_integrity(&staged_tmp);
-    if staged_integrity != "ok" {
-        let _ = fs::remove_file(&staged_tmp);
-        return Err(ReleaseError::Rollback(format!(
-            "staged restore temp file {} failed integrity check ({})",
-            staged_tmp.display(),
-            staged_integrity
-        )));
-    }
+    #[cfg(unix)]
+    let quarantined: Option<PathBuf> = crate::fs_security::atomic_restore_db_with_quarantine(
+        &bak_path,
+        db_path,
+        0o600,
+        preserved_ownership.as_ref(),
+        &corrupted_name,
+    )?;
 
-    // 5. Quarantine corrupted DB first, remove WAL/SHM sidecars, then atomically rename staged_tmp -> db_path
-    let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
-    let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
-
-    let mut quarantined = None;
-    if db_path.is_file() {
-        let epoch = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let corrupted_path = PathBuf::from(format!(
-            "{}.corrupted.{}.{}",
-            db_path.display(),
-            epoch,
-            uuid::Uuid::new_v4()
-        ));
-        if let Err(e) = fs::rename(db_path, &corrupted_path) {
-            let _ = fs::remove_file(&staged_tmp);
-            return Err(ReleaseError::io(
-                format!(
-                    "quarantining corrupted DB {} -> {}",
-                    db_path.display(),
-                    corrupted_path.display()
-                ),
-                e,
-            ));
+    #[cfg(not(unix))]
+    let quarantined: Option<PathBuf> = {
+        let mut q: Option<PathBuf> = None;
+        if let Ok(meta) = fs::symlink_metadata(db_path) {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                let _ = fs::remove_file(db_path);
+            } else {
+                let corrupted_path = parent.join(&corrupted_name);
+                fs::rename(db_path, &corrupted_path).map_err(|e| {
+                    ReleaseError::io(
+                        format!(
+                            "quarantining corrupted DB {} -> {}",
+                            db_path.display(),
+                            corrupted_path.display()
+                        ),
+                        e,
+                    )
+                })?;
+                q = Some(corrupted_path);
+            }
         }
-        quarantined = Some(corrupted_path);
-    }
-
-    let _ = fs::remove_file(&wal_path);
-    let _ = fs::remove_file(&shm_path);
-
-    if let Err(e) = fs::rename(&staged_tmp, db_path) {
-        let _ = fs::remove_file(&staged_tmp);
-        // Attempt to restore quarantined file if rename failed
-        if let Some(ref q) = quarantined {
-            let _ = fs::rename(q, db_path);
+        if let Err(e) =
+            atomic_copy_file_with_mode(&bak_path, db_path, 0o600, preserved_ownership.as_ref())
+        {
+            if let Some(ref qp) = q {
+                let _ = fs::rename(qp, db_path);
+            }
+            return Err(e);
         }
-        return Err(ReleaseError::io(
-            format!(
-                "atomically renaming restored DB {} -> {}",
-                staged_tmp.display(),
-                db_path.display()
-            ),
-            e,
-        ));
-    }
-
-    // Ensure no stale sidecars exist after the atomic swap
-    let _ = fs::remove_file(&wal_path);
-    let _ = fs::remove_file(&shm_path);
-
-    apply_service_ownership(db_path, preserved_ownership.as_ref(), 0o600)?;
-    sync_parent_dir_best_effort(parent);
+        let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+        let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
+        let jrn_path = PathBuf::from(format!("{}-journal", db_path.display()));
+        let _ = fs::remove_file(&wal_path);
+        let _ = fs::remove_file(&shm_path);
+        let _ = fs::remove_file(&jrn_path);
+        sync_parent_dir_best_effort(parent);
+        q
+    };
 
     Ok(RestoreReport {
         live_db_healthy: false,

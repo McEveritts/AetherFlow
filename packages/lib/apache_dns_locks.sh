@@ -1052,7 +1052,7 @@ af_backup_resolv_conf_state() {
     local resolv_path="${3:-}"
     [[ -n "$resolv_path" ]] || resolv_path="/etc/resolv.conf"
     [[ "$app_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
-    python3 - "$app_name" "$backup_dir" "$resolv_path" <<'PYEOF'
+    python3 -I - "$app_name" "$backup_dir" "$resolv_path" <<'PYEOF'
 import json, os, pathlib, secrets, stat, sys
 
 app_name, backup_dir_str, resolv_str = sys.argv[1:4]
@@ -1148,7 +1148,7 @@ af_write_resolv_conf_nameserver() {
     local nameserver="${1:-127.0.0.1}"
     local resolv_path="${2:-}"
     [[ -n "$resolv_path" ]] || resolv_path="/etc/resolv.conf"
-    python3 - "$nameserver" "$resolv_path" <<'PYEOF'
+    python3 -I - "$nameserver" "$resolv_path" <<'PYEOF'
 import os, pathlib, secrets, stat, sys
 
 nameserver, resolv_str = sys.argv[1:3]
@@ -1204,7 +1204,7 @@ af_restore_resolv_conf_state() {
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
         resolved_active="true"
     fi
-    python3 - "$app_name" "$dropin_removed" "$backup_dir" "$resolv_path" "$stub_target" "$resolved_active" <<'PYEOF'
+    python3 -I - "$app_name" "$dropin_removed" "$backup_dir" "$resolv_path" "$stub_target" "$resolved_active" <<'PYEOF'
 import json, os, pathlib, secrets, stat, sys
 
 app_name, dropin_removed, backup_dir_str, resolv_str, stub_target, resolved_active = sys.argv[1:7]
@@ -1346,7 +1346,7 @@ af_verify_local_dns_lookup() {
     local max_attempts="${2:-15}"
     local retry_delay="${3:-1}"
     local timeout_sec="${4:-2.0}"
-    python3 - "$dns_port" "$max_attempts" "$retry_delay" "$timeout_sec" <<'PYEOF'
+    python3 -I - "$dns_port" "$max_attempts" "$retry_delay" "$timeout_sec" <<'PYEOF'
 import os, socket, struct, sys, time
 
 port = int(sys.argv[1])
@@ -1445,7 +1445,11 @@ launch_detached_helper() (
         exec {maintenance_fd}>&-
     fi
     unset AF_MAINTENANCE_GUARD_FD
-    "$@" </dev/null >/dev/null 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+        setsid -w /bin/bash -c '"$@" </dev/null >/dev/null 2>&1 &' _ "$@" </dev/null >/dev/null 2>&1
+    else
+        "$@" </dev/null >/dev/null 2>&1 &
+    fi
 )
 
 write_lock() {
@@ -1508,23 +1512,41 @@ get_base_domain() {
     local env_af_db="" env_db="" env_aetherflow_db="" env_data_dir="" env_base_domain=""
     if [[ -n "$env_file" && -e "$env_file" ]]; then
         local _parsed_env=""
-        _parsed_env="$(python3 - "$env_file" <<'PYEOF' 2>/dev/null || true
-import os, stat, sys
+        _parsed_env="$(python3 -I - "$env_file" <<'PYEOF' 2>/dev/null || true
+import os, pathlib, stat, sys
 target = sys.argv[1]
-parent = os.path.dirname(os.path.abspath(target)) or "."
-pst = os.lstat(parent)
-if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+MAX_ENV_BYTES = 65536
+p = pathlib.PurePosixPath(os.path.abspath(target))
+if ".." in p.parts or len(p.parts) < 2:
     raise SystemExit(1)
-lst = os.lstat(target)
-if stat.S_ISLNK(lst.st_mode) or not stat.S_ISREG(lst.st_mode):
-    raise SystemExit(1)
-fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+cur_fd = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+try:
+    for part in p.parts[1:-1]:
+        nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt_fd
+    fd = os.open(p.parts[-1], os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=cur_fd)
+finally:
+    os.close(cur_fd)
 try:
     fst = os.fstat(fd)
-    if not stat.S_ISREG(fst.st_mode) or (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+    if not stat.S_ISREG(fst.st_mode) or fst.st_nlink != 1 or fst.st_size > MAX_ENV_BYTES:
         raise SystemExit(1)
-    with os.fdopen(fd, "r", encoding="utf-8", errors="replace", closefd=False) as fh:
-        content = fh.read()
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 8192)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_ENV_BYTES:
+            raise SystemExit(1)
+        chunks.append(chunk)
+    content = b"".join(chunks).decode("utf-8", errors="replace")
 finally:
     os.close(fd)
 vals = {}
@@ -1555,12 +1577,12 @@ PYEOF
             env_base_domain="$(printf '%s\n' "$_parsed_env" | sed -n '5p')"
         fi
     fi
-    local eff_data_dir="${DATA_DIR:-$env_data_dir}"
+    local eff_data_dir="${AETHERFLOW_DATA_DIR:-$env_data_dir}"
     local custom_data_db=""
     if [[ -n "$eff_data_dir" && "${eff_data_dir%/}" != "/var/lib/aetherflow" ]]; then
         custom_data_db="${eff_data_dir%/}/aetherflow.sqlite"
     fi
-    if command -v sqlite3 >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1; then
         local -a _db_candidates=(
             "${AF_DB_PATH:-}"
             "${DB_PATH:-}"
@@ -1578,17 +1600,233 @@ PYEOF
                 /opt/AetherFlow/backend/data/aetherflow.sqlite
             )
         fi
-        for db_cand in "${_db_candidates[@]}"
-        do
-            if [[ -n "$db_cand" && -f "$db_cand" ]]; then
-                local has_settings=""
-                has_settings="$(sqlite3 "$db_cand" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings';" 2>/dev/null | tr -d '[:space:]' || true)"
-                if [[ "$has_settings" == "1" ]]; then
-                    dom="$(sqlite3 "$db_cand" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]' || true)"
-                    break
-                fi
-            fi
-        done
+        local _raw_db_dom=""
+        _raw_db_dom="$(python3 -I - "${_db_candidates[@]}" <<'PYDB' 2>/dev/null || true
+import os, pathlib, sqlite3, stat, sys, time, uuid
+
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+MAX_SCRATCH_BYTES = 2 * 1024 * 1024 * 1024
+is_root = os.geteuid() == 0
+
+def open_dir_nofollow(dir_str):
+    p = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if ".." in p.parts:
+        return -1
+    try:
+        cur_fd = os.open("/", os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    except OSError:
+        return -1
+    try:
+        for part in p.parts[1:]:
+            nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+        return cur_fd
+    except OSError:
+        os.close(cur_fd)
+        return -1
+
+def is_trusted_root_dir(dir_str, allow_sticky):
+    dp = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if not dp.is_absolute() or ".." in dp.parts:
+        return False
+    cur_p = pathlib.Path("/")
+    for part in dp.parts:
+        cur_p = pathlib.Path("/") if part == "/" else cur_p / part
+        try:
+            cst = os.lstat(cur_p)
+        except OSError:
+            return False
+        if stat.S_ISLNK(cst.st_mode) or not stat.S_ISDIR(cst.st_mode) or cst.st_uid != 0:
+            return False
+        writable = (cst.st_mode & 0o022) != 0
+        sticky = (cst.st_mode & getattr(stat, "S_ISVTX", 0o1000)) != 0
+        if writable and not (allow_sticky and sticky):
+            return False
+    return True
+
+def create_root_scratch(min_free):
+    sc_name = f".af-root-dom.{os.getpid()}.{uuid.uuid4().hex}"
+    for cand in ("/var/tmp", "/tmp", "/run"):
+        if not is_trusted_root_dir(cand, allow_sticky=True):
+            continue
+        cand_fd = -1
+        try:
+            cand_fd = os.open(cand, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            vfs = os.fstatvfs(cand_fd)
+            avail = vfs.f_bavail * (vfs.f_frsize or vfs.f_bsize)
+            if avail < min_free:
+                os.close(cand_fd)
+                continue
+            os.mkdir(sc_name, 0o700, dir_fd=cand_fd)
+            sc_fd = os.open(sc_name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cand_fd)
+            if not stat.S_ISDIR(os.fstat(sc_fd).st_mode) or os.fstat(sc_fd).st_uid != 0:
+                os.close(sc_fd)
+                os.rmdir(sc_name, dir_fd=cand_fd)
+                os.close(cand_fd)
+                continue
+            os.fchmod(sc_fd, 0o700)
+            return cand_fd, sc_fd, sc_name, os.path.join(cand, sc_name)
+        except OSError:
+            if cand_fd >= 0:
+                os.close(cand_fd)
+    return None
+
+def copy_fd_bounded(in_fd, out_dir_fd, out_name, remaining):
+    out_fd = os.open(out_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=out_dir_fd)
+    copied = 0
+    tail8 = b""
+    try:
+        while True:
+            chunk = os.read(in_fd, 65536)
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > remaining:
+                raise OSError("scratch copy cap exceeded")
+            tail8 = (tail8 + chunk)[-8:]
+            view = memoryview(chunk)
+            while view:
+                w = os.write(out_fd, view)
+                if w <= 0:
+                    raise OSError("short write")
+                view = view[w:]
+        if out_name.endswith("-journal") and copied >= 16 and tail8 == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7":
+            raise OSError("forbidden SQLite super-journal trailer")
+        return remaining - copied
+    finally:
+        os.close(out_fd)
+
+def db_files_root_owned_safe(parent_fd, leaf_name):
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            st = os.stat(leaf_name + suffix, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            st = None
+        if st is not None and (st.st_uid != 0 or (st.st_mode & 0o022) != 0):
+            return False
+    return True
+
+def query_candidate(db_cand):
+    db_abs = os.path.abspath(db_cand)
+    parent_str = os.path.dirname(db_abs)
+    leaf_name = os.path.basename(db_abs)
+    if not leaf_name:
+        return None
+    parent_fd = open_dir_nofollow(parent_str)
+    if parent_fd < 0:
+        return None
+    try:
+        use_scratch = is_root and (
+            not is_trusted_root_dir(parent_str, allow_sticky=False)
+            or not db_files_root_owned_safe(parent_fd, leaf_name)
+        )
+        attempts = 3 if use_scratch else 1
+        for attempt in range(attempts):
+            db_fd = -1
+            wal_fd = -1
+            jrn_fd = -1
+            sc = None
+            try:
+                db_fd = os.open(leaf_name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+                st = os.fstat(db_fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    return None
+                if os.read(db_fd, 16) != b"SQLite format 3\x00":
+                    return None
+                total_sz = st.st_size
+                for suffix in ("-wal", "-shm", "-journal"):
+                    try:
+                        sfd = os.open(leaf_name + suffix, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        continue
+                    sst = os.fstat(sfd)
+                    if not stat.S_ISREG(sst.st_mode) or sst.st_nlink != 1:
+                        os.close(sfd)
+                        return None
+                    if suffix == "-wal":
+                        wal_fd = sfd
+                        total_sz += sst.st_size
+                    elif suffix == "-journal":
+                        if sst.st_size >= 16:
+                            os.lseek(sfd, -8, os.SEEK_END)
+                            jtail = os.read(sfd, 8)
+                            os.lseek(sfd, 0, os.SEEK_SET)
+                            if jtail == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7":
+                                os.close(sfd)
+                                return None
+                        jrn_fd = sfd
+                        total_sz += sst.st_size
+                    else:
+                        os.close(sfd)
+                if use_scratch:
+                    if total_sz > MAX_SCRATCH_BYTES:
+                        return None
+                    sc = create_root_scratch(total_sz * 2 + 16 * 1024 * 1024)
+                    if sc is None:
+                        return None
+                    _, sc_fd, _, sc_path = sc
+                    os.lseek(db_fd, 0, os.SEEK_SET)
+                    rem = copy_fd_bounded(db_fd, sc_fd, "dom.sqlite", MAX_SCRATCH_BYTES)
+                    if wal_fd >= 0:
+                        rem = copy_fd_bounded(wal_fd, sc_fd, "dom.sqlite-wal", rem)
+                    if jrn_fd >= 0:
+                        copy_fd_bounded(jrn_fd, sc_fd, "dom.sqlite-journal", rem)
+                    conn = sqlite3.connect(os.path.join(sc_path, "dom.sqlite"), timeout=2)
+                else:
+                    conn = sqlite3.connect(pathlib.Path(db_abs).as_uri() + "?mode=ro", uri=True, timeout=2)
+                try:
+                    conn.execute("PRAGMA trusted_schema = OFF;")
+                    has_settings = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='settings'").fetchone()
+                    if has_settings and has_settings[0] == 1:
+                        row = conn.execute("SELECT base_domain FROM settings WHERE id = 1").fetchone()
+                        return (row[0] or "") if row else ""
+                    return None
+                finally:
+                    conn.close()
+            except sqlite3.DatabaseError:
+                if attempt + 1 < attempts:
+                    time.sleep(0.025)
+                    continue
+                return None
+            except OSError:
+                return None
+            finally:
+                for fd in (db_fd, wal_fd, jrn_fd):
+                    if fd >= 0:
+                        os.close(fd)
+                if sc is not None:
+                    sc_base_fd, sc_fd, sc_name, _ = sc
+                    for nm in ("dom.sqlite", "dom.sqlite-wal", "dom.sqlite-shm", "dom.sqlite-journal"):
+                        try:
+                            os.unlink(nm, dir_fd=sc_fd)
+                        except FileNotFoundError:
+                            _ = nm
+                    os.close(sc_fd)
+                    try:
+                        os.rmdir(sc_name, dir_fd=sc_base_fd)
+                    except OSError:
+                        _ = sc_name
+                    os.close(sc_base_fd)
+    finally:
+        os.close(parent_fd)
+    return None
+
+for cand in sys.argv[1:]:
+    if not cand:
+        continue
+    res = query_candidate(cand)
+    if res is not None:
+        sys.stdout.write(res)
+        break
+PYDB
+)"
+        if [[ -n "$_raw_db_dom" ]]; then
+            dom="$(printf '%s' "$_raw_db_dom" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's/^\*\.//' | tr -d '[:space:]')"
+        fi
     fi
     if [[ -z "$dom" ]]; then
         local raw_env_dom="${AETHERFLOW_BASE_DOMAIN:-$env_base_domain}"

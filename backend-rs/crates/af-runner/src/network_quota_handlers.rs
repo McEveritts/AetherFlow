@@ -38,31 +38,47 @@ pub async fn execute_network_action_local(req: &NetworkRunnerRequest) -> anyhow:
     network::execute(req).await
 }
 
+pub(crate) fn setdisk_script_candidates_with_root(
+    exe_dir: Option<&Path>,
+    running_as_root: bool,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe_dir {
+        candidates.push(dir.join("packages/system/setdisk"));
+        candidates.push(dir.join("../packages/system/setdisk"));
+    }
+    candidates.extend([
+        PathBuf::from("/opt/AetherFlow/current/packages/system/setdisk"),
+        PathBuf::from("/opt/AetherFlow/packages/system/setdisk"),
+        PathBuf::from("/usr/local/bin/AetherFlow/system/setdisk"),
+    ]);
+    if !running_as_root {
+        candidates.extend([
+            PathBuf::from("packages/system/setdisk"),
+            PathBuf::from("../packages/system/setdisk"),
+        ]);
+    }
+    candidates
+}
+
 pub fn resolve_setdisk_script_path() -> Option<PathBuf> {
+    let running_as_root = runner_is_root();
     if let Ok(explicit) = env::var("AF_SETDISK_PATH") {
         let trimmed = explicit.trim();
         if !trimmed.is_empty() {
             let p = PathBuf::from(trimmed);
-            if p.is_file() {
+            if is_trusted_runner_target(&p, running_as_root) {
                 return Some(p);
             }
         }
     }
 
-    let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/packages/system/setdisk"),
-        PathBuf::from("/opt/AetherFlow/packages/system/setdisk"),
-        PathBuf::from("/usr/local/bin/AetherFlow/system/setdisk"),
-        PathBuf::from("packages/system/setdisk"),
-        PathBuf::from("../packages/system/setdisk"),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("packages/system/setdisk"));
-            candidates.push(exe_dir.join("../packages/system/setdisk"));
-        }
-    }
-    candidates.into_iter().find(|c| c.is_file())
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    setdisk_script_candidates_with_root(exe_dir.as_deref(), running_as_root)
+        .into_iter()
+        .find(|c| is_trusted_runner_target(c, running_as_root))
 }
 
 pub fn parse_quota_size_to_1k_blocks(size_raw: &str) -> Option<(u64, u64)> {
@@ -110,29 +126,22 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
         .to_string());
     }
 
-    let bin_setdisk_opt = resolve_setdisk_script_path().or_else(|| {
-        let fallback = PathBuf::from("/usr/local/bin/AetherFlow/system/setdisk");
-        if fallback.is_file() {
-            Some(fallback)
-        } else {
-            None
-        }
-    });
+    let bin_setdisk_opt = resolve_setdisk_script_path();
 
     // Legacy setdisk only accepts whole MB/GB/TB. Exact byte requests must
     // use setquota directly rather than failing inside the legacy script.
     if let Some(bin_setdisk) =
         bin_setdisk_opt.filter(|_| Regex::new(r"(?i)^[0-9]+[MGT]B$").unwrap().is_match(size))
     {
-        let out = Command::new("bash")
+        let mut setdisk_cmd = Command::new("bash");
+        setdisk_cmd
             .arg(&bin_setdisk)
             .arg("--username")
             .arg(username)
             .arg("--size")
             .arg(size)
-            .arg("--json")
-            .output()
-            .await;
+            .arg("--json");
+        let out = bounded_command::output(setdisk_cmd, Duration::from_secs(20), 64 * 1024).await;
         if let Ok(o) = out {
             let combined = format!(
                 "{}{}",
@@ -143,11 +152,10 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
                 return Ok(combined.trim().to_string());
             }
             // Also try positional invocation `<username> <size>` if script variant expects positional args
-            if let Ok(o2) = Command::new(&bin_setdisk)
-                .arg(username)
-                .arg(size)
-                .output()
-                .await
+            let mut positional_cmd = Command::new(&bin_setdisk);
+            positional_cmd.arg(username).arg(size);
+            if let Ok(o2) =
+                bounded_command::output(positional_cmd, Duration::from_secs(20), 64 * 1024).await
             {
                 if o2.status.success() {
                     return Ok(String::from_utf8_lossy(&o2.stdout).trim().to_string());
@@ -161,10 +169,8 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
         .ok_or_else(|| anyhow::anyhow!("invalid quota size: {:?}", size))?;
     let block_str = blocks_1k.to_string();
     let mut command = Command::new("setquota");
-    command
-        .args(["-u", username, &block_str, &block_str, "0", "0", "-a"])
-        .kill_on_drop(true);
-    let out = tokio::time::timeout(Duration::from_secs(20), command.output()).await??;
+    command.args(["-u", username, &block_str, &block_str, "0", "0", "-a"]);
+    let out = bounded_command::output(command, Duration::from_secs(20), 64 * 1024).await?;
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
