@@ -37,6 +37,38 @@ _af_is_v4_release_tag() {
     [[ "${tag}" =~ ^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$ ]]
 }
 
+_af_default_release_tag() {
+    local af_root="${AF_INSTALL_ROOT:-/opt/AetherFlow}"
+    local repo_root=""
+    if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+        repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd || true)"
+    fi
+    local -a candidates=()
+    if [[ -n "${AF_INSTALL_ROOT:-}" ]]; then
+        candidates+=("${af_root}/.version" "${af_root}/current/.version")
+    fi
+    if [[ -n "${repo_root}" ]]; then
+        candidates+=("${repo_root}/.version")
+    fi
+    if [[ -z "${AF_INSTALL_ROOT:-}" ]]; then
+        candidates+=("${af_root}/.version" "${af_root}/current/.version")
+    fi
+    local candidate="" ver=""
+    for candidate in "${candidates[@]}"; do
+        if [[ -n "${candidate}" && -f "${candidate}" && ! -L "${candidate}" && -s "${candidate}" ]]; then
+            ver="$(tr -d '[:space:]' < "${candidate}" 2>/dev/null || true)"
+            if [[ -n "${ver}" && "${ver}" != v* ]]; then
+                ver="v${ver}"
+            fi
+            if _af_is_v4_release_tag "${ver}"; then
+                printf '%s' "${ver}"
+                return 0
+            fi
+        fi
+    done
+    printf '%s' "v4.0.1"
+}
+
 _validate_prebuilt_tarball() {
     local archive_path="$1"
     if command -v python3 >/dev/null 2>&1; then
@@ -81,7 +113,8 @@ _stage_prebuilt_release_archive() {
     local archive_path="$1"
     local sha256_manifest="${2:-}"
     local expected_sha256="${3:-}"
-    local release_tag="${4:-v4.0.0}"
+    local release_tag="${4:-}"
+    [[ -n "${release_tag}" ]] || release_tag="$(_af_default_release_tag)"
     local af_root="${AF_INSTALL_ROOT:-/opt/AetherFlow}"
     local releases_dir="${af_root}/releases"
     local current_link="${af_root}/current"
@@ -298,8 +331,11 @@ _pull_prebuilt_v4_release() {
     local checksum_name="${CHECKSUM_NAME:-SHA256SUMS}"
 
     if [[ -n "${AETHERFLOW_PREBUILT_TARBALL:-}" ]]; then
-        local default_staged_tag="v4.0.0"
-        [[ "${channel}" == "nightly" ]] && default_staged_tag="v4.0.0-nightly.0.0"
+        local default_staged_tag
+        default_staged_tag="$(_af_default_release_tag)"
+        if [[ "${channel}" == "nightly" && "${default_staged_tag}" != *-nightly* ]]; then
+            default_staged_tag="${default_staged_tag%%-*}-nightly.0.0"
+        fi
         local staged_tag="${AETHERFLOW_RELEASE_TAG:-${default_staged_tag}}"
         if ! _af_is_v4_release_tag "${staged_tag}"; then
             echo "[ERROR] Refusing pre-v4 or malformed release tag '${staged_tag}' (implicit v3 downgrade is forbidden)." >&2

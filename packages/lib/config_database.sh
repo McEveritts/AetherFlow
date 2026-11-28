@@ -136,7 +136,7 @@ def safe_write_text(filename, text, mode=None):
 
 PYHELPER
         cat
-    } | python3 -
+    } | python3 -I -
 )
 
 read_navidrome_database_path() {
@@ -554,7 +554,7 @@ backup_postgresql_database() {
     local backup="$1" database="$2" database_file relative
     [[ "$database" =~ ^[a-z_][a-z0-9_-]*$ && "$backup" == /* && "$backup" != / && ! -L "$backup" ]] || return 1
     mkdir -p -m 0700 -- "$backup" || return 1
-    runuser -u postgres -- pg_dump --clean --if-exists --create "$database" > "$backup/$database.sql" || return 1
+    runuser -u postgres -- env -i PATH="/usr/local/bin:/usr/bin:/bin" LANG="C.UTF-8" pg_dump --clean --if-exists --create "$database" > "$backup/$database.sql" || return 1
     if [[ -n "${AETHERFLOW_INSTALL_ROOT:-}" && /var/lib/postgresql == "${AETHERFLOW_INSTALL_ROOT%/}/"* && -d /var/lib/postgresql ]]; then
         [[ ! -L /var/lib/postgresql ]] || return 1
         while IFS= read -r -d '' database_file; do
@@ -570,10 +570,10 @@ restore_postgresql_database() {
     local backup="$1" database="$2" restored=true database_file relative
     [[ -f "$backup/.af-database-ready" ]] || return 0
     [[ "$database" =~ ^[a-z_][a-z0-9_-]*$ && ! -L "$backup" && ! -L "$backup/.af-database-ready" && ! -L "$backup/$database.sql" && "$(cat "$backup/.af-database-ready")" == "$database" ]] || return 1
-    af_logged runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 --set="database=$database" <<'SQL' || restored=false
+    af_logged runuser -u postgres -- env -i PATH="/usr/local/bin:/usr/bin:/bin" LANG="C.UTF-8" psql -d postgres -v ON_ERROR_STOP=1 --set="database=$database" <<'SQL' || restored=false
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = :'database' AND pid <> pg_backend_pid();
 SQL
-    af_logged runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 -f - < "$backup/$database.sql" || restored=false
+    af_logged runuser -u postgres -- env -i PATH="/usr/local/bin:/usr/bin:/bin" LANG="C.UTF-8" psql -d postgres -v ON_ERROR_STOP=1 -f - < "$backup/$database.sql" || restored=false
     if [[ -n "${AETHERFLOW_INSTALL_ROOT:-}" && /var/lib/postgresql == "${AETHERFLOW_INSTALL_ROOT%/}/"* && -d "$backup/postgresql-database" ]]; then
         [[ ! -L "$backup/postgresql-database" && ! -L /var/lib/postgresql ]] || return 1
         while IFS= read -r -d '' database_file; do
@@ -852,7 +852,7 @@ PYEOF
 # Change one listen setting without rebuilding the user's application config.
 # Supported formats use only Python's standard library on the Debian host.
 set_config_value() {
-    AF_CFG_FILE="$1" AF_CFG_FORMAT="$2" AF_CFG_KEY="$3" AF_CFG_VALUE="$4" AF_CFG_SECTION="${5:-}" python3 - <<'PYEOF'
+    AF_CFG_FILE="$1" AF_CFG_FORMAT="$2" AF_CFG_KEY="$3" AF_CFG_VALUE="$4" AF_CFG_SECTION="${5:-}" python3 -I - <<'PYEOF'
 import json, os, pathlib, re, secrets, stat, sys, xml.etree.ElementTree as ET
 filename, kind, key, value, section = (os.environ.pop('AF_CFG_' + name) for name in ('FILE', 'FORMAT', 'KEY', 'VALUE', 'SECTION'))
 path = pathlib.Path(filename)
@@ -977,7 +977,8 @@ replace_app_tree() {
     done
     if [[ -f "$destination/.af-version" && ! -L "$destination/.af-version" ]]; then
         validate_config_paths "$destination/.af-version" || return 1
-        cp -p --remove-destination -- "$destination/.af-version" "$staged/.af-version" || return 1
+        [[ ! -L "$staged/.af-version" ]] || return 1
+        cp -pT --remove-destination -- "$destination/.af-version" "$staged/.af-version" || return 1
     fi
     if [[ -e "$destination" ]]; then
         backup="$(mktemp -d "${destination}.af-backup.XXXXXX")"
@@ -1056,7 +1057,7 @@ stage_app_archive() {
         fi
     done
     mkdir "$AF_ARCHIVE_BACKUP/release"
-    python3 - "$AF_ARCHIVE_BACKUP/recovery.json" "$destination" "$unit" "${AF_ARCHIVE_STATE_PATHS[@]}" <<'PYEOF'
+    python3 -I - "$AF_ARCHIVE_BACKUP/recovery.json" "$destination" "$unit" "${AF_ARCHIVE_STATE_PATHS[@]}" <<'PYEOF'
 import json, os, sys
 with open(sys.argv[1], 'x') as output:
     json.dump({'destination': sys.argv[2], 'unit': sys.argv[3], 'state_paths': sys.argv[4:]}, output)
@@ -1070,7 +1071,7 @@ PYEOF
         extracted="$AF_ARCHIVE_BACKUP/release/prepared"
         AF_ARCHIVE_ARCHIVE=""
     else
-        python3 - "$archive" "$AF_ARCHIVE_BACKUP/release" <<'PYEOF'
+        python3 -I - "$archive" "$AF_ARCHIVE_BACKUP/release" <<'PYEOF'
 import pathlib, sys, tarfile
 with tarfile.open(sys.argv[1], 'r:gz') as archive:
     if hasattr(tarfile, 'data_filter'):
@@ -1155,7 +1156,8 @@ PYEOF
         cp -a -- "/etc/systemd/system/${unit}.service" "$AF_ARCHIVE_BACKUP/unit"
     fi
     if [[ "${9:-}" != binary && -f "$AF_TX_DIR/pre_versions$destination/.af-version" ]]; then
-        cp -p --remove-destination -- "$AF_TX_DIR/pre_versions$destination/.af-version" "$extracted/.af-version" || return 1
+        [[ ! -L "$extracted/.af-version" ]] || return 1
+        cp -pT --remove-destination -- "$AF_TX_DIR/pre_versions$destination/.af-version" "$extracted/.af-version" || return 1
     fi
     AF_ARCHIVE_ACTIVATED=true
     if [[ -e "$destination" ]]; then
@@ -1274,7 +1276,7 @@ prune_app_archive_backups() {
     [[ -n "$destination" && ! -L "$destination" ]] || return 0
     [[ "$keep_count" =~ ^[0-9]+$ ]] || keep_count=2
     local obsolete=""
-    obsolete="$(python3 - "$destination" "$expected_owner" "$keep_path" "$keep_count" <<'PYEOF'
+    obsolete="$(python3 -I - "$destination" "$expected_owner" "$keep_path" "$keep_count" <<'PYEOF'
 import os, stat, sys
 
 destination, expected_owner, keep_path, keep_count_raw = sys.argv[1:5]

@@ -488,21 +488,6 @@ pub(super) fn append_log_line(log_file_path: &Path, line: &str) {
     }
 }
 
-/// Mirrors the legacy installer's certificate expansion after writing the install lock.
-pub(super) fn trigger_certbot_sync_best_effort() {
-    if !["/usr/local/bin/af-certbot-sync", "/usr/bin/af-certbot-sync"]
-        .iter()
-        .any(|path| Path::new(path).is_file())
-    {
-        return;
-    }
-    tokio::spawn(async {
-        if let Err(err) = crate::sync_certbot_and_managed_ingress().await {
-            tracing::warn!(error = %err, "post-install certbot sync failed");
-        }
-    });
-}
-
 pub(super) fn extract_binaries_from_targz(
     archive_path: &Path,
     dest_dir: &Path,

@@ -19,8 +19,178 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+/// Scoped SQLite handle that executes synchronous DB operations and `sqlite3_close()`
+/// (including `-wal`/`-shm`/`-journal` sidecar checkpoint/unlink) under the immutable open-time
+/// DB parent directory owner's Linux per-thread `fsuid`/`fsgid` when running as `root`.
+pub(super) struct OwnerScopedConnection {
+    conn: Option<Connection>,
+    db_path: Option<PathBuf>,
+    owner_creds: Option<(u32, u32)>,
+}
+
+impl OwnerScopedConnection {
+    pub(super) fn open_hardened(path: &Path, read_write: bool) -> Result<Self> {
+        let owner_creds = af_release::fs_security::resolve_path_owner_fsuid(path)?;
+        let conn = match owner_creds {
+            Some((uid, gid)) => af_release::fs_security::with_uid_gid_fsuid(uid, gid, || {
+                af_release::fs_security::open_sqlite_nofollow_hardened(path, read_write)
+            })?,
+            None => af_release::fs_security::open_sqlite_nofollow_hardened(path, read_write)?,
+        };
+        Ok(Self {
+            conn: Some(conn),
+            db_path: Some(path.to_path_buf()),
+            owner_creds,
+        })
+    }
+
+    fn new(conn: Connection) -> Result<Self> {
+        let db_path = conn
+            .path()
+            .filter(|p| !p.is_empty() && *p != ":memory:")
+            .map(PathBuf::from);
+        let owner_creds = match db_path.as_deref() {
+            Some(path) => match af_release::fs_security::resolve_path_owner_fsuid(path) {
+                Ok(creds) => creds,
+                Err(err) => {
+                    #[cfg(unix)]
+                    if unsafe { libc::geteuid() } == 0 {
+                        tracing::error!(
+                            path = %path.display(),
+                            "refusing to close SQLite handle as root after path owner validation failure"
+                        );
+                        std::mem::forget(conn);
+                    }
+                    return Err(err.into());
+                }
+            },
+            None => None,
+        };
+        Ok(Self {
+            conn: Some(conn),
+            db_path,
+            owner_creds,
+        })
+    }
+
+    fn run_scoped<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T>,
+    {
+        match (self.owner_creds, self.db_path.as_deref()) {
+            (Some((uid, gid)), _) => {
+                let mut outcome: Option<Result<T>> = None;
+                af_release::fs_security::with_uid_gid_fsuid(uid, gid, || {
+                    outcome = Some(f());
+                    Ok(())
+                })?;
+                outcome.expect("closure executed")
+            }
+            (None, Some(path)) => {
+                let mut outcome: Option<Result<T>> = None;
+                af_release::fs_security::with_path_owner_fsuid(path, || {
+                    outcome = Some(f());
+                    Ok(())
+                })?;
+                outcome.expect("closure executed")
+            }
+            (None, None) => f(),
+        }
+    }
+
+    fn with_db<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        let conn = self.conn.as_ref().expect("connection active until Drop");
+        self.run_scoped(|| f(conn))
+    }
+
+    fn with_db_mut<T, F>(&mut self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Connection) -> Result<T>,
+    {
+        let owner_creds = self.owner_creds;
+        let db_path = self.db_path.clone();
+        let conn = self.conn.as_mut().expect("connection active until Drop");
+        match (owner_creds, db_path.as_deref()) {
+            (Some((uid, gid)), _) => {
+                let mut outcome: Option<Result<T>> = None;
+                af_release::fs_security::with_uid_gid_fsuid(uid, gid, || {
+                    outcome = Some(f(conn));
+                    Ok(())
+                })?;
+                outcome.expect("closure executed")
+            }
+            (None, Some(path)) => {
+                let mut outcome: Option<Result<T>> = None;
+                af_release::fs_security::with_path_owner_fsuid(path, || {
+                    outcome = Some(f(conn));
+                    Ok(())
+                })?;
+                outcome.expect("closure executed")
+            }
+            (None, None) => f(conn),
+        }
+    }
+
+    fn db_path_str(&self) -> Option<&str> {
+        self.db_path.as_deref().and_then(|p| p.to_str())
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for OwnerScopedConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn.as_ref().expect("connection active until Drop")
+    }
+}
+
+impl Drop for OwnerScopedConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let mut held = Some(conn);
+            match (self.owner_creds, self.db_path.as_deref()) {
+                (Some((uid, gid)), _) => {
+                    let _ = af_release::fs_security::with_uid_gid_fsuid(uid, gid, || {
+                        drop(held.take());
+                        Ok(())
+                    });
+                    if let Some(unclosed) = held {
+                        // Never invoke `sqlite3_close()` at fsuid=0 if credential drop failed.
+                        tracing::error!(
+                            uid,
+                            gid,
+                            "refusing to close unprivileged SQLite handle as root after fsuid failure"
+                        );
+                        std::mem::forget(unclosed);
+                    }
+                }
+                (None, Some(path)) => {
+                    let _ = af_release::fs_security::with_path_owner_fsuid(path, || {
+                        drop(held.take());
+                        Ok(())
+                    });
+                    if let Some(unclosed) = held {
+                        tracing::error!(
+                            path = %path.display(),
+                            "refusing to close SQLite handle as root after path owner validation failure"
+                        );
+                        std::mem::forget(unclosed);
+                    }
+                }
+                (None, None) => {
+                    drop(held);
+                }
+            }
+        }
+    }
+}
+
 pub(super) struct CoordinatedOperation {
-    pub(super) conn: Connection,
+    pub(super) conn: OwnerScopedConnection,
     pub(super) request: PackageRunnerRequest,
     package: Package,
     units: Vec<String>,
@@ -28,11 +198,18 @@ pub(super) struct CoordinatedOperation {
     _owner: OwnerLease,
 }
 
-fn effective_fs_root_for_conn(conn: &Connection) -> Option<std::path::PathBuf> {
+impl Drop for CoordinatedOperation {
+    fn drop(&mut self) {
+        let owner = &mut self._owner;
+        let _ = self.conn.with_db(|conn| owner.retire_with_conn(conn));
+    }
+}
+
+fn effective_fs_root_for_db_path(db_path: Option<&str>) -> Option<std::path::PathBuf> {
     if let Some(root) = crate::PackageExecutionEnv::default().fs_root {
         return Some(root);
     }
-    conn.path().map(Path::new).and_then(|p| {
+    db_path.map(Path::new).and_then(|p| {
         p.ancestors().find_map(|anc| {
             let rel = p.strip_prefix(anc).ok()?;
             if anc != Path::new("/")
@@ -49,8 +226,19 @@ fn effective_fs_root_for_conn(conn: &Connection) -> Option<std::path::PathBuf> {
 }
 
 impl CoordinatedOperation {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn admit(
-        mut conn: Connection,
+        conn: Connection,
+        request: PackageRunnerRequest,
+        package: Package,
+        units: Vec<String>,
+    ) -> Result<Self> {
+        let conn = OwnerScopedConnection::new(conn)?;
+        Self::admit_scoped(conn, request, package, units)
+    }
+
+    pub(super) fn admit_scoped(
+        mut conn: OwnerScopedConnection,
         mut request: PackageRunnerRequest,
         package: Package,
         mut units: Vec<String>,
@@ -79,8 +267,11 @@ impl CoordinatedOperation {
                 request.app_port
             );
         }
-        conn.busy_timeout(Duration::from_secs(5))?;
-        lifecycle::initialize_schema(&conn)?;
+        conn.with_db(|c| {
+            c.busy_timeout(Duration::from_secs(5))?;
+            lifecycle::initialize_schema(c)?;
+            Ok(())
+        })?;
         if matches!(request.action.as_str(), "install" | "reinstall") {
             let conflicting_dns = match request.package_id.as_str() {
                 "pihole" => Some(("adguardhome", "AdGuard Home", "/install/.adguardhome.lock")),
@@ -110,8 +301,9 @@ impl CoordinatedOperation {
             }
         }
         if request.action != "remove" {
-            let fs_root = effective_fs_root_for_conn(&conn);
-            let mut reserved = af_db::list_reserved_ports_excluding(&conn, &request.package_id)?;
+            let fs_root = effective_fs_root_for_db_path(conn.db_path_str());
+            let mut reserved =
+                conn.with_db(|c| af_db::list_reserved_ports_excluding(c, &request.package_id))?;
             reserved.extend(crate::rclone_extra_reserved_ports(
                 &request.package_id,
                 fs_root.as_deref(),
@@ -119,7 +311,7 @@ impl CoordinatedOperation {
             let candidate_port = if request.app_port > 0 {
                 Some(request.app_port)
             } else {
-                af_db::load_lifecycle_ingress(&conn, &request.package_id)?
+                conn.with_db(|c| af_db::load_lifecycle_ingress(c, &request.package_id))?
                     .map(|cfg| cfg.listen_port)
                     .filter(|p| *p > 0)
             };
@@ -150,11 +342,13 @@ impl CoordinatedOperation {
                     );
                     Some(request.secondary_port)
                 } else {
-                    af_db::load_lifecycle_secondary_port(
-                        &conn,
-                        "rclone",
-                        af_models::RCLONE_RC_API_PORT_ROLE,
-                    )?
+                    conn.with_db(|c| {
+                        af_db::load_lifecycle_secondary_port(
+                            c,
+                            "rclone",
+                            af_models::RCLONE_RC_API_PORT_ROLE,
+                        )
+                    })?
                     .or_else(|| {
                         crate::extract_rclone_runtime_api_port_for_root(fs_root.as_deref())
                             .map(i32::from)
@@ -208,15 +402,17 @@ impl CoordinatedOperation {
         ) {
             anyhow::bail!("Cannot start {}: {}", request.action, reason);
         }
-        let owner = lifecycle::admit_job_with_target(
-            &mut conn,
-            &request.package_id,
-            &request.lifecycle_job_id,
-            &request.action,
-            &started_at,
-            &units,
-            request.expected_target_version.as_deref(),
-        )?;
+        let owner = conn.with_db_mut(|c| {
+            lifecycle::admit_job_with_target(
+                c,
+                &request.package_id,
+                &request.lifecycle_job_id,
+                &request.action,
+                &started_at,
+                &units,
+                request.expected_target_version.as_deref(),
+            )
+        })?;
         Ok(Self {
             conn,
             request,
@@ -252,11 +448,14 @@ impl CoordinatedOperation {
         .unwrap_or(false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_port_in_tx(
         request: &PackageRunnerRequest,
         package: &Package,
-        fs_root: Option<&Path>,
         installed_or_legacy: bool,
+        extra_reserved: &std::collections::BTreeSet<i32>,
+        pre_runtime_port: i32,
+        pre_receipt_port: Option<i32>,
         conn: &Connection,
         base_reserved: &std::collections::BTreeSet<i32>,
         backend: &impl LifecycleBackend,
@@ -265,17 +464,14 @@ impl CoordinatedOperation {
             return Ok(0);
         }
         let mut reserved = base_reserved.clone();
-        reserved.extend(crate::rclone_extra_reserved_ports(
-            &request.package_id,
-            fs_root,
-        ));
+        reserved.extend(extra_reserved.iter().copied());
         let ingress = af_db::load_lifecycle_ingress(conn, &request.package_id)?;
         let saved = ingress
             .as_ref()
             .map(|config| config.listen_port)
             .unwrap_or(0);
         if request.action == "update" {
-            let runtime = backend.runtime_port(&request.package_id);
+            let runtime = pre_runtime_port;
             if runtime > 0 {
                 anyhow::ensure!(
                     (1024..=65535).contains(&runtime),
@@ -331,7 +527,7 @@ impl CoordinatedOperation {
             return Ok(saved);
         }
         if installed_or_legacy {
-            let runtime = backend.runtime_port(&request.package_id);
+            let runtime = pre_runtime_port;
             if runtime > 0 {
                 anyhow::ensure!(
                     (1024..=65535).contains(&runtime),
@@ -341,12 +537,7 @@ impl CoordinatedOperation {
                     return Ok(runtime);
                 }
             }
-            let env_cfg = crate::PackageExecutionEnv::default();
-            if let Ok(Some(receipt_port)) = af_models::read_package_receipt_port(
-                &package.name,
-                Some(&package.lock_file),
-                env_cfg.fs_root.as_deref(),
-            ) {
+            if let Some(receipt_port) = pre_receipt_port {
                 if (1024..=65535).contains(&receipt_port)
                     && !reserved.contains(&receipt_port)
                     && (request.action == "reinstall" || backend.available_port(receipt_port))
@@ -389,27 +580,55 @@ impl CoordinatedOperation {
         }
         let fs_root = self.effective_fs_root();
         let installed_or_legacy = self.is_installed_on_disk() || self.has_legacy_upgrade_receipt();
+        // Pre-resolve all host filesystem config/receipt reads at effective credentials BEFORE
+        // dropping thread fsuid for SQLite writes so private service-owned configs (0600/0750)
+        // remain readable by root runner.
+        let extra_reserved =
+            crate::rclone_extra_reserved_ports(&self.request.package_id, fs_root.as_deref());
+        let pre_runtime_port = if self.request.action == "update" || installed_or_legacy {
+            backend.runtime_port(&self.request.package_id)
+        } else {
+            0
+        };
+        let pre_receipt_port = if installed_or_legacy {
+            let env_cfg = crate::PackageExecutionEnv::default();
+            af_models::read_package_receipt_port(
+                &self.package.name,
+                Some(&self.package.lock_file),
+                env_cfg.fs_root.as_deref(),
+            )
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
         let request = &self.request;
         let package = &self.package;
-        let chosen = af_db::reserve_lifecycle_port_in_tx(
-            &mut self.conn,
-            &request.package_id,
-            &request.lifecycle_job_id,
-            Some(&request.action),
-            |tx, reserved| {
-                let port = Self::resolve_port_in_tx(
-                    request,
-                    package,
-                    fs_root.as_deref(),
-                    installed_or_legacy,
-                    tx,
-                    reserved,
-                    backend,
-                )?;
-                Ok((port > 0).then_some(port))
-            },
-        )?
-        .unwrap_or(0);
+        let chosen = self
+            .conn
+            .with_db_mut(|conn| {
+                af_db::reserve_lifecycle_port_in_tx(
+                    conn,
+                    &request.package_id,
+                    &request.lifecycle_job_id,
+                    Some(&request.action),
+                    |tx, reserved| {
+                        let port = Self::resolve_port_in_tx(
+                            request,
+                            package,
+                            installed_or_legacy,
+                            &extra_reserved,
+                            pre_runtime_port,
+                            pre_receipt_port,
+                            tx,
+                            reserved,
+                            backend,
+                        )?;
+                        Ok((port > 0).then_some(port))
+                    },
+                )
+            })?
+            .unwrap_or(0);
         if let Some(res) = lifecycle::port_resource(chosen) {
             if !self.units.contains(&res) {
                 self.units.push(res);
@@ -479,7 +698,7 @@ impl CoordinatedOperation {
 
 impl CoordinatedOperation {
     fn effective_fs_root(&self) -> Option<std::path::PathBuf> {
-        effective_fs_root_for_conn(&self.conn)
+        effective_fs_root_for_db_path(self.conn.db_path_str())
     }
 
     #[cfg(test)]
@@ -771,21 +990,23 @@ impl CoordinatedOperation {
                     .map(sanitize_lifecycle_field);
                 let mut finish_res = Ok(());
                 for _ in 0..3 {
-                    finish_res = lifecycle::finish_job_with_diagnostics(
-                        &self.conn,
-                        &self.request.package_id,
-                        &self.request.lifecycle_job_id,
-                        &self.request.action,
-                        false,
-                        lifecycle::LifecycleJobDiagnostics {
-                            failure_category: "preflight",
-                            failed_stage: Some("preflight_receipt_snapshot"),
-                            exit_code: Some(1),
-                            sanitized_summary: Some(&sanitized_err),
-                            expected_target_version: sanitized_expected.as_deref(),
-                            ..Default::default()
-                        },
-                    );
+                    finish_res = self.conn.with_db(|conn| {
+                        lifecycle::finish_job_with_diagnostics(
+                            conn,
+                            &self.request.package_id,
+                            &self.request.lifecycle_job_id,
+                            &self.request.action,
+                            false,
+                            lifecycle::LifecycleJobDiagnostics {
+                                failure_category: "preflight",
+                                failed_stage: Some("preflight_receipt_snapshot"),
+                                exit_code: Some(1),
+                                sanitized_summary: Some(&sanitized_err),
+                                expected_target_version: sanitized_expected.as_deref(),
+                                ..Default::default()
+                            },
+                        )
+                    });
                     if finish_res.is_ok() {
                         break;
                     }
@@ -815,21 +1036,23 @@ impl CoordinatedOperation {
                     .map(sanitize_lifecycle_field);
                 let mut finish_res = Ok(());
                 for _ in 0..3 {
-                    finish_res = lifecycle::finish_job_with_diagnostics(
-                        &self.conn,
-                        &self.request.package_id,
-                        &self.request.lifecycle_job_id,
-                        &self.request.action,
-                        false,
-                        lifecycle::LifecycleJobDiagnostics {
-                            failure_category: "preflight",
-                            failed_stage: Some("preflight_receipt_snapshot"),
-                            exit_code: Some(1),
-                            sanitized_summary: Some(&sanitized_err),
-                            expected_target_version: sanitized_expected.as_deref(),
-                            ..Default::default()
-                        },
-                    );
+                    finish_res = self.conn.with_db(|conn| {
+                        lifecycle::finish_job_with_diagnostics(
+                            conn,
+                            &self.request.package_id,
+                            &self.request.lifecycle_job_id,
+                            &self.request.action,
+                            false,
+                            lifecycle::LifecycleJobDiagnostics {
+                                failure_category: "preflight",
+                                failed_stage: Some("preflight_receipt_snapshot"),
+                                exit_code: Some(1),
+                                sanitized_summary: Some(&sanitized_err),
+                                expected_target_version: sanitized_expected.as_deref(),
+                                ..Default::default()
+                            },
+                        )
+                    });
                     if finish_res.is_ok() {
                         break;
                     }
@@ -1128,29 +1351,32 @@ impl CoordinatedOperation {
                 } else {
                     "configuration"
                 };
-                let base: Option<String> = self
-                    .conn
-                    .query_row(
-                        "SELECT COALESCE(base_domain,'') FROM settings WHERE id=1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
+                let (base, planned_ingress) = self.conn.with_db(|conn| {
+                    let base: Option<String> = conn
+                        .query_row(
+                            "SELECT COALESCE(base_domain,'') FROM settings WHERE id=1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    let base_domain = base.as_deref().unwrap_or("");
+                    let planned_ingress = if self.request.action != "remove"
+                        && (1024..=65535).contains(&self.request.app_port)
+                    {
+                        let existing =
+                            af_db::load_lifecycle_ingress(conn, &self.request.package_id)?;
+                        af_db::plan_lifecycle_ingress(
+                            &self.request.package_id,
+                            self.request.app_port,
+                            base_domain,
+                            existing.as_ref(),
+                        )?
+                    } else {
+                        None
+                    };
+                    Ok((base, planned_ingress))
+                })?;
                 let base_domain = base.as_deref().unwrap_or("");
-                let planned_ingress = if self.request.action != "remove"
-                    && (1024..=65535).contains(&self.request.app_port)
-                {
-                    let existing =
-                        af_db::load_lifecycle_ingress(&self.conn, &self.request.package_id)?;
-                    af_db::plan_lifecycle_ingress(
-                        &self.request.package_id,
-                        self.request.app_port,
-                        base_domain,
-                        existing.as_ref(),
-                    )?
-                } else {
-                    None
-                };
                 if self.request.action != "remove"
                     && (1024..=65535).contains(&self.request.app_port)
                 {
@@ -1206,16 +1432,23 @@ impl CoordinatedOperation {
                 } else {
                     None
                 };
-                af_db::synchronize_lifecycle_ingress_with_secondary_port(
-                    &mut self.conn,
-                    &self.request.package_id,
-                    &self.request.action,
-                    &self.request.lifecycle_job_id,
-                    self.request.app_port,
-                    secondary_update,
-                    self.request.delete_data,
-                    base_domain,
-                )?;
+                let package_id_for_sync = self.request.package_id.clone();
+                let action_for_sync = self.request.action.clone();
+                let job_id_for_sync = self.request.lifecycle_job_id.clone();
+                let app_port_for_sync = self.request.app_port;
+                let delete_data_for_sync = self.request.delete_data;
+                self.conn.with_db_mut(|conn| {
+                    af_db::synchronize_lifecycle_ingress_with_secondary_port(
+                        conn,
+                        &package_id_for_sync,
+                        &action_for_sync,
+                        &job_id_for_sync,
+                        app_port_for_sync,
+                        secondary_update,
+                        delete_data_for_sync,
+                        base_domain,
+                    )
+                })?;
                 if self.request.action == "remove" {
                     let fs_root = self.effective_fs_root();
                     let apache_dir = match fs_root.as_deref() {
@@ -1303,19 +1536,22 @@ impl CoordinatedOperation {
                         restore_failed = true;
                     }
                 }
-            } else if self.effective_fs_root().is_none()
-                && post_commit_ingress.as_ref().is_some_and(|cfg| {
-                    cfg.external_access_enabled
-                        && cfg.tls_enabled
-                        && !cfg.public_domain.trim().is_empty()
-                })
-            {
-                if let Err(err) = crate::sync_certbot_and_managed_ingress().await {
-                    tracing::warn!(
-                        package = %self.request.package_id,
-                        error = %err,
-                        "post-install certbot and managed ingress sync failed"
-                    );
+            } else {
+                self.reconcile_post_lifecycle_dns_best_effort().await;
+                if self.effective_fs_root().is_none()
+                    && post_commit_ingress.as_ref().is_some_and(|cfg| {
+                        cfg.external_access_enabled
+                            && cfg.tls_enabled
+                            && !cfg.public_domain.trim().is_empty()
+                    })
+                {
+                    if let Err(err) = crate::sync_certbot_and_managed_ingress().await {
+                        tracing::warn!(
+                            package = %self.request.package_id,
+                            error = %err,
+                            "post-install certbot and managed ingress sync failed"
+                        );
+                    }
                 }
             }
         }
@@ -1388,66 +1624,69 @@ impl CoordinatedOperation {
             .as_deref()
             .map(sanitize_lifecycle_field);
         let sanitized_achieved = achieved_ver.as_deref().map(sanitize_lifecycle_field);
-        lifecycle::finish_job_with_diagnostics(
-            &self.conn,
-            &self.request.package_id,
-            &self.request.lifecycle_job_id,
-            &self.request.action,
-            success,
-            lifecycle::LifecycleJobDiagnostics {
-                failure_category: failure,
-                failed_stage: if target_match_failed {
-                    Some("target_certification_after_install_commit")
-                } else if restore_failed {
-                    Some("service_restoration")
-                } else if execution.is_err() {
-                    Some(failure)
-                } else if receipt_restore_error.is_some() {
-                    Some("rollback")
-                } else {
-                    None
-                },
-                exit_code: if target_match_failed
-                    || restore_failed
-                    || execution.is_err()
-                    || receipt_restore_error.is_some()
-                {
-                    Some(1)
-                } else {
-                    None
-                },
-                sanitized_summary: sanitized_diag_summary
-                    .as_deref()
-                    .or(if target_match_failed {
-                        Some("Post-execution installed version did not match expected target")
+        let finished_at = self.conn.with_db(|conn| {
+            lifecycle::finish_job_with_diagnostics(
+                conn,
+                &self.request.package_id,
+                &self.request.lifecycle_job_id,
+                &self.request.action,
+                success,
+                lifecycle::LifecycleJobDiagnostics {
+                    failure_category: failure,
+                    failed_stage: if target_match_failed {
+                        Some("target_certification_after_install_commit")
                     } else if restore_failed {
-                        Some("Service restart verification failed")
+                        Some("service_restoration")
                     } else if execution.is_err() {
-                        Some("Lifecycle execution failed")
+                        Some(failure)
                     } else if receipt_restore_error.is_some() {
-                        Some("Receipt restoration failed")
+                        Some("rollback")
                     } else {
                         None
-                    }),
-                expected_target_version: sanitized_expected.as_deref(),
-                achieved_version: sanitized_achieved.as_deref(),
-                recovery_state: prior_state_recovered
-                    .then_some(lifecycle::RECOVERY_STATE_PRIOR_VERIFIED),
-                retention_state: (success && self.request.action == "remove").then_some(
-                    if self.request.delete_data {
-                        lifecycle::RETENTION_STATE_PURGED
-                    } else {
-                        lifecycle::RETENTION_STATE_RETAINED
                     },
-                ),
-                ..Default::default()
-            },
-        )?;
-        let finished_at = self.conn.query_row(
-            "SELECT finished_at FROM package_lifecycle_jobs WHERE package_id=?1 AND job_id=?2",
-            rusqlite::params![self.request.package_id, self.request.lifecycle_job_id],
-            |row| row.get(0),
-        )?;
+                    exit_code: if target_match_failed
+                        || restore_failed
+                        || execution.is_err()
+                        || receipt_restore_error.is_some()
+                    {
+                        Some(1)
+                    } else {
+                        None
+                    },
+                    sanitized_summary: sanitized_diag_summary.as_deref().or(
+                        if target_match_failed {
+                            Some("Post-execution installed version did not match expected target")
+                        } else if restore_failed {
+                            Some("Service restart verification failed")
+                        } else if execution.is_err() {
+                            Some("Lifecycle execution failed")
+                        } else if receipt_restore_error.is_some() {
+                            Some("Receipt restoration failed")
+                        } else {
+                            None
+                        },
+                    ),
+                    expected_target_version: sanitized_expected.as_deref(),
+                    achieved_version: sanitized_achieved.as_deref(),
+                    recovery_state: prior_state_recovered
+                        .then_some(lifecycle::RECOVERY_STATE_PRIOR_VERIFIED),
+                    retention_state: (success && self.request.action == "remove").then_some(
+                        if self.request.delete_data {
+                            lifecycle::RETENTION_STATE_PURGED
+                        } else {
+                            lifecycle::RETENTION_STATE_RETAINED
+                        },
+                    ),
+                    ..Default::default()
+                },
+            )?;
+            let finished_at: String = conn.query_row(
+                "SELECT finished_at FROM package_lifecycle_jobs WHERE package_id=?1 AND job_id=?2",
+                rusqlite::params![self.request.package_id, self.request.lifecycle_job_id],
+                |row| row.get(0),
+            )?;
+            Ok(finished_at)
+        })?;
         Ok(LifecycleReceipt {
             job_id: self.request.lifecycle_job_id.clone(),
             package_id: self.request.package_id.clone(),
@@ -1457,5 +1696,822 @@ impl CoordinatedOperation {
             finished_at,
             app_port: self.request.app_port,
         })
+    }
+
+    async fn reconcile_post_lifecycle_dns_best_effort(&mut self) {
+        let fs_root = self.effective_fs_root();
+        let should_skip = fs_root.is_none() && !has_explicit_dns_override() && cfg!(test);
+        if should_skip {
+            return;
+        }
+        let package_id = self.request.package_id.clone();
+        let action = self.request.action.clone();
+        let db_path = self.conn.db_path.clone().filter(|p| p.exists());
+        let res = if let Some(db_path) = db_path {
+            reconcile_dns_for_db_path_serialized(db_path, fs_root).await
+        } else {
+            let _dns_guard = POST_LIFECYCLE_DNS_RECONCILE_LOCK.lock().await;
+            let snapshot = match self.conn.with_db(read_reconciled_dns_db_snapshot) {
+                Ok(snapshot) => snapshot,
+                Err(err) => {
+                    tracing::warn!(
+                        package = %package_id,
+                        action = %action,
+                        error = %err,
+                        "post-lifecycle DNS domain collection failed"
+                    );
+                    return;
+                }
+            };
+            tokio::task::spawn_blocking(move || {
+                let (aether_local_domains, authoritative_domains) =
+                    finalize_reconciled_dns_domains(snapshot, fs_root.as_deref());
+                apply_reconciled_dns_domains(
+                    &aether_local_domains,
+                    &authoritative_domains,
+                    fs_root.as_deref(),
+                )
+            })
+            .await
+            .map_err(|join_err| {
+                anyhow::anyhow!("post-lifecycle DNS reconciliation task failed: {join_err}")
+            })
+            .and_then(|inner| inner)
+        };
+        if let Err(err) = res {
+            tracing::warn!(
+                package = %package_id,
+                action = %action,
+                error = %err,
+                "post-lifecycle DNS reconciliation failed"
+            );
+        }
+    }
+}
+
+static POST_LIFECYCLE_DNS_RECONCILE_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
+async fn reconcile_dns_for_db_path_serialized(
+    db_path: PathBuf,
+    fs_root: Option<PathBuf>,
+) -> Result<()> {
+    let _dns_guard = POST_LIFECYCLE_DNS_RECONCILE_LOCK.lock().await;
+    tokio::task::spawn_blocking(move || {
+        let conn = OwnerScopedConnection::open_hardened(&db_path, false)?;
+        let snapshot = conn.with_db(|c| {
+            c.busy_timeout(Duration::from_secs(5))?;
+            read_reconciled_dns_db_snapshot(c)
+        })?;
+        drop(conn);
+        let (aether_local_domains, authoritative_domains) =
+            finalize_reconciled_dns_domains(snapshot, fs_root.as_deref());
+        apply_reconciled_dns_domains(
+            &aether_local_domains,
+            &authoritative_domains,
+            fs_root.as_deref(),
+        )
+    })
+    .await
+    .map_err(|join_err| {
+        anyhow::anyhow!("post-lifecycle DNS reconciliation task failed: {join_err}")
+    })?
+}
+
+fn isolated_hosts_lock_path(hosts_path: &Path) -> PathBuf {
+    let parent = hosts_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = hosts_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("hosts");
+    let stem = file_name.trim_start_matches('.');
+    let stem = if stem.is_empty() { "hosts" } else { stem };
+    parent.join(format!(".{stem}.lock"))
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let exists: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |r| r.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
+fn format_app_public_domain(app_name: &str, base_domain: &str) -> String {
+    let norm = af_db::normalize_base_domain(base_domain);
+    if norm.is_empty() {
+        return String::new();
+    }
+    let clean_app: String = app_name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = clean_app.trim_matches('-');
+    if slug.is_empty() {
+        String::new()
+    } else {
+        format!("{slug}.{norm}")
+    }
+}
+
+fn detect_lifecycle_lan_ip() -> std::result::Result<Option<String>, String> {
+    if let Some(raw_os) = std::env::var_os("AETHERFLOW_LAN_IP") {
+        let raw = raw_os
+            .into_string()
+            .map_err(|_| "Invalid AETHERFLOW_LAN_IP: value is not valid UTF-8".to_string())?;
+        let ip = crate::hosts_dns::validate_hosts_ip(&raw)
+            .map_err(|e| format!("Invalid AETHERFLOW_LAN_IP: {e}"))?;
+        return Ok(Some(ip.to_string()));
+    }
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if sock.connect("1.1.1.1:80").is_ok() {
+            if let Ok(addr) = sock.local_addr() {
+                let ip = addr.ip();
+                if !ip.is_loopback() && !ip.is_unspecified() {
+                    return Ok(Some(ip.to_string()));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_explicit_hosts_override() -> Option<(&'static str, String)> {
+    for key in ["AF_HOSTS_FILE", "AETHERFLOW_HOSTS_FILE"] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some((key, trimmed.to_string()));
+            }
+        }
+    }
+    None
+}
+
+fn has_explicit_hosts_override() -> bool {
+    resolve_explicit_hosts_override().is_some()
+}
+
+fn has_explicit_dns_provider_override() -> bool {
+    [
+        "AETHERFLOW_DNSMASQ_DIR",
+        "AETHERFLOW_PIHOLE_DIR",
+        "AETHERFLOW_CONFIG_ROOT",
+        "AETHERFLOW_FS_ROOT",
+    ]
+    .iter()
+    .any(|key| {
+        std::env::var(key)
+            .ok()
+            .is_some_and(|val| !val.trim().is_empty())
+    })
+}
+
+fn has_explicit_dns_override() -> bool {
+    has_explicit_hosts_override() || has_explicit_dns_provider_override()
+}
+
+struct ReconciledDnsDbSnapshot {
+    base_domain: String,
+    domain_set: std::collections::BTreeSet<String>,
+    configured_public_apps: std::collections::HashSet<String>,
+    retained_apps: std::collections::HashSet<String>,
+}
+
+fn read_reconciled_dns_db_snapshot(conn: &Connection) -> Result<ReconciledDnsDbSnapshot> {
+    use std::collections::{BTreeSet, HashSet};
+
+    let mut domain_set: BTreeSet<String> = BTreeSet::new();
+    domain_set.insert("aetherflow.aether.local".to_string());
+
+    let base_raw: Option<String> = if table_exists(conn, "settings")? {
+        conn.query_row(
+            "SELECT COALESCE(base_domain, '') FROM settings WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+    } else {
+        None
+    };
+    let base_domain = base_raw
+        .as_deref()
+        .map(af_db::normalize_base_domain)
+        .unwrap_or_default();
+
+    let mut configured_public_apps: HashSet<String> = HashSet::new();
+    if table_exists(conn, "app_ingress_configs")? {
+        let mut stmt =
+            conn.prepare("SELECT app_name, COALESCE(public_domain, ''), COALESCE(listen_port, 0) FROM app_ingress_configs")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i32>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (app_name, public_domain, listen_port) = row?;
+            let app_key = app_name.trim().to_ascii_lowercase();
+            if !app_key.is_empty() {
+                domain_set.insert(format!("{app_key}.aether.local"));
+            }
+            if !public_domain.trim().is_empty() {
+                if !app_key.is_empty() {
+                    configured_public_apps.insert(app_key);
+                }
+                domain_set.insert(public_domain.trim().to_ascii_lowercase());
+            } else if !base_domain.is_empty() && listen_port > 0 {
+                let pub_dom = format_app_public_domain(&app_name, &base_domain);
+                if !pub_dom.is_empty() {
+                    if !app_key.is_empty() {
+                        configured_public_apps.insert(app_key);
+                    }
+                    domain_set.insert(pub_dom);
+                }
+            }
+        }
+    }
+
+    let mut retained_apps: HashSet<String> = HashSet::new();
+    if table_exists(conn, "retained_app_ingress_configs")? {
+        let mut stmt = conn.prepare("SELECT app_name FROM retained_app_ingress_configs")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for app in rows.flatten() {
+            let app_key = app.trim().to_ascii_lowercase();
+            if !app_key.is_empty() {
+                retained_apps.insert(app_key);
+            }
+        }
+    }
+
+    Ok(ReconciledDnsDbSnapshot {
+        base_domain,
+        domain_set,
+        configured_public_apps,
+        retained_apps,
+    })
+}
+
+fn finalize_reconciled_dns_domains(
+    mut snapshot: ReconciledDnsDbSnapshot,
+    fs_root: Option<&Path>,
+) -> (Vec<String>, Vec<String>) {
+    if let Ok(pkgs) = crate::load_runner_package_definitions_in_root(fs_root) {
+        for p in pkgs {
+            let app_key = p.name.trim().to_ascii_lowercase();
+            let lock_key = af_models::resolve_package_lock_name(&app_key).to_string();
+            if snapshot.retained_apps.contains(&app_key)
+                || snapshot.retained_apps.contains(&lock_key)
+            {
+                continue;
+            }
+            let explicit_lock = (!p.lock_file.trim().is_empty()).then_some(p.lock_file.as_str());
+            let installed = af_models::inspect_package_receipts(&p.name, explicit_lock, fs_root)
+                .is_ok_and(|receipts| receipts.has_any_receipt());
+            if !installed {
+                continue;
+            }
+            if p.default_port > 0 || !p.web_path.trim().is_empty() {
+                snapshot
+                    .domain_set
+                    .insert(format!("{app_key}.aether.local"));
+                if !snapshot.base_domain.is_empty()
+                    && !snapshot.configured_public_apps.contains(&app_key)
+                {
+                    let pub_dom = format_app_public_domain(&p.name, &snapshot.base_domain);
+                    if !pub_dom.is_empty() {
+                        snapshot.domain_set.insert(pub_dom);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut aether_local_domains = Vec::new();
+    let mut authoritative_domains = Vec::new();
+    for raw in snapshot.domain_set {
+        if let Ok(clean) = crate::hosts_dns::validate_hosts_domain(&raw) {
+            if clean.ends_with(".aether.local") {
+                aether_local_domains.push(clean.clone());
+            }
+            authoritative_domains.push(clean);
+        }
+    }
+    (aether_local_domains, authoritative_domains)
+}
+
+fn apply_reconciled_dns_domains(
+    aether_local_domains: &[String],
+    authoritative_domains: &[String],
+    fs_root: Option<&Path>,
+) -> Result<()> {
+    let hosts_override = resolve_explicit_hosts_override();
+    if let Some(root) = fs_root {
+        let confined_override = hosts_override.as_ref().and_then(|(key, trimmed)| {
+            af_models::validate_path_within_isolated_root(Path::new(trimmed), root, key).ok()
+        });
+        if let Some(hosts_path) = confined_override {
+            let lock_path = isolated_hosts_lock_path(&hosts_path);
+            crate::hosts_dns::reconcile_hosts_file_at_path(
+                &hosts_path,
+                &lock_path,
+                aether_local_domains,
+                "127.0.0.1",
+            )?;
+        } else {
+            let etc_dir = root.join("etc");
+            if etc_dir.is_dir() {
+                let hosts_path = etc_dir.join("hosts");
+                let lock_path = isolated_hosts_lock_path(&hosts_path);
+                crate::hosts_dns::reconcile_hosts_file_at_path(
+                    &hosts_path,
+                    &lock_path,
+                    aether_local_domains,
+                    "127.0.0.1",
+                )?;
+            }
+        }
+    } else if let Some((_, trimmed)) = hosts_override {
+        let hosts_path = Path::new(&trimmed);
+        let lock_path = crate::hosts_dns::resolve_hosts_lock_path(hosts_path);
+        crate::hosts_dns::reconcile_hosts_file_at_path(
+            hosts_path,
+            &lock_path,
+            aether_local_domains,
+            "127.0.0.1",
+        )?;
+    } else {
+        crate::hosts_dns::reconcile_hosts_file(aether_local_domains, "127.0.0.1")?;
+    }
+
+    let should_sync_providers =
+        fs_root.is_some() || !cfg!(test) || has_explicit_dns_provider_override();
+    if should_sync_providers {
+        match detect_lifecycle_lan_ip() {
+            Ok(Some(lan_ip)) => {
+                crate::hosts_dns::sync_dns_provider_files_for_root(
+                    &lan_ip,
+                    authoritative_domains,
+                    true,
+                    fs_root,
+                )?;
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "Skipping LAN DNS provider sync: unable to determine a non-loopback LAN IP"
+                );
+            }
+            Err(err) => {
+                anyhow::bail!("{err}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn reconcile_dns_for_state(conn: &Connection, fs_root: Option<&Path>) -> Result<()> {
+    let snapshot = read_reconciled_dns_db_snapshot(conn)?;
+    let (aether_local_domains, authoritative_domains) =
+        finalize_reconciled_dns_domains(snapshot, fs_root);
+    apply_reconciled_dns_domains(&aether_local_domains, &authoritative_domains, fs_root)
+}
+
+#[cfg(test)]
+mod coordinator_parity_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    struct EnvVarGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvVarGuard {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let mut saved = Vec::with_capacity(vars.len());
+            for &(key, val) in vars {
+                saved.push((key, std::env::var_os(key)));
+                std::env::set_var(key, val);
+            }
+            Self { saved }
+        }
+
+        fn clear(keys: &[&'static str]) -> Self {
+            let mut saved = Vec::with_capacity(keys.len());
+            for &key in keys {
+                saved.push((key, std::env::var_os(key)));
+                std::env::remove_var(key);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (key, old) in self.saved.drain(..).rev() {
+                if let Some(val) = old {
+                    std::env::set_var(key, val);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_ingress_sync_atomically_bumps_epoch_and_invalidates_app_updates() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE app_ingress_configs (
+                 app_name TEXT PRIMARY KEY,
+                 public_domain TEXT,
+                 external_access_enabled BOOLEAN,
+                 listen_port INTEGER,
+                 tls_enabled BOOLEAN,
+                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE package_lifecycle_jobs (
+                 package_id TEXT PRIMARY KEY,
+                 job_id TEXT,
+                 action TEXT,
+                 status TEXT,
+                 service_units TEXT
+             );
+             CREATE TABLE app_updates (package_name TEXT PRIMARY KEY, installed_version TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO app_updates (package_name, installed_version) VALUES ('sonarr', '4.0.0'), ('radarr', '5.0.0')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO package_lifecycle_jobs VALUES ('sonarr', 'upd-1', 'update', 'updating', '[\"sonarr\"]')",
+            [],
+        )
+        .unwrap();
+
+        af_db::synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn, "sonarr", "update", "upd-1", 8989, None, false, "",
+        )
+        .unwrap();
+        let e1: String = conn
+            .query_row(
+                "SELECT value FROM system_config WHERE key = 'package_lifecycle_epoch'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(e1, "1");
+        let remaining: Vec<String> = conn
+            .prepare("SELECT package_name FROM app_updates ORDER BY package_name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(remaining, vec!["radarr"]);
+
+        conn.execute(
+            "UPDATE package_lifecycle_jobs SET job_id='rm-2', action='remove', status='uninstalling' WHERE package_id='sonarr'",
+            [],
+        )
+        .unwrap();
+        af_db::synchronize_lifecycle_ingress_with_secondary_port(
+            &mut conn, "sonarr", "remove", "rm-2", 0, None, false, "",
+        )
+        .unwrap();
+        let e2: String = conn
+            .query_row(
+                "SELECT value FROM system_config WHERE key = 'package_lifecycle_epoch'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(e2, "2");
+    }
+
+    #[test]
+    fn isolated_hosts_lock_path_aligns_hosts_and_avoids_lock_extension_collisions() {
+        let default_hosts = Path::new("/tmp/root/etc/hosts");
+        assert_eq!(
+            isolated_hosts_lock_path(default_hosts),
+            Path::new("/tmp/root/etc/.hosts.lock")
+        );
+        let dot_lock_hosts = Path::new("/tmp/root/etc/custom.lock");
+        assert_ne!(isolated_hosts_lock_path(dot_lock_hosts), dot_lock_hosts);
+        assert_eq!(
+            isolated_hosts_lock_path(dot_lock_hosts),
+            Path::new("/tmp/root/etc/.custom.lock.lock")
+        );
+        let leading_dot_hosts = Path::new("/tmp/root/etc/.custom");
+        assert_eq!(
+            isolated_hosts_lock_path(leading_dot_hosts),
+            Path::new("/tmp/root/etc/.custom.lock")
+        );
+    }
+
+    #[tokio::test]
+    async fn post_lifecycle_dns_reconciliation_serializes_snapshot_and_write() {
+        let _lock = crate::ENV_TEST_MUTEX.lock().await;
+        let root = std::env::temp_dir().join(format!("af-coord-dns-ser-{}", Uuid::new_v4()));
+        let etc_dir = root.join("etc");
+        let dnsmasq_dir = etc_dir.join("dnsmasq.d");
+        std::fs::create_dir_all(&dnsmasq_dir).unwrap();
+        std::fs::write(etc_dir.join("hosts"), "127.0.0.1 localhost\n").unwrap();
+
+        let db_path = root.join("aetherflow.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE app_ingress_configs (
+                 app_name TEXT PRIMARY KEY,
+                 public_domain TEXT,
+                 external_access_enabled INTEGER,
+                 tls_enabled INTEGER,
+                 listen_port INTEGER,
+                 updated_at TEXT
+             );
+             INSERT INTO app_ingress_configs VALUES ('sonarr', '', 0, 0, 8989, '2026-11-27');",
+        )
+        .unwrap();
+
+        let _env = EnvVarGuard::set(&[("AETHERFLOW_LAN_IP", "10.40.50.60")]);
+
+        // Hold the runner-wide DNS reconciliation mutex to simulate an in-flight older op
+        // while a second lifecycle op commits 'radarr' and queues its reconciliation.
+        let held_guard = POST_LIFECYCLE_DNS_RECONCILE_LOCK.lock().await;
+        let queued = tokio::spawn(reconcile_dns_for_db_path_serialized(
+            db_path.clone(),
+            Some(root.clone()),
+        ));
+
+        // Commit newer DB state before the queued task can enter the critical section.
+        conn.execute(
+            "INSERT INTO app_ingress_configs VALUES ('radarr', '', 0, 0, 7878, '2026-11-27')",
+            [],
+        )
+        .unwrap();
+        drop(held_guard);
+
+        queued.await.unwrap().unwrap();
+        let hosts_after = std::fs::read_to_string(etc_dir.join("hosts")).unwrap();
+        assert!(hosts_after.contains("sonarr.aether.local"));
+        assert!(hosts_after.contains("radarr.aether.local"));
+        let dnsmasq_after =
+            std::fs::read_to_string(dnsmasq_dir.join("05-aetherflow-dns.conf")).unwrap();
+        assert!(dnsmasq_after.contains("address=/sonarr.aether.local/10.40.50.60"));
+        assert!(dnsmasq_after.contains("address=/radarr.aether.local/10.40.50.60"));
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn post_lifecycle_dns_reconciliation_syncs_install_and_cleans_remove_in_isolated_root() {
+        let _lock = crate::ENV_TEST_MUTEX.blocking_lock();
+        let root = std::env::temp_dir().join(format!("af-coord-dns-{}", Uuid::new_v4()));
+        let etc_dir = root.join("etc");
+        let dnsmasq_dir = etc_dir.join("dnsmasq.d");
+        let pihole_dir = etc_dir.join("pihole");
+        let adguard_dir = root.join("opt/AdGuardHome");
+        let install_dir = root.join("install");
+        std::fs::create_dir_all(&dnsmasq_dir).unwrap();
+        std::fs::create_dir_all(&pihole_dir).unwrap();
+        std::fs::create_dir_all(&adguard_dir).unwrap();
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(etc_dir.join("hosts"), "127.0.0.1 localhost\n").unwrap();
+        std::fs::write(pihole_dir.join("custom.list"), "").unwrap();
+        std::fs::write(
+            adguard_dir.join("AdGuardHome.yaml"),
+            "filtering:\n  rewrites: []\n",
+        )
+        .unwrap();
+        std::fs::write(install_dir.join(".sonarr.lock"), "installed\n").unwrap();
+
+        let root_str = root.to_string_lossy().into_owned();
+        let _env = EnvVarGuard::set(&[
+            ("AETHERFLOW_FS_ROOT", &root_str),
+            ("AETHERFLOW_LAN_IP", "10.20.30.40"),
+        ]);
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (id INTEGER PRIMARY KEY, base_domain TEXT);
+             INSERT INTO settings VALUES (1, 'example.com');
+             CREATE TABLE app_ingress_configs (
+                 app_name TEXT PRIMARY KEY,
+                 public_domain TEXT,
+                 external_access_enabled INTEGER,
+                 tls_enabled INTEGER,
+                 listen_port INTEGER,
+                 updated_at TEXT
+             );
+             INSERT INTO app_ingress_configs VALUES ('sonarr', '', 0, 0, 8989, '2026-11-26');
+             CREATE TABLE retained_app_ingress_configs (app_name TEXT PRIMARY KEY, config_json TEXT NOT NULL);",
+        )
+        .unwrap();
+
+        reconcile_dns_for_state(&conn, Some(&root)).unwrap();
+        let hosts_after_install = std::fs::read_to_string(etc_dir.join("hosts")).unwrap();
+        assert!(hosts_after_install.contains("aetherflow.aether.local"));
+        assert!(hosts_after_install.contains("sonarr.aether.local"));
+        let dnsmasq_after_install =
+            std::fs::read_to_string(dnsmasq_dir.join("05-aetherflow-dns.conf")).unwrap();
+        assert!(dnsmasq_after_install.contains("address=/sonarr.aether.local/10.20.30.40"));
+        assert!(dnsmasq_after_install.contains("address=/sonarr.example.com/10.20.30.40"));
+        let pihole_after_install = std::fs::read_to_string(pihole_dir.join("custom.list")).unwrap();
+        assert!(pihole_after_install.contains("10.20.30.40 sonarr.example.com"));
+        let adguard_after_install =
+            std::fs::read_to_string(adguard_dir.join("AdGuardHome.yaml")).unwrap();
+        assert!(adguard_after_install.contains("sonarr.aether.local"));
+        assert!(adguard_after_install.contains("10.20.30.40"));
+
+        // Simulate remove completion: drop ingress row + lockfile and reconcile DNS again
+        conn.execute(
+            "DELETE FROM app_ingress_configs WHERE app_name = 'sonarr'",
+            [],
+        )
+        .unwrap();
+        std::fs::remove_file(install_dir.join(".sonarr.lock")).unwrap();
+        reconcile_dns_for_state(&conn, Some(&root)).unwrap();
+
+        let hosts_after_remove = std::fs::read_to_string(etc_dir.join("hosts")).unwrap();
+        assert!(hosts_after_remove.contains("aetherflow.aether.local"));
+        assert!(!hosts_after_remove.contains("sonarr.aether.local"));
+        let dnsmasq_after_remove =
+            std::fs::read_to_string(dnsmasq_dir.join("05-aetherflow-dns.conf")).unwrap();
+        assert!(!dnsmasq_after_remove.contains("sonarr."));
+        assert!(dnsmasq_after_remove.contains("aetherflow.aether.local"));
+        let pihole_after_remove = std::fs::read_to_string(pihole_dir.join("custom.list")).unwrap();
+        assert!(!pihole_after_remove.contains("sonarr."));
+        let adguard_after_remove =
+            std::fs::read_to_string(adguard_dir.join("AdGuardHome.yaml")).unwrap();
+        assert!(!adguard_after_remove.contains("sonarr.aether.local"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn isolated_root_dns_stays_confined_with_af_hosts_file_and_outside_provider_env() {
+        let _lock = crate::ENV_TEST_MUTEX.blocking_lock();
+        let root = std::env::temp_dir().join(format!("af-coord-iso-{}", Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!("af-coord-out-{}", Uuid::new_v4()));
+        let etc_dir = root.join("etc");
+        let dnsmasq_dir = etc_dir.join("dnsmasq.d");
+        let outside_dnsmasq = outside.join("dnsmasq.d");
+        let outside_hosts = outside.join("hosts");
+        let confined_default_hosts = etc_dir.join("hosts");
+        let inside_custom_hosts = etc_dir.join("custom.hosts");
+        let inside_fallback_hosts = etc_dir.join("fallback.hosts");
+        std::fs::create_dir_all(&dnsmasq_dir).unwrap();
+        std::fs::create_dir_all(&outside_dnsmasq).unwrap();
+        std::fs::write(&outside_hosts, "UNTOUCHED_HOSTS\n").unwrap();
+        std::fs::write(&confined_default_hosts, "127.0.0.1 localhost\n").unwrap();
+        std::fs::write(&inside_custom_hosts, "127.0.0.1 localhost\n").unwrap();
+        std::fs::write(&inside_fallback_hosts, "127.0.0.1 localhost\n").unwrap();
+        std::fs::write(
+            outside_dnsmasq.join("05-aetherflow-dns.conf"),
+            "UNTOUCHED\n",
+        )
+        .unwrap();
+
+        let outside_hosts_str = outside_hosts.to_string_lossy().into_owned();
+        let outside_dnsmasq_str = outside_dnsmasq.to_string_lossy().into_owned();
+        let inside_custom_hosts_str = inside_custom_hosts.to_string_lossy().into_owned();
+        let inside_fallback_hosts_str = inside_fallback_hosts.to_string_lossy().into_owned();
+        let _clear = EnvVarGuard::clear(&[
+            "AETHERFLOW_FS_ROOT",
+            "AETHERFLOW_CONFIG_ROOT",
+            "AETHERFLOW_PIHOLE_DIR",
+            "AETHERFLOW_HOSTS_FILE",
+        ]);
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE app_ingress_configs (
+                 app_name TEXT PRIMARY KEY,
+                 public_domain TEXT,
+                 external_access_enabled INTEGER,
+                 tls_enabled INTEGER,
+                 listen_port INTEGER,
+                 updated_at TEXT
+             );
+             INSERT INTO app_ingress_configs VALUES ('radarr', '', 0, 0, 7878, '2026-11-26');",
+        )
+        .unwrap();
+
+        // 1. Outside AF_HOSTS_FILE and outside AETHERFLOW_DNSMASQ_DIR must stay untouched;
+        //    reconciliation falls back strictly inside `root/etc/hosts` and `root/etc/dnsmasq.d`.
+        {
+            let _env = EnvVarGuard::set(&[
+                ("AF_HOSTS_FILE", &outside_hosts_str),
+                ("AETHERFLOW_DNSMASQ_DIR", &outside_dnsmasq_str),
+                ("AETHERFLOW_LAN_IP", "10.30.40.50"),
+            ]);
+            reconcile_dns_for_state(&conn, Some(&root)).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(&outside_hosts).unwrap(),
+            "UNTOUCHED_HOSTS\n",
+            "outside AF_HOSTS_FILE must stay untouched when isolated fs_root is active"
+        );
+        assert!(
+            std::fs::read_to_string(&confined_default_hosts)
+                .unwrap()
+                .contains("radarr.aether.local"),
+            "fallback inside isolated root/etc/hosts must be reconciled"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside_dnsmasq.join("05-aetherflow-dns.conf")).unwrap(),
+            "UNTOUCHED\n"
+        );
+        let confined_dnsmasq =
+            std::fs::read_to_string(dnsmasq_dir.join("05-aetherflow-dns.conf")).unwrap();
+        assert!(confined_dnsmasq.contains("address=/radarr.aether.local/10.30.40.50"));
+
+        // 2. Inside AF_HOSTS_FILE under isolated root IS honored.
+        {
+            let _env = EnvVarGuard::set(&[
+                ("AF_HOSTS_FILE", &inside_custom_hosts_str),
+                ("AETHERFLOW_LAN_IP", "10.30.40.50"),
+            ]);
+            reconcile_dns_for_state(&conn, Some(&root)).unwrap();
+        }
+        assert!(
+            std::fs::read_to_string(&inside_custom_hosts)
+                .unwrap()
+                .contains("radarr.aether.local"),
+            "confined AF_HOSTS_FILE inside isolated root must be honored"
+        );
+
+        // 3. Empty AF_HOSTS_FILE="" must NOT shadow a confined AETHERFLOW_HOSTS_FILE.
+        {
+            let _env = EnvVarGuard::set(&[
+                ("AF_HOSTS_FILE", "   "),
+                ("AETHERFLOW_HOSTS_FILE", &inside_fallback_hosts_str),
+                ("AETHERFLOW_LAN_IP", "10.30.40.50"),
+            ]);
+            reconcile_dns_for_state(&conn, Some(&root)).unwrap();
+        }
+        assert!(
+            std::fs::read_to_string(&inside_fallback_hosts)
+                .unwrap()
+                .contains("radarr.aether.local"),
+            "empty AF_HOSTS_FILE must fall through to confined AETHERFLOW_HOSTS_FILE"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn detect_lifecycle_lan_ip_fails_closed_on_invalid_or_empty_env() {
+        let _lock = crate::ENV_TEST_MUTEX.blocking_lock();
+        let root = std::env::temp_dir().join(format!("af-coord-badip-{}", Uuid::new_v4()));
+        let dnsmasq_dir = root.join("etc/dnsmasq.d");
+        std::fs::create_dir_all(&dnsmasq_dir).unwrap();
+        let conf_path = dnsmasq_dir.join("05-aetherflow-dns.conf");
+        std::fs::write(
+            &conf_path,
+            "# keep existing\naddress=/keep.aether.local/10.0.0.9\n",
+        )
+        .unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        for bad in [
+            "",
+            "   ",
+            " 10.20.30.40 ",
+            "not-an-ip",
+            "10.0.0.1\n127.0.0.1",
+        ] {
+            let _env = EnvVarGuard::set(&[("AETHERFLOW_LAN_IP", bad)]);
+            assert!(
+                detect_lifecycle_lan_ip().is_err(),
+                "expected invalid AETHERFLOW_LAN_IP={bad:?} to fail closed"
+            );
+            assert!(
+                reconcile_dns_for_state(&conn, Some(&root)).is_err(),
+                "expected reconcile_dns_for_state to fail closed for AETHERFLOW_LAN_IP={bad:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&conf_path).unwrap(),
+                "# keep existing\naddress=/keep.aether.local/10.0.0.9\n",
+                "existing DNS provider file must remain untouched on invalid AETHERFLOW_LAN_IP"
+            );
+        }
+
+        let _ok_env = EnvVarGuard::set(&[("AETHERFLOW_LAN_IP", "192.168.1.55")]);
+        assert_eq!(
+            detect_lifecycle_lan_ip().unwrap(),
+            Some("192.168.1.55".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -1,179 +1,414 @@
-//! Bounded command capture with supervised process-group cleanup.
+//! Bounded command capture with supervised process-group cleanup (`SEC-02`).
 //!
-//! The supervisor outlives a cancelled HTTP caller. It retains the Command
-//! (including any inherited-lock clone in its pre_exec closure) until the
-//! required process group is no longer live. A timeout is never success.
-use std::io;
-use std::process::{Output, Stdio};
-use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
-use tokio::sync::oneshot;
+//! Re-exports the crate-DAG-lowest process-group supervisor from
+//! [`af_release::process_group`] so `af-runner` and `af-release` share a single
+//! tracked implementation.
 
-pub async fn output(
-    mut command: Command,
-    budget: Duration,
-    byte_limit: usize,
-) -> io::Result<Output> {
-    if budget.is_zero() {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "command execution budget exhausted",
-        ));
+pub use af_release::process_group::*;
+
+#[cfg(test)]
+mod static_lint_tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// Wave 1B-migrated `af-runner` production modules that MUST NOT contain any
+    /// raw `Command::{output,spawn,status}()` invocations.
+    const WAVE_1B_MIGRATED_MODULES: &[&str] = &[
+        "app_metadata/handlers.rs",
+        "bounded_command.rs",
+        "daemon.rs",
+        "network_quota_handlers.rs",
+        "package_executor/stream_dispatch.rs",
+        "package_lifecycle/admitted_snapshots.rs",
+        "package_lifecycle/backend.rs",
+        "plugins/handlers.rs",
+        "plugins/isolation.rs",
+        "sandbox_ops.rs",
+        "self_update.rs",
+        "systemctl_handlers.rs",
+    ];
+
+    /// Explicit allowlist of non-Wave-1B `af-runner` modules with legacy raw
+    /// `Command` call sites scheduled for retirement in Waves 3-5.
+    const WAVE_3_TO_5_ALLOWLIST: &[&str] = &[
+        "adguard_dns.rs",
+        "blueprint/apply.rs",
+        "ingress_vhost.rs",
+        "network.rs",
+        "package_executor/apache_ingress/vhost_render.rs",
+        "package_executor/command_env.rs",
+        "package_executor/declarative_recipes/rclone_helpers.rs",
+        "package_executor/declarative_recipes/readiness_and_fetch.rs",
+        "package_lifecycle/probe_command.rs",
+        "peer_network.rs",
+        "peer_storage.rs",
+        "plugins.rs",
+        "quota.rs",
+    ];
+
+    fn is_test_only_file(rel: &str) -> bool {
+        let name = Path::new(rel)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        matches!(
+            name,
+            "tests.rs"
+                | "lifecycle_tests.rs"
+                | "native_catalog_regressions.rs"
+                | "receipt_security_regressions.rs"
+                | "teardown_regressions.rs"
+                | "legacy_stream_output.rs"
+                | "version_verification_tests.rs"
+        ) || rel.contains("/tests/")
+            || rel.contains("/version_verification_tests/")
     }
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = command.spawn()?;
-    let group = child.id();
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-    let (mut send, receive) = oneshot::channel();
-    tokio::spawn(async move {
-        // Keep Command's pre_exec captures alive through child/group cleanup.
-        let _command = command;
-        let work = async {
-            let (stdout, stderr, status) = tokio::try_join!(
-                read_bounded(stdout, byte_limit),
-                read_bounded(stderr, byte_limit),
-                child.wait(),
-            )?;
-            Ok::<_, io::Error>(Output {
-                status,
-                stdout,
-                stderr,
-            })
-        };
-        let result = tokio::select! {
-            value = tokio::time::timeout(budget, work) => match value {
-                Ok(value) => value,
-                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "command execution timed out; resulting state is unconfirmed")),
-            },
-            _ = send.closed() => Err(io::Error::new(io::ErrorKind::Interrupted, "command caller cancelled")),
-        };
-        kill_group(group);
-        if result.is_err() {
-            let _ = child.start_kill();
-        }
-        let _ = child.wait().await;
-        if tokio::task::spawn_blocking(move || group_is_live(group))
-            .await
-            .unwrap_or(false)
-        {
-            let cleanup = async {
-                while tokio::task::spawn_blocking(move || group_is_live(group))
-                    .await
-                    .unwrap_or(true)
-                {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            };
-            tokio::pin!(cleanup);
-            tokio::select! {
-                _ = &mut cleanup => {},
-                _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                    // An unkillable kernel task must not hang the response or
-                    // cause exclusion to disappear. Continue cleanup detached.
-                    let _ = send.send(result);
-                    cleanup.await;
-                    return;
-                }
+
+    fn collect_rs_files(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .expect("read af-runner/src")
+            .flatten()
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, root, out);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, path));
             }
         }
-        drop(_command);
-        let _ = send.send(result);
-    });
-    receive
-        .await
-        .map_err(|_| io::Error::other("command supervisor stopped before reporting an outcome"))?
-}
-
-async fn read_bounded(mut reader: impl AsyncRead + Unpin, limit: usize) -> io::Result<Vec<u8>> {
-    let mut output = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let count = reader.read(&mut buffer).await?;
-        if count == 0 {
-            return Ok(output);
-        }
-        if count > limit.saturating_sub(output.len()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "command output exceeded its capture limit",
-            ));
-        }
-        output.extend_from_slice(&buffer[..count]);
     }
-}
 
-fn kill_group(group: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(group) = group.filter(|group| *group > 0) {
-        unsafe {
-            libc::kill(-(group as libc::pid_t), libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = group;
-}
+    /// Strips `#[cfg(test)]` / `#[cfg(all(test, ...))]` items, comments, and
+    /// string literals from Rust source so only production code tokens remain.
+    fn strip_tests_comments_and_strings(src: &str) -> String {
+        let bytes = src.as_bytes();
+        let len = bytes.len();
+        let mut out = String::with_capacity(len);
+        let mut i = 0;
 
-fn group_is_live(group: Option<u32>) -> bool {
-    let Some(group) = group else {
-        return false;
-    };
-    #[cfg(target_os = "linux")]
-    {
-        // Killed orphan zombies cannot retain descriptors. kill(-pgid, 0)
-        // counts them as alive and would keep an otherwise-free lock forever.
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return true;
-        };
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+        while i < len {
+            // Line comment
+            if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
                 continue;
             }
-            match std::fs::read_to_string(entry.path().join("stat")) {
-                Ok(stat) => {
-                    let Some((_, fields)) = stat.rsplit_once(") ") else {
-                        continue;
-                    };
-                    let fields: Vec<_> = fields.split_whitespace().take(3).collect();
-                    if fields.len() == 3
-                        && fields[2].parse::<u32>().ok() == Some(group)
-                        && !matches!(fields[0], "Z" | "X")
-                    {
-                        return true;
+            // Nested block comment
+            if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                let mut depth = 1usize;
+                i += 2;
+                while i + 1 < len && depth > 0 {
+                    if bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        if bytes[i] == b'\n' {
+                            out.push('\n');
+                        }
+                        i += 1;
                     }
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(_) => {
-                    // If procfs cannot be inspected, do not release exclusion
-                    // while the OS still reports the group exists.
-                    return unsafe { libc::kill(-(group as libc::pid_t), 0) == 0 };
+                continue;
+            }
+            // Raw string literal r#*"..."#* or br#*"..."#*
+            if (bytes[i] == b'r' || (bytes[i] == b'b' && i + 1 < len && bytes[i + 1] == b'r'))
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_')
+            {
+                let start = if bytes[i] == b'b' { i + 2 } else { i + 1 };
+                let mut hashes = 0usize;
+                let mut j = start;
+                while j < len && bytes[j] == b'#' {
+                    hashes += 1;
+                    j += 1;
+                }
+                if j < len && bytes[j] == b'"' {
+                    j += 1;
+                    while j < len {
+                        if bytes[j] == b'\n' {
+                            out.push('\n');
+                        }
+                        if bytes[j] == b'"' {
+                            let mut close_hashes = 0usize;
+                            while j + 1 + close_hashes < len
+                                && close_hashes < hashes
+                                && bytes[j + 1 + close_hashes] == b'#'
+                            {
+                                close_hashes += 1;
+                            }
+                            if close_hashes == hashes {
+                                j += 1 + hashes;
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                    out.push_str("\"\"");
+                    i = j;
+                    continue;
+                }
+            }
+            // Regular string literal "..."
+            if bytes[i] == b'"' {
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\\' && i + 1 < len {
+                        if bytes[i + 1] == b'\n' {
+                            out.push('\n');
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'\n' {
+                        out.push('\n');
+                    }
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                out.push_str("\"\"");
+                continue;
+            }
+            // Char literal 'x' or '\x' (avoid stripping lifetimes like `'a`)
+            if bytes[i] == b'\'' {
+                if i + 2 < len && bytes[i + 1] != b'\\' && bytes[i + 2] == b'\'' {
+                    i += 3;
+                    out.push_str("''");
+                    continue;
+                }
+                if i + 3 < len && bytes[i + 1] == b'\\' {
+                    let mut j = i + 2;
+                    while j < len && bytes[j] != b'\'' && bytes[j] != b'\n' {
+                        j += 1;
+                    }
+                    if j < len && bytes[j] == b'\'' {
+                        i = j + 1;
+                        out.push_str("''");
+                        continue;
+                    }
+                }
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+
+        // Now drop any item annotated with `#[cfg(test)]` or `#[cfg(all(test, ...))]`.
+        let mut filtered = String::with_capacity(out.len());
+        let ob = out.as_bytes();
+        let olen = ob.len();
+        let mut idx = 0;
+        while idx < olen {
+            if ob[idx] == b'#' && idx + 1 < olen && ob[idx + 1] == b'[' {
+                let attr_start = idx;
+                let mut j = idx + 2;
+                let mut bracket_depth = 1usize;
+                while j < olen && bracket_depth > 0 {
+                    match ob[j] {
+                        b'[' => bracket_depth += 1,
+                        b']' => bracket_depth -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                let attr = &out[attr_start..j];
+                let compact: String = attr.chars().filter(|c| !c.is_whitespace()).collect();
+                let is_cfg_test = compact == "#[cfg(test)]"
+                    || compact.starts_with("#[cfg(all(test,")
+                    || (compact.starts_with("#[cfg(all(") && compact.contains(",test"));
+                if is_cfg_test {
+                    // Advance past additional attributes and skip the annotated item
+                    // (either terminated by `;` or balanced `{ ... }`).
+                    let mut k = j;
+                    loop {
+                        while k < olen && ob[k].is_ascii_whitespace() {
+                            if ob[k] == b'\n' {
+                                filtered.push('\n');
+                            }
+                            k += 1;
+                        }
+                        if k + 1 < olen && ob[k] == b'#' && ob[k + 1] == b'[' {
+                            let mut bd = 1usize;
+                            k += 2;
+                            while k < olen && bd > 0 {
+                                match ob[k] {
+                                    b'[' => bd += 1,
+                                    b']' => bd -= 1,
+                                    b'\n' => filtered.push('\n'),
+                                    _ => {}
+                                }
+                                k += 1;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                    let mut brace_depth = 0usize;
+                    let mut saw_brace = false;
+                    while k < olen {
+                        let ch = ob[k];
+                        if ch == b'\n' {
+                            filtered.push('\n');
+                        }
+                        if ch == b'{' {
+                            brace_depth += 1;
+                            saw_brace = true;
+                        } else if ch == b'}' {
+                            brace_depth = brace_depth.saturating_sub(1);
+                            if saw_brace && brace_depth == 0 {
+                                k += 1;
+                                break;
+                            }
+                        } else if ch == b';' && !saw_brace {
+                            k += 1;
+                            break;
+                        }
+                        k += 1;
+                    }
+                    idx = k;
+                    continue;
+                }
+            }
+            filtered.push(ob[idx] as char);
+            idx += 1;
+        }
+        filtered
+    }
+
+    fn find_raw_command_calls(prod_code: &str) -> Vec<(usize, String)> {
+        let mut hits = Vec::new();
+        // Track whether the production portion of this file constructs or
+        // imports a `Command` (either `std::process::Command` or
+        // `tokio::process::Command`), so unrelated `.status()` calls on HTTP
+        // responses in files without `Command` never cause false positives.
+        let uses_command = prod_code.contains("Command::new")
+            || prod_code.contains("process::Command")
+            || prod_code.contains("-> Command");
+        if !uses_command {
+            return hits;
+        }
+
+        let lines: Vec<&str> = prod_code.lines().collect();
+        for (line_idx, line) in lines.iter().enumerate() {
+            for method in [".output()", ".spawn()", ".status()"] {
+                let mut search_from = 0;
+                while let Some(pos) = line[search_from..].find(method) {
+                    let abs_pos = search_from + pos;
+                    search_from = abs_pos + method.len();
+                    let before = line[..abs_pos].trim_end();
+                    let ident: String = before
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    // Exclude non-Command zero-arg `.status()` / `.output()` methods
+                    // (HTTP responses and `PeerNetworkManager::status()`).
+                    if method == ".status()"
+                        && matches!(
+                            ident.as_str(),
+                            "resp" | "res" | "r" | "gh_resp" | "response" | "self"
+                        )
+                    {
+                        continue;
+                    }
+                    hits.push((line_idx + 1, line.trim().to_string()));
                 }
             }
         }
-        false
+        hits
     }
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        unsafe { libc::kill(-(group as libc::pid_t), 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = group;
-        false
+
+    #[test]
+    fn wave1b_migrated_runner_modules_ban_raw_command_execution() {
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &src_root, &mut files);
+
+        let migrated: BTreeSet<&str> = WAVE_1B_MIGRATED_MODULES.iter().copied().collect();
+        let allowlist: BTreeSet<&str> = WAVE_3_TO_5_ALLOWLIST.iter().copied().collect();
+
+        // Ensure migrated modules and Wave 3-5 allowlist are strictly disjoint.
+        let overlap: Vec<_> = migrated.intersection(&allowlist).copied().collect();
+        assert!(
+            overlap.is_empty(),
+            "Wave 1B migrated modules must not appear in the Wave 3-5 allowlist: {overlap:?}"
+        );
+
+        let mut seen_migrated = BTreeSet::new();
+        let mut seen_allowlist_hits = BTreeSet::new();
+        let mut violations = Vec::new();
+
+        for (rel, path) in &files {
+            if is_test_only_file(rel) {
+                continue;
+            }
+            if migrated.contains(rel.as_str()) {
+                seen_migrated.insert(rel.as_str());
+            }
+            let raw = fs::read_to_string(path).expect("read source file");
+            let prod = strip_tests_comments_and_strings(&raw);
+            let hits = find_raw_command_calls(&prod);
+            if hits.is_empty() {
+                continue;
+            }
+            if allowlist.contains(rel.as_str()) {
+                seen_allowlist_hits.insert(rel.as_str());
+                continue;
+            }
+            for (line_no, snippet) in hits {
+                violations.push(format!("{rel}:{line_no}: {snippet}"));
+            }
+        }
+
+        // Every Wave 1B module must exist on disk.
+        let missing_migrated: Vec<_> = migrated.difference(&seen_migrated).copied().collect();
+        assert!(
+            missing_migrated.is_empty(),
+            "Missing expected Wave 1B migrated module(s): {missing_migrated:?}"
+        );
+
+        // No unallowlisted file (especially none of WAVE_1B_MIGRATED_MODULES) may call raw Command::{output,spawn,status}().
+        assert!(
+            violations.is_empty(),
+            "Raw Command::{{output,spawn,status}}() is banned in Wave 1B-migrated and new af-runner modules; use bounded_command::{{output,output_with_stdin,output_blocking,spawn_streaming}}:\n{}",
+            violations.join("\n")
+        );
+
+        // Every Wave 3-5 allowlist entry must still match a real legacy call site
+        // so retired entries are promptly removed in Waves 3-5.
+        let stale_allowlist: Vec<_> = allowlist
+            .difference(&seen_allowlist_hits)
+            .copied()
+            .collect();
+        assert!(
+            stale_allowlist.is_empty(),
+            "Stale Wave 3-5 allowlist entries with no remaining raw Command calls (remove from allowlist): {stale_allowlist:?}"
+        );
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::io;
     use std::path::Path;
+    use std::time::Duration;
+    use tokio::process::Command;
 
     fn shell(script: &str) -> Command {
         let mut command = Command::new("/bin/bash");

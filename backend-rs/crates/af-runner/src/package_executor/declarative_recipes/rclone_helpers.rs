@@ -132,10 +132,15 @@ fn rclone_unit_api_port(unit: &str) -> Option<u16> {
     crate::app_metadata::parse_rclone_unit_ports(unit).api_port
 }
 
-fn open_confined_package_sqlite(
+fn with_confined_package_sqlite_rw<T, F>(
     fs_root: Option<&Path>,
     lifecycle_job_id: &str,
-) -> Option<rusqlite::Connection> {
+    f: F,
+) -> Option<T>
+where
+    F: FnOnce(&mut rusqlite::Connection) -> T,
+{
+    let mut f = Some(f);
     for db_path in crate::candidate_package_sqlite_dbs(fs_root) {
         let Ok(meta) = fs::symlink_metadata(&db_path) else {
             continue;
@@ -143,25 +148,32 @@ fn open_confined_package_sqlite(
         if !meta.is_file() || meta.file_type().is_symlink() {
             continue;
         }
-        let Ok(conn) = rusqlite::Connection::open_with_flags(
-            &db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        ) else {
-            continue;
-        };
-        let _ = conn.busy_timeout(Duration::from_secs(5));
-        if lifecycle_job_id.is_empty() {
-            return Some(conn);
-        }
-        let has_job = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM package_lifecycle_jobs WHERE job_id = ?1)",
-                [lifecycle_job_id],
-                |r| r.get::<_, bool>(0),
-            )
-            .unwrap_or(false);
-        if has_job {
-            return Some(conn);
+        let mut matched: Option<T> = None;
+        let scoped = af_release::fs_security::with_path_owner_fsuid(&db_path, || {
+            let mut conn = af_release::fs_security::open_sqlite_nofollow_hardened(&db_path, true)?;
+            let _ = conn.busy_timeout(Duration::from_secs(5));
+            let is_target = if lifecycle_job_id.is_empty() {
+                true
+            } else {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM package_lifecycle_jobs WHERE job_id = ?1)",
+                    [lifecycle_job_id],
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+            };
+            if is_target {
+                if let Some(callback) = f.take() {
+                    matched = Some(callback(&mut conn));
+                }
+            }
+            drop(conn);
+            Ok(())
+        });
+        if scoped.is_ok() {
+            if let Some(outcome) = matched {
+                return Some(outcome);
+            }
         }
     }
     None
@@ -239,9 +251,9 @@ where
             })
     };
 
-    if let Some(mut conn) = open_confined_package_sqlite(fs_root, lifecycle_job_id) {
+    if let Some(res) = with_confined_package_sqlite_rw(fs_root, lifecycle_job_id, |conn| {
         let chosen = af_db::reserve_lifecycle_port_in_tx(
-            &mut conn,
+            conn,
             "rclone",
             lifecycle_job_id,
             lifecycle_action,
@@ -274,6 +286,8 @@ where
             PackageExecutorError::Validation("No supported Rclone RC API port is available".into())
         })?;
         Ok(chosen as u16)
+    }) {
+        res
     } else if !lifecycle_job_id.is_empty() {
         Err(PackageExecutorError::Validation(
             "Cannot reserve the Rclone RC API port without the active lifecycle database".into(),

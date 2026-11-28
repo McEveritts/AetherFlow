@@ -15,6 +15,7 @@ use crate::package_executor::{
     CancellationToken, CommandOutput, CommandRunner, CrossProcessLockGuard, PackageExecutionEnv,
     PackageExecutorError, TokioCommandRunner,
 };
+use af_models::secret_zeroize::{SecretBytes, SecretString};
 use af_models::RunnerResponse;
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
@@ -140,12 +141,11 @@ pub(crate) fn zeroize_bytes(bytes: &mut [u8]) {
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Wipes the full `0..capacity` backing allocation of `s` (including spare
+/// capacity beyond `len`) via [`af_models::secret_zeroize::SecretString`].
 pub(crate) fn zeroize_string(s: &mut String) {
-    // SAFETY: Writing zero bytes produces valid UTF-8 and the buffer is immediately cleared.
-    unsafe {
-        zeroize_bytes(s.as_bytes_mut());
-    }
-    s.clear();
+    let mut wiped = SecretString::new(std::mem::take(s));
+    wiped.zeroize();
 }
 
 static SAFE_CREDENTIAL_ID_RE: Lazy<Regex> = Lazy::new(|| {
@@ -418,44 +418,53 @@ pub struct PeerCredentialWriteResponse {
     pub written: bool,
 }
 
-/// Secret credential value returned by `ReadCredential`.
+/// Secret credential value returned by `ReadCredential` and exchanged over the
+/// peer-pairing wire protocol.
 ///
-/// Always redacts on `Debug` and `Display` and volatile-zeroizes its bytes on `Drop`.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Thin serde/`Display` wire adapter over [`af_models::secret_zeroize::SecretString`]:
+/// full `0..capacity` volatile zeroization on `Drop`, constant-time equality,
+/// and `Debug` redaction are delegated directly to `SecretString` (`SEC-05`).
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(transparent)]
-pub struct PeerCredentialSecret(String);
+pub struct PeerCredentialSecret(SecretString);
 
 impl PeerCredentialSecret {
     pub fn new(value: String) -> Self {
-        Self(value)
+        Self(SecretString::new(value))
     }
 
     pub fn expose_secret(&self) -> &str {
-        self.0.as_str()
+        self.0.expose_secret()
     }
 }
 
 impl From<String> for PeerCredentialSecret {
     fn from(value: String) -> Self {
+        Self(SecretString::from(value))
+    }
+}
+
+impl From<SecretString> for PeerCredentialSecret {
+    fn from(value: SecretString) -> Self {
         Self(value)
+    }
+}
+
+impl serde::Serialize for PeerCredentialSecret {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0.expose_secret())
     }
 }
 
 impl fmt::Debug for PeerCredentialSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(REDACTED_MARKER)
+        fmt::Debug::fmt(&self.0, f)
     }
 }
 
 impl fmt::Display for PeerCredentialSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(REDACTED_MARKER)
-    }
-}
-
-impl Drop for PeerCredentialSecret {
-    fn drop(&mut self) {
-        zeroize_string(&mut self.0);
     }
 }
 
@@ -770,32 +779,6 @@ impl PeerNetworkError {
             .headers_mut()
             .insert(PEER_ERROR_CODE_HEADER, HeaderValue::from_static(error_code));
         response
-    }
-}
-
-/// Sensitive string buffer that redacts on `Debug` and clears its bytes on `Drop`.
-#[derive(Clone, PartialEq, Eq)]
-struct SecretString(String);
-
-impl SecretString {
-    fn new(value: String) -> Self {
-        Self(value)
-    }
-
-    fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl fmt::Debug for SecretString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(REDACTED_MARKER)
-    }
-}
-
-impl Drop for SecretString {
-    fn drop(&mut self) {
-        zeroize_string(&mut self.0);
     }
 }
 
@@ -1267,7 +1250,7 @@ impl PeerBlock {
 
 #[derive(Clone)]
 struct PeerWireGuardConfig {
-    header: String,
+    header: SecretString,
     peers: Vec<PeerBlock>,
 }
 
@@ -1279,20 +1262,14 @@ impl fmt::Debug for PeerWireGuardConfig {
     }
 }
 
-impl Drop for PeerWireGuardConfig {
-    fn drop(&mut self) {
-        zeroize_string(&mut self.header);
-    }
-}
-
 impl PeerWireGuardConfig {
     fn new_initial(interface_addr: &TunnelCidr, private_key: &SecretString, wg_port: u16) -> Self {
-        let header = format!(
+        let header = SecretString::new(format!(
             "# Managed by AetherFlow Peer Clustering. Do not edit manually.\n[Interface]\nAddress = {}\nPrivateKey = {}\nListenPort = {}\nSaveConfig = false\n",
             interface_addr.interface_string(),
-            private_key.as_str(),
+            private_key.expose_secret(),
             wg_port
-        );
+        ));
         Self {
             header,
             peers: Vec::new(),
@@ -1325,6 +1302,8 @@ impl PeerWireGuardConfig {
                 {
                     seen_interface = true;
                 } else {
+                    zeroize_string(&mut header);
+                    zeroize_string(&mut current);
                     return Err(PeerNetworkError::InvalidInput(
                         "Unsupported or duplicate WireGuard section in afpeer0.conf".to_string(),
                     ));
@@ -1338,6 +1317,7 @@ impl PeerWireGuardConfig {
         } else {
             header = current;
         }
+        let header = SecretString::new(header);
         if !seen_interface {
             return Err(PeerNetworkError::InvalidInput(
                 "Peer WireGuard configuration has no [Interface] section".to_string(),
@@ -1354,7 +1334,7 @@ impl PeerWireGuardConfig {
                 "Peer WireGuard configuration has invalid or duplicate peer keys".to_string(),
             ));
         }
-        if parse_ini_fields(&header)
+        if parse_ini_fields(header.expose_secret())
             .get("saveconfig")
             .is_some_and(|v| v.eq_ignore_ascii_case("true"))
         {
@@ -1366,14 +1346,27 @@ impl PeerWireGuardConfig {
     }
 
     fn header_fields(&self) -> HashMap<String, String> {
-        parse_ini_fields(&self.header)
+        let mut fields = parse_ini_fields(self.header.expose_secret());
+        if let Some(mut privkey) = fields.remove("privatekey") {
+            zeroize_string(&mut privkey);
+        }
+        fields
     }
 
     fn private_key(&self) -> Option<SecretString> {
-        self.header_fields()
-            .get("privatekey")
-            .cloned()
-            .map(SecretString::new)
+        let mut found = None;
+        for line in self.header.expose_secret().lines() {
+            let trimmed = line.split('#').next().unwrap_or("").trim();
+            if trimmed.is_empty() || trimmed.starts_with('[') {
+                continue;
+            }
+            if let Some((key, val)) = trimmed.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("privatekey") {
+                    found = Some(SecretString::new(val.trim().to_string()));
+                }
+            }
+        }
+        found
     }
 
     fn interface_address(&self) -> Result<TunnelCidr, PeerNetworkError> {
@@ -1418,7 +1411,7 @@ impl PeerWireGuardConfig {
         let address = self.interface_address()?;
         let private_key = self
             .private_key()
-            .filter(|k| valid_wg_key(k.as_str()))
+            .filter(|k| valid_wg_key(k.expose_secret()))
             .ok_or_else(|| {
                 PeerNetworkError::Runtime(
                     "Invalid WireGuard server private key; repair afpeer0.conf without changing its identity"
@@ -1452,7 +1445,7 @@ impl PeerWireGuardConfig {
     }
 
     fn render(&self) -> SecretString {
-        let mut text = self.header.trim_end().to_string();
+        let mut text = self.header.expose_secret().trim_end().to_string();
         text.push('\n');
         for peer in &self.peers {
             text.push('\n');
@@ -1798,6 +1791,13 @@ struct CmdOutput {
     status: ExitStatus,
     stdout: String,
     stderr: String,
+}
+
+impl Drop for CmdOutput {
+    fn drop(&mut self) {
+        zeroize_string(&mut self.stdout);
+        zeroize_string(&mut self.stderr);
+    }
 }
 
 async fn read_bounded<R: AsyncRead + Unpin>(
@@ -2420,13 +2420,15 @@ impl PeerNetworkManager {
                 read_bounded(stderr, MAX_CONFIG_BYTES),
                 write_input
             )?;
+            let out_bytes = SecretBytes::new(out_bytes);
+            let err_bytes = SecretBytes::new(err_bytes);
             let status = child.wait().await.map_err(|err| {
                 PeerNetworkError::Runtime(format!("Failed waiting for {program}: {err}"))
             })?;
             Ok::<CmdOutput, PeerNetworkError>(CmdOutput {
                 status,
-                stdout: String::from_utf8_lossy(&out_bytes).into_owned(),
-                stderr: String::from_utf8_lossy(&err_bytes).into_owned(),
+                stdout: String::from_utf8_lossy(out_bytes.expose_secret()).into_owned(),
+                stderr: String::from_utf8_lossy(err_bytes.expose_secret()).into_owned(),
             })
         };
 
@@ -2460,7 +2462,7 @@ impl PeerNetworkManager {
         input: Option<&str>,
         suppress_stderr: bool,
     ) -> Result<String, PeerNetworkError> {
-        let out = self.output(program, args, input).await?;
+        let mut out = self.output(program, args, input).await?;
         if !out.status.success() {
             if suppress_stderr {
                 return Err(PeerNetworkError::Runtime(format!(
@@ -2483,7 +2485,7 @@ impl PeerNetworkManager {
                 out.status
             )));
         }
-        Ok(out.stdout)
+        Ok(std::mem::take(&mut out.stdout))
     }
 
     async fn installed(&self, program: &str) -> bool {
@@ -2514,7 +2516,7 @@ impl PeerNetworkManager {
             .run_checked(
                 "wg",
                 &strings(&["pubkey"]),
-                Some(private_key.as_str()),
+                Some(private_key.expose_secret()),
                 true,
             )
             .await?
@@ -2529,11 +2531,13 @@ impl PeerNetworkManager {
     }
 
     async fn generate_private_key(&self) -> Result<SecretString, PeerNetworkError> {
-        let raw = self
-            .run_checked("wg", &strings(&["genkey"]), None, true)
-            .await?;
-        let key = SecretString::new(raw.trim().to_string());
-        if !valid_wg_key(key.as_str()) {
+        let raw = SecretString::new(
+            self.run_checked("wg", &strings(&["genkey"]), None, true)
+                .await?,
+        );
+        let key = SecretString::new(raw.expose_secret().trim().to_string());
+        drop(raw);
+        if !valid_wg_key(key.expose_secret()) {
             return Err(PeerNetworkError::Runtime(
                 "WireGuard returned an invalid private key".to_string(),
             ));
@@ -2734,7 +2738,7 @@ impl PeerNetworkManager {
         else {
             return Ok(None);
         };
-        let parsed = PeerWireGuardConfig::parse(raw.as_str())?;
+        let parsed = PeerWireGuardConfig::parse(raw.expose_secret())?;
         parsed.validate_server()?;
         Ok(Some((raw, parsed)))
     }
@@ -2748,8 +2752,8 @@ impl PeerNetworkManager {
         let Some(raw) = self.read_secret_file_confined(&dir, PEER_WG_KEY_NAME, 512, false)? else {
             return Ok(None);
         };
-        let key = SecretString::new(raw.as_str().trim().to_string());
-        if !valid_wg_key(key.as_str()) {
+        let key = SecretString::new(raw.expose_secret().trim().to_string());
+        if !valid_wg_key(key.expose_secret()) {
             return Err(PeerNetworkError::Runtime(
                 "Saved afpeer0.key contains an invalid WireGuard private key".to_string(),
             ));
@@ -2762,7 +2766,7 @@ impl PeerNetworkManager {
         self.write_secret_file_atomic(
             &wg_dir,
             PEER_WG_CONF_NAME,
-            contents.as_str().as_bytes(),
+            contents.expose_secret().as_bytes(),
             0o600,
             false,
         )
@@ -2770,11 +2774,11 @@ impl PeerNetworkManager {
 
     fn write_saved_key(&self, key: &SecretString) -> Result<(), PeerNetworkError> {
         let state_dir = self.ensure_confined_dir(&self.state_dir, DirKind::StateGroupReadable)?;
-        let buf = SecretString::new(format!("{}\n", key.as_str()));
+        let buf = SecretString::new(format!("{}\n", key.expose_secret()));
         let res = self.write_secret_file_atomic(
             &state_dir,
             PEER_WG_KEY_NAME,
-            buf.as_str().as_bytes(),
+            buf.expose_secret().as_bytes(),
             0o600,
             false,
         );
@@ -3096,13 +3100,13 @@ impl PeerNetworkManager {
     ) -> Result<(), PeerNetworkError> {
         let live_key = live_config
             .private_key()
-            .filter(|k| valid_wg_key(k.as_str()))
+            .filter(|k| valid_wg_key(k.expose_secret()))
             .ok_or_else(|| {
                 PeerNetworkError::Runtime(
                     "Live afpeer0 configuration does not contain a valid private key".to_string(),
                 )
             })?;
-        if saved_privkey.as_str() != live_key.as_str() {
+        if saved_privkey != &live_key {
             let saved_pub = self.derive_public_key(saved_privkey).await?;
             let live_pub = self.derive_public_key(&live_key).await?;
             if saved_pub != live_pub {
@@ -3277,7 +3281,7 @@ impl PeerNetworkManager {
         if let Some((_raw, config)) = saved_conf {
             let (saved_addr, saved_port, conf_privkey) = config.validate_server()?;
             if let Some(ref key_file_priv) = saved_key {
-                if key_file_priv.as_str() != conf_privkey.as_str() {
+                if key_file_priv != &conf_privkey {
                     return Err(PeerNetworkError::Conflict(
                         "Saved afpeer0.key differs from PrivateKey in afpeer0.conf; reconcile identity before continuing"
                             .to_string(),
@@ -3683,7 +3687,7 @@ impl PeerNetworkManager {
                 "Saved afpeer0.key is missing; run ensure_identity to reconcile".to_string(),
             ));
         };
-        if saved_key.as_str() != conf_privkey.as_str() {
+        if saved_key != conf_privkey {
             return Err(PeerNetworkError::Conflict(
                 "Saved afpeer0.key differs from PrivateKey in afpeer0.conf; reconcile identity before changing peers"
                     .to_string(),
@@ -3700,12 +3704,12 @@ impl PeerNetworkManager {
         require_route_prefix: bool,
     ) -> Result<(String, Option<SecretString>, Vec<PeerBlock>), PeerNetworkError> {
         let service = self.service_state().await;
-        let live = self
+        let mut live = self
             .output("wg", &strings(&["showconf", PEER_WG_INTERFACE]), None)
             .await?;
         if live.status.success() {
-            let live_secret = SecretString::new(live.stdout);
-            let live_cfg = PeerWireGuardConfig::parse(live_secret.as_str())?;
+            let live_secret = SecretString::new(std::mem::take(&mut live.stdout));
+            let live_cfg = PeerWireGuardConfig::parse(live_secret.expose_secret())?;
             self.reconcile_live_identity(saved_privkey, &live_cfg)
                 .await?;
             if require_route_prefix {
@@ -3749,7 +3753,7 @@ impl PeerNetworkManager {
         let original_runtime_file = TemporarySecretFile::create(
             self,
             "afpeer0-runtime",
-            runtime_before.as_str().as_bytes(),
+            runtime_before.expose_secret().as_bytes(),
         )?;
 
         self.write_saved_config(new_text)?;
@@ -3775,7 +3779,7 @@ impl PeerNetworkManager {
         let staged_stripped_file = match TemporarySecretFile::create(
             self,
             "afpeer0-strip",
-            stripped_raw.as_str().as_bytes(),
+            stripped_raw.expose_secret().as_bytes(),
         ) {
             Ok(file) => file,
             Err(stage_err) => {
@@ -3874,7 +3878,7 @@ impl PeerNetworkManager {
             Ok(Some((_raw, cfg))) => match cfg.validate_server() {
                 Ok((addr, port, conf_privkey)) => {
                     if let Some(ref key_file_priv) = saved_key {
-                        if key_file_priv.as_str() != conf_privkey.as_str() {
+                        if key_file_priv != &conf_privkey {
                             status.state = "error".to_string();
                             status.error = Some(
                                 "Saved afpeer0.key differs from PrivateKey in afpeer0.conf; reconcile identity before continuing"
@@ -4308,7 +4312,7 @@ impl PeerNetworkManager {
         self.write_secret_file_atomic(
             &slot_dir,
             &filename,
-            payload.as_str().as_bytes(),
+            payload.expose_secret().as_bytes(),
             slot.file_mode(),
             slot.allow_group_read(),
         )?;
@@ -4352,7 +4356,7 @@ impl PeerNetworkManager {
                 value: None,
             });
         };
-        let trimmed = raw.as_str().trim_end_matches(['\r', '\n']);
+        let trimmed = raw.expose_secret().trim_end_matches(['\r', '\n']);
         validate_credential_value(trimmed)?;
         let secret = PeerCredentialSecret::new(trimmed.to_string());
         drop(raw);
@@ -4539,5 +4543,51 @@ pub(crate) async fn handle_peer_network(
             }
         }
         Err(err) => err.into_http_response(),
+    }
+}
+
+#[cfg(test)]
+mod sec05_tests {
+    use super::*;
+
+    #[test]
+    fn peer_credential_secret_delegates_to_secret_string_and_redacts() {
+        let secret = PeerCredentialSecret::new("tok-very-secret-value".to_string());
+        assert_eq!(secret.expose_secret(), "tok-very-secret-value");
+        assert_eq!(format!("{secret:?}"), "[REDACTED]");
+        assert_eq!(format!("{secret}"), "[REDACTED]");
+        assert_eq!(
+            secret,
+            PeerCredentialSecret::from(SecretString::from("tok-very-secret-value"))
+        );
+        assert_ne!(
+            secret,
+            PeerCredentialSecret::new("tok-other-value".to_string())
+        );
+
+        let encoded = serde_json::to_string(&secret).unwrap();
+        assert_eq!(encoded, "\"tok-very-secret-value\"");
+        let decoded: PeerCredentialSecret = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, secret);
+    }
+
+    #[test]
+    fn zeroize_string_wipes_full_backing_capacity() {
+        let mut s = String::with_capacity(128);
+        s.push_str("wg-private-key-material-1234567890");
+        s.truncate(4);
+        zeroize_string(&mut s);
+        assert!(s.is_empty());
+        assert_eq!(s.capacity(), 0);
+    }
+
+    #[test]
+    fn peer_wg_config_header_fields_never_expose_private_key() {
+        let key = SecretString::from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        let cidr = TunnelCidr::parse_subnet("10.231.0.1/16").unwrap();
+        let cfg = PeerWireGuardConfig::new_initial(&cidr, &key, 51821);
+        let fields = cfg.header_fields();
+        assert!(!fields.contains_key("privatekey"));
+        assert_eq!(cfg.private_key(), Some(key));
     }
 }

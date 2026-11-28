@@ -3,17 +3,44 @@ use crate::config::ReleaseConfig;
 use crate::error::{ReleaseError, ReleaseResult};
 use flate2::read::GzDecoder;
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use tar::{Archive, EntryType};
 
+/// Maximum decompressed bytes permitted for a single archive member (`512 MiB`).
+pub(crate) const MAX_ARCHIVE_ENTRY_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+/// Maximum cumulative decompressed bytes permitted across an entire release archive (`2 GiB`).
+pub(crate) const MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Maximum total tar entries permitted in a single release archive.
+const MAX_ARCHIVE_ENTRIES: usize = 20_000;
+
 /// Safely extracts a `.tar.gz` release archive into `release_dir` with strict Zip-Slip / path-traversal,
-/// ancestor symlink, destination collision, and symlink/device-node rejection, then validates the
-/// extracted `aetherflow-api` binary, `.version` stamp, and external frontend assets.
+/// ancestor symlink, destination collision, symlink/device-node rejection, and bounded per-entry +
+/// cumulative (`2 GiB`) decompression caps, then validates the extracted `aetherflow-api` binary,
+/// `.version` stamp, and external frontend assets.
 pub fn extract_and_validate_release_archive(
     archive_path: &Path,
     release_dir: &Path,
     tag: &str,
     config: &ReleaseConfig,
+) -> ReleaseResult<()> {
+    extract_and_validate_release_archive_with_caps(
+        archive_path,
+        release_dir,
+        tag,
+        config,
+        MAX_ARCHIVE_ENTRY_DECOMPRESSED_BYTES,
+        MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES,
+    )
+}
+
+fn extract_and_validate_release_archive_with_caps(
+    archive_path: &Path,
+    release_dir: &Path,
+    tag: &str,
+    config: &ReleaseConfig,
+    max_entry_bytes: u64,
+    max_total_bytes: u64,
 ) -> ReleaseResult<()> {
     crate::fs_security::ensure_no_symlink_ancestors(archive_path)?;
     crate::fs_security::ensure_no_symlink_ancestors(release_dir)?;
@@ -57,7 +84,11 @@ pub fn extract_and_validate_release_archive(
         archive: archive_path.to_path_buf(),
         reason: format!("failed to open archive: {}", e),
     })?;
-    let gz = GzDecoder::new(file);
+    // Cap raw decompressed tar stream (file payloads + bounded header/padding slack) to
+    // stop zero-block / header-only gzip bombs in addition to per-entry and cumulative caps.
+    // Read up to `stream_cap + 1` bytes so hitting the limit is distinguishable from a clean EOF.
+    let stream_cap = max_total_bytes.saturating_add(64 * 1024 * 1024);
+    let gz = GzDecoder::new(file).take(stream_cap.saturating_add(1));
     let mut archive = Archive::new(gz);
 
     let entries = archive
@@ -67,7 +98,20 @@ pub fn extract_and_validate_release_archive(
             reason: format!("invalid tar header stream: {}", e),
         })?;
 
+    let mut total_extracted_bytes: u64 = 0;
+    let mut entry_count: usize = 0;
+
     for entry_result in entries {
+        entry_count = entry_count.saturating_add(1);
+        if entry_count > MAX_ARCHIVE_ENTRIES {
+            return Err(ReleaseError::ArchiveExtraction {
+                archive: archive_path.to_path_buf(),
+                reason: format!(
+                    "archive exceeds maximum allowed entry count ({MAX_ARCHIVE_ENTRIES})"
+                ),
+            });
+        }
+
         let mut entry = entry_result.map_err(|e| ReleaseError::ArchiveExtraction {
             archive: archive_path.to_path_buf(),
             reason: format!("corrupt tar entry: {}", e),
@@ -84,6 +128,18 @@ pub fn extract_and_validate_release_archive(
         let rel_path = sanitize_archive_entry_path(&entry_path, archive_path)?;
         if rel_path.as_os_str().is_empty() {
             continue;
+        }
+        if matches!(
+            rel_path.components().next(),
+            Some(Component::Normal(first)) if first == std::ffi::OsStr::new("data-snapshot")
+        ) {
+            return Err(ReleaseError::ArchiveExtraction {
+                archive: archive_path.to_path_buf(),
+                reason: format!(
+                    "reserved snapshot directory entry rejected in release archive: '{}'",
+                    rel_path.display()
+                ),
+            });
         }
 
         crate::fs_security::ensure_no_symlink_in_relative_chain(release_dir, &rel_path).map_err(
@@ -105,6 +161,30 @@ pub fn extract_and_validate_release_archive(
                 })?;
             }
             EntryType::Regular | EntryType::Continuous => {
+                let declared_size = entry.size();
+                if declared_size > max_entry_bytes {
+                    return Err(ReleaseError::ArchiveExtraction {
+                        archive: archive_path.to_path_buf(),
+                        reason: format!(
+                            "archive entry '{}' declared size {} exceeds per-entry decompression limit ({} bytes)",
+                            rel_path.display(),
+                            declared_size,
+                            max_entry_bytes
+                        ),
+                    });
+                }
+                let remaining_total = max_total_bytes.saturating_sub(total_extracted_bytes);
+                if declared_size > remaining_total {
+                    return Err(ReleaseError::ArchiveExtraction {
+                        archive: archive_path.to_path_buf(),
+                        reason: format!(
+                            "archive entry '{}' exceeds cumulative decompression limit ({} bytes)",
+                            rel_path.display(),
+                            max_total_bytes
+                        ),
+                    });
+                }
+
                 let dest = release_dir.join(&rel_path);
                 if let Some(parent) = dest.parent() {
                     crate::fs_security::create_dir_all_no_symlinks(parent, 0o755).map_err(|e| {
@@ -132,12 +212,38 @@ pub fn extract_and_validate_release_archive(
                     archive: archive_path.to_path_buf(),
                     reason: format!("failed to create exclusive file {}: {}", dest.display(), e),
                 })?;
-                std::io::copy(&mut entry, &mut out_file).map_err(|e| {
-                    ReleaseError::ArchiveExtraction {
-                        archive: archive_path.to_path_buf(),
-                        reason: format!("failed to extract {}: {}", dest.display(), e),
+
+                let allowed_for_entry = max_entry_bytes.min(remaining_total);
+                let mut bounded = (&mut entry).take(allowed_for_entry.saturating_add(1));
+                let copied = match std::io::copy(&mut bounded, &mut out_file) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        drop(out_file);
+                        let _ = fs::remove_file(&dest);
+                        return Err(ReleaseError::ArchiveExtraction {
+                            archive: archive_path.to_path_buf(),
+                            reason: format!("failed to extract {}: {}", dest.display(), e),
+                        });
                     }
-                })?;
+                };
+                if copied > allowed_for_entry {
+                    drop(out_file);
+                    let _ = fs::remove_file(&dest);
+                    let cap_kind = if max_entry_bytes <= remaining_total {
+                        format!("per-entry limit ({max_entry_bytes} bytes)")
+                    } else {
+                        format!("cumulative limit ({max_total_bytes} bytes)")
+                    };
+                    return Err(ReleaseError::ArchiveExtraction {
+                        archive: archive_path.to_path_buf(),
+                        reason: format!(
+                            "decompressed stream for '{}' exceeded {}",
+                            rel_path.display(),
+                            cap_kind
+                        ),
+                    });
+                }
+                total_extracted_bytes = total_extracted_bytes.saturating_add(copied);
                 let _ = out_file.sync_all();
             }
             other => {
@@ -151,6 +257,15 @@ pub fn extract_and_validate_release_archive(
                 });
             }
         }
+    }
+
+    if archive.into_inner().limit() == 0 {
+        return Err(ReleaseError::ArchiveExtraction {
+            archive: archive_path.to_path_buf(),
+            reason: format!(
+                "decompressed tar stream exceeded maximum allowed size ({stream_cap} bytes)"
+            ),
+        });
     }
 
     let binary_path = release_dir.join("aetherflow-api");
@@ -200,7 +315,7 @@ pub fn extract_and_validate_release_archive(
 
     validate_external_frontend_assets(release_dir)?;
     stage_running_release_manager(release_dir, config)?;
-    prepare_release_permissions(release_dir)?;
+    prepare_release_permissions_with_options(release_dir, !config.is_dry_run_config())?;
     Ok(())
 }
 
@@ -275,6 +390,13 @@ pub(super) fn validate_external_frontend_assets(release_dir: &Path) -> ReleaseRe
 ///   `bin/speedtest-backend`, `af-transcode`, `bin/af-transcode`), and deploy helper scripts (if present)
 /// - Verifies `.version` is readable and `./aetherflow-api` is executable.
 pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
+    prepare_release_permissions_with_options(release_dir, true)
+}
+
+pub fn prepare_release_permissions_with_options(
+    release_dir: &Path,
+    verify_service_user_access: bool,
+) -> ReleaseResult<()> {
     crate::fs_security::ensure_no_symlink_ancestors(release_dir)?;
     normalize_release_tree_permissions(release_dir)?;
 
@@ -297,6 +419,28 @@ pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
         if let Ok(meta) = fs::symlink_metadata(&staged_exec) {
             if !meta.file_type().is_symlink() && meta.is_file() {
                 crate::fs_security::set_file_mode(&staged_exec, 0o755)?;
+            }
+        }
+    }
+
+    for rel_exec_dir in [
+        "packages/system",
+        "packages/package/install",
+        "packages/package/remove",
+    ] {
+        let staged_dir = release_dir.join(rel_exec_dir);
+        if let Ok(meta) = fs::symlink_metadata(&staged_dir) {
+            if !meta.file_type().is_symlink() && meta.is_dir() {
+                if let Ok(entries) = fs::read_dir(&staged_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if let Ok(emeta) = fs::symlink_metadata(&p) {
+                            if !emeta.file_type().is_symlink() && emeta.is_file() {
+                                crate::fs_security::set_file_mode(&p, 0o755)?;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -349,9 +493,115 @@ pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
                 version_path.display()
             )));
         }
+
+        // Pre-swap parity with release-manager.sh: when running as root and the service user
+        // exists, confirm the service user can traverse all ancestor directories and open/execute
+        // `.version`, `aetherflow-api`, and `web/dist/index.html` (if present) BEFORE Stage 2.
+        // Uses thread-safe `getpwnam_r` and real VFS `open(O_RDONLY | O_NOFOLLOW | O_CLOEXEC)`
+        // under `with_uid_gid_fsuid` (since Linux `access(2)` evaluates ruid=0 rather than fsuid).
+        if verify_service_user_access && unsafe { libc::geteuid() } == 0 {
+            let service_user = std::env::var("AETHERFLOW_SERVICE_USER")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "aetherflow".to_string());
+            if let Some((svc_uid, svc_gid)) = crate::fs_security::lookup_user_ugid(&service_user) {
+                let web_index = release_dir.join("web/dist/index.html");
+                let check_web = fs::symlink_metadata(&web_index)
+                    .map(|m| !m.file_type().is_symlink() && m.is_file())
+                    .unwrap_or(false);
+                crate::fs_security::with_uid_gid_fsuid(svc_uid, svc_gid, || {
+                    use std::os::fd::FromRawFd;
+                    use std::os::unix::ffi::OsStrExt;
+                    let check_open = |p: &Path, require_exec: bool, label: &str| {
+                        let c_path =
+                            std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| {
+                                ReleaseError::PathValidation {
+                                    path: p.to_path_buf(),
+                                    reason: "path contains NUL byte".to_string(),
+                                }
+                            })?;
+                        let fd = unsafe {
+                            libc::open(
+                                c_path.as_ptr(),
+                                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                            )
+                        };
+                        if fd < 0 {
+                            return Err(ReleaseError::ArtifactVerification(format!(
+                                "Service user '{}' cannot open {} at {}: {}",
+                                service_user,
+                                label,
+                                p.display(),
+                                std::io::Error::last_os_error()
+                            )));
+                        }
+                        let _opened = unsafe { fs::File::from_raw_fd(fd) };
+                        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                        if unsafe { libc::fstat(fd, &mut st) } != 0 {
+                            return Err(ReleaseError::ArtifactVerification(format!(
+                                "Service user '{}' cannot stat {} at {}: {}",
+                                service_user,
+                                label,
+                                p.display(),
+                                std::io::Error::last_os_error()
+                            )));
+                        }
+                        if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+                            return Err(ReleaseError::ArtifactVerification(format!(
+                                "{} at {} is not a regular file",
+                                label,
+                                p.display()
+                            )));
+                        }
+                        if require_exec
+                            && !mode_allows_exec_for_ugid(
+                                st.st_uid,
+                                st.st_gid,
+                                st.st_mode as u32,
+                                svc_uid,
+                                svc_gid,
+                            )
+                        {
+                            return Err(ReleaseError::ArtifactVerification(format!(
+                                "Service user '{}' lacks execute permission on {} at {} (mode={:o})",
+                                service_user,
+                                label,
+                                p.display(),
+                                st.st_mode & 0o7777
+                            )));
+                        }
+                        Ok(())
+                    };
+                    check_open(&version_path, false, "release .version")?;
+                    check_open(&api_bin, true, "aetherflow-api binary")?;
+                    if check_web {
+                        check_open(&web_index, false, "web/dist/index.html")?;
+                    }
+                    Ok(())
+                })?;
+            }
+        }
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn mode_allows_exec_for_ugid(
+    st_uid: u32,
+    st_gid: u32,
+    st_mode: u32,
+    svc_uid: u32,
+    svc_gid: u32,
+) -> bool {
+    if st_uid == svc_uid {
+        (st_mode & 0o100) != 0
+    } else if st_gid == svc_gid {
+        (st_mode & 0o010) != 0
+    } else {
+        (st_mode & 0o001) != 0
+    }
 }
 
 fn normalize_release_tree_permissions(dir: &Path) -> ReleaseResult<()> {
@@ -609,7 +859,7 @@ pub fn stage_running_release_manager(
         if let Some(resolved_src) = resolve_managed_current_source_path(script_src, config)? {
             let dst = deploy_dir.join("release-manager.sh");
             if !dst.exists() {
-                crate::fs_security::atomic_copy_file_with_mode(&resolved_src, &dst, 0o755, None)?;
+                crate::fs_security::atomic_copy_file_root_owned(&resolved_src, &dst, 0o755)?;
             }
             set_executable_permission(&dst)?;
             staged_script = true;
@@ -624,11 +874,10 @@ pub fn stage_running_release_manager(
                     &parent.join("verify-provenance.py"),
                     config,
                 )? {
-                    crate::fs_security::atomic_copy_file_with_mode(
+                    crate::fs_security::atomic_copy_file_root_owned(
                         &resolved_vp,
                         &verifier_dst,
                         0o755,
-                        None,
                     )?;
                     copied_verifier = true;
                 }
@@ -650,11 +899,10 @@ pub fn stage_running_release_manager(
                 if let Some(resolved_lr) =
                     resolve_managed_current_source_path(&parent.join("log-retention.py"), config)?
                 {
-                    crate::fs_security::atomic_copy_file_with_mode(
+                    crate::fs_security::atomic_copy_file_root_owned(
                         &resolved_lr,
                         &retention_dst,
                         0o755,
-                        None,
                     )?;
                     copied_retention = true;
                 }
@@ -681,7 +929,7 @@ pub fn stage_running_release_manager(
                 }
             }
             if resolved_src != dst {
-                crate::fs_security::atomic_copy_file_with_mode(&resolved_src, &dst, 0o644, None)?;
+                crate::fs_security::atomic_copy_file_root_owned(&resolved_src, &dst, 0o644)?;
             }
         }
     }
@@ -727,6 +975,8 @@ pub fn simulate_offline_artifact(
             "web/dist/index.html",
             &b"<!-- Offline dry-run placeholder; not a frontend. -->\n"[..],
         ),
+        // Intentionally 0-byte placeholder so offline dry-run artifacts fail
+        // `validate_external_frontend_assets` and can never be deployed as a live frontend (PIPE-15).
         ("web/dist/dry-run-placeholder.wasm", &b""[..]),
         (
             "plugins/telemetry-inspector/plugin.manifest.json",
@@ -748,7 +998,7 @@ pub fn simulate_offline_artifact(
         )?;
     }
 
-    let version_stamp = "v4.0.0-dryrun";
+    let version_stamp = dry_run_placeholder_version();
     let version_path = release_dir.join(".version");
     crate::fs_security::atomic_write_bytes_with_mode(
         &version_path,
@@ -757,31 +1007,142 @@ pub fn simulate_offline_artifact(
     )?;
 
     stage_running_release_manager(release_dir, config)?;
-    prepare_release_permissions(release_dir)?;
-    Ok(version_stamp.to_string())
+    prepare_release_permissions_with_options(release_dir, false)?;
+    Ok(version_stamp)
+}
+
+pub(crate) fn dry_run_placeholder_version() -> String {
+    let raw = crate::runtime::runtime_identity().version.trim();
+    let base = if raw.is_empty() {
+        format!("v{}", env!("CARGO_PKG_VERSION"))
+    } else if raw.starts_with('v') {
+        raw.to_string()
+    } else {
+        format!("v{}", raw)
+    };
+    if base.ends_with("-dryrun") {
+        base
+    } else {
+        format!("{}-dryrun", base)
+    }
 }
 
 fn set_executable_permission(path: &Path) -> ReleaseResult<()> {
-    crate::fs_security::ensure_no_symlink_ancestors(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = fs::symlink_metadata(path)
-            .map_err(|e| ReleaseError::io(format!("metadata {}", path.display()), e))?;
-        if meta.file_type().is_symlink() {
-            return Err(ReleaseError::PathValidation {
-                path: path.to_path_buf(),
-                reason: "refusing chmod +x on symlink".to_string(),
-            });
+    crate::fs_security::set_file_mode(path, 0o755)
+}
+
+#[cfg(test)]
+mod archive_hardening_tests {
+    use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use tar::{Builder, Header};
+
+    fn make_archive(dest: &Path, entries: &[(&str, &[u8])]) {
+        let file = fs::File::create(dest).unwrap();
+        let enc = GzEncoder::new(file, Compression::best());
+        let mut tar = Builder::new(enc);
+        for (rel_path, data) in entries {
+            let mut header = Header::new_gnu();
+            header.set_entry_type(EntryType::Regular);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, *rel_path, *data).unwrap();
         }
-        let mut perms = meta.permissions();
-        perms.set_mode((perms.mode() & !0o022) | 0o755);
-        fs::set_permissions(path, perms)
-            .map_err(|e| ReleaseError::io(format!("chmod +x {}", path.display()), e))?;
+        let enc = tar.into_inner().unwrap();
+        enc.finish().unwrap();
     }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
+
+    #[test]
+    fn crate09_archive_enforces_per_entry_and_cumulative_decompression_caps() {
+        assert_eq!(MAX_ARCHIVE_ENTRY_DECOMPRESSED_BYTES, 512 * 1024 * 1024);
+        assert_eq!(MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES, 2 * 1024 * 1024 * 1024);
+
+        let root =
+            std::env::temp_dir().join(format!("af-archive-cap-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let cfg = ReleaseConfig::for_root(&root);
+
+        // 1. Single highly-compressible payload exceeding per-entry cap fails closed.
+        let bomb_bytes = vec![0u8; 64 * 1024];
+        let single_tar = root.join("single-bomb.tar.gz");
+        make_archive(&single_tar, &[("aetherflow-api", &bomb_bytes)]);
+        let out_single = root.join("out-single");
+        let err_single = extract_and_validate_release_archive_with_caps(
+            &single_tar,
+            &out_single,
+            "v4.0.1",
+            &cfg,
+            16 * 1024,
+            128 * 1024,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err_single, ReleaseError::ArchiveExtraction { reason, .. } if reason.contains("per-entry")),
+            "expected per-entry cap error, got: {err_single:?}"
+        );
+        assert!(!out_single.join("aetherflow-api").exists());
+
+        // 2. Multiple smaller entries exceeding cumulative cap fail closed.
+        let chunk = vec![b'A'; 12 * 1024];
+        let multi_tar = root.join("multi-bomb.tar.gz");
+        make_archive(
+            &multi_tar,
+            &[
+                ("aetherflow-api", &chunk),
+                ("blob-1.bin", &chunk),
+                ("blob-2.bin", &chunk),
+            ],
+        );
+        let out_multi = root.join("out-multi");
+        let err_multi = extract_and_validate_release_archive_with_caps(
+            &multi_tar,
+            &out_multi,
+            "v4.0.1",
+            &cfg,
+            16 * 1024,
+            28 * 1024,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err_multi, ReleaseError::ArchiveExtraction { reason, .. } if reason.contains("cumulative")),
+            "expected cumulative cap error, got: {err_multi:?}"
+        );
+        assert!(!out_multi.join("blob-2.bin").exists());
+
+        let _ = fs::remove_dir_all(&root);
     }
-    Ok(())
+
+    #[test]
+    fn pipe15_pipe18_offline_dryrun_derives_runtime_version_and_keeps_zero_byte_wasm() {
+        let root =
+            std::env::temp_dir().join(format!("af-dryrun-ver-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let cfg = ReleaseConfig::for_root(&root);
+        let release_dir = root.join("release");
+
+        let stamped = simulate_offline_artifact(&release_dir, &cfg).unwrap();
+        let expected = format!(
+            "{}-dryrun",
+            crate::runtime::runtime_identity().version.trim()
+        );
+        assert_eq!(stamped, expected);
+        assert_ne!(
+            stamped, "v4.0.0-dryrun",
+            "offline dry-run version must not hardcode stale v4.0.0-dryrun"
+        );
+        assert_eq!(
+            fs::read_to_string(release_dir.join(".version"))
+                .unwrap()
+                .trim(),
+            expected
+        );
+        let wasm_meta =
+            fs::symlink_metadata(release_dir.join("web/dist/dry-run-placeholder.wasm")).unwrap();
+        assert!(wasm_meta.is_file());
+        assert_eq!(wasm_meta.len(), 0);
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

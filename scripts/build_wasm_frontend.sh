@@ -16,6 +16,7 @@ esac
 # sidecars, including when this script stages an existing Trunk output tree.
 python3 "${ROOT_DIR}/scripts/finalize_wasm_assets.py" --locales-only "${ROOT_DIR}/frontend-rs/dist"
 find "${ROOT_DIR}/frontend-rs/dist" -depth -name '.trunk*' -exec rm -rf -- {} +
+find "${ROOT_DIR}/frontend-rs/dist" \( -type f -o -type l \) \( -name 'EGM.md' -o -name '*_DRIFT_REPORT.md' -o -name 'goldfish_review_report.md' \) -delete
 cargo run --quiet --release --locked --manifest-path "${ROOT_DIR}/frontend-rs/Cargo.toml" -p af-web-core --example compress-assets -- "${ROOT_DIR}/frontend-rs/dist"
 if [[ "${STAGE}" == "1" ]]; then
   source_dist="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "${ROOT_DIR}/frontend-rs/dist")"

@@ -243,8 +243,10 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
     }
 }
 
-const MAX_RELEASE_TEXT_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_RELEASE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_RELEASE_TEXT_BYTES: u64 = 4 * 1024 * 1024;
+/// Maximum allowed release tarball download size (`512 MiB`, aligned across `af-release`,
+/// `deploy/release-manager.sh`, and `setup/modules/modern_stack.sh` per `PIPE-15`).
+pub(crate) const MAX_RELEASE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(super) fn is_trusted_github_auth_url(url: &reqwest::Url) -> bool {
     if url.scheme() != "https" {
@@ -516,4 +518,35 @@ fn run_blocking_http_download_to_file(
     })
     .join()
     .map_err(|_| ReleaseError::ArtifactVerification("HTTP worker thread panicked".to_string()))?
+}
+
+#[cfg(test)]
+mod pipe15_provider_tests {
+    use super::*;
+
+    #[test]
+    fn pipe15_provider_archive_and_text_caps_match_release_engine_contract() {
+        assert_eq!(MAX_RELEASE_ARCHIVE_BYTES, 512 * 1024 * 1024);
+        assert_eq!(MAX_RELEASE_TEXT_BYTES, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn pipe15_trusted_github_auth_url_enforces_https_and_exact_hosts() {
+        assert!(is_trusted_github_auth_url(
+            &reqwest::Url::parse("https://github.com/McEveritts/AetherFlow").unwrap()
+        ));
+        assert!(is_trusted_github_auth_url(
+            &reqwest::Url::parse("https://api.github.com/repos/McEveritts/AetherFlow/releases")
+                .unwrap()
+        ));
+        assert!(is_trusted_github_auth_url(
+            &reqwest::Url::parse("https://objects.githubusercontent.com/release").unwrap()
+        ));
+        assert!(!is_trusted_github_auth_url(
+            &reqwest::Url::parse("http://github.com/McEveritts/AetherFlow").unwrap()
+        ));
+        assert!(!is_trusted_github_auth_url(
+            &reqwest::Url::parse("https://evil-github.com/McEveritts/AetherFlow").unwrap()
+        ));
+    }
 }

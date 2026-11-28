@@ -17,9 +17,10 @@ pub use jobs::{
     admit_job, admit_job_with_target, check_package_reservation, check_reservation, finish_job,
     finish_job_with_diagnostics, get_lifecycle_history, initialize_schema,
     normalize_recovery_state, normalize_retention_state, query_package_retention_history,
-    query_retained_lifecycle_packages, reconcile_jobs, record_completed_lifecycle_job,
-    LifecycleJobDiagnostics, PackageLifecycleRetentionRecord, RECOVERY_STATE_PRIOR_VERIFIED,
-    RECOVERY_STATE_UNVERIFIED, RETENTION_STATE_PURGED, RETENTION_STATE_RETAINED,
+    query_retained_lifecycle_packages, reconcile_jobs, reconcile_jobs_with_options,
+    record_completed_lifecycle_job, LifecycleJobDiagnostics, PackageLifecycleRetentionRecord,
+    RECOVERY_STATE_PRIOR_VERIFIED, RECOVERY_STATE_UNVERIFIED, RETENTION_STATE_PURGED,
+    RETENTION_STATE_RETAINED,
 };
 pub use lease::{owner_is_alive, OwnerLease};
 pub use units::{

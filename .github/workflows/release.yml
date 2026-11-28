@@ -94,6 +94,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         shard: [1, 2, 3, 4]
     steps:
@@ -102,6 +103,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # Minimum supported Node.js LTS floor matching root package.json engines (>=22.19.0) and ci.yml :: node-installers.
+      - name: Setup Node at minimum supported engine floor (22.19.0)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22.19.0
 
       - name: Check Shell Hygiene & Sharded Python Verification Suite
         env:
@@ -273,6 +280,7 @@ jobs:
           TMP_SDK="$(mktemp -d)"
           trap 'rm -rf "$TMP_SDK"' EXIT
           bash scripts/create-plugin-sdk.sh release-verify-plugin "Release Verify Plugin" "$TMP_SDK/release-verify-plugin" rust
+          test -z "$(find "$TMP_SDK/release-verify-plugin" \( -name 'EGM.md' -o -name '*_DRIFT_REPORT.md' -o -name 'goldfish_review_report.md' \) -print -quit)"
           cargo clippy --manifest-path "$TMP_SDK/release-verify-plugin/backend/Cargo.toml" --all-targets --locked -- -D warnings
           cargo test --manifest-path "$TMP_SDK/release-verify-plugin/backend/Cargo.toml" --locked
 
@@ -294,7 +302,7 @@ jobs:
 
   build-wasm:
     name: Build & Stage External WASM Frontend
-    needs: [validate-release]
+    needs: [validate-release, security-gate]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -340,7 +348,7 @@ jobs:
 
   package-amd64:
     name: Build AMD64 Release Binaries
-    needs: [validate-release]
+    needs: [validate-release, security-gate]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -392,7 +400,7 @@ jobs:
 
   package-arm64:
     name: Build ARM64 Release Binaries
-    needs: [validate-release]
+    needs: [validate-release, security-gate]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -445,7 +453,7 @@ jobs:
 
   package-armv7-speedtest:
     name: Build ARMv7 Standalone Rust LibreSpeed
-    needs: [validate-release]
+    needs: [validate-release, security-gate]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -574,14 +582,8 @@ jobs:
           SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}"
           armv7_bin="release-dist/linux-armv7/bin/speedtest-backend"
           if [[ ! -f "${armv7_bin}" ]]; then
-            (
-              cd backend-rs
-              export RUSTFLAGS="-C link-arg=-Wl,--as-needed"
-              CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
-                CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
-                cargo build --release --locked --target armv7-unknown-linux-gnueabihf -p af-librespeed --bin speedtest-backend
-            )
-            armv7_bin="backend-rs/target/armv7-unknown-linux-gnueabihf/release/speedtest-backend"
+            echo "::error::Missing prebuilt ARMv7 speedtest-backend artifact at ${armv7_bin}" >&2
+            exit 1
           fi
 
           stage="$(mktemp -d)"
@@ -591,7 +593,8 @@ jobs:
             local binary="$1" arch="$2"
             local archive="speedtest-backend_${AF_BUILD_VERSION}_linux_${arch}.tar.gz"
             install -m 0755 "${binary}" "${stage}/speedtest-backend"
-            tar --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+            tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+              --mode='a=rX,u+w,a-s,a-t' --format=gnu \
               -C "${stage}" -cf - speedtest-backend | gzip -n -c > "release-dist/${archive}"
             speedtest_archives+=("${archive}")
           }
@@ -607,7 +610,14 @@ jobs:
               ':!scripts/build_wsl.ps1' ':!scripts/setup_wsl_dev.sh' ':!scripts/create-plugin-sdk.sh' \
               ':!package.json' ':!package-lock.json' ':!.nvmrc' ':!.gitleaks.toml' \
               ':!plugins/sdk-template-rust' \
+              ':(exclude,glob)EGM.md' ':(exclude,glob)**/EGM.md' \
+              ':(exclude,glob)*_DRIFT_REPORT.md' ':(exclude,glob)**/*_DRIFT_REPORT.md' \
+              ':(exclude,glob)goldfish_review_report.md' ':(exclude,glob)**/goldfish_review_report.md' \
               > release-dist/aetherflow-bootstrap.tar.gz
+            if tar -ztf release-dist/aetherflow-bootstrap.tar.gz | grep -qE '(^|/)(EGM\.md|[^/]*_DRIFT_REPORT\.md|goldfish_review_report\.md)$'; then
+              echo "::error::Internal EGM/drift documentation leaked into aetherflow-bootstrap.tar.gz" >&2
+              exit 1
+            fi
           fi
           release_archives=(aetherflow-linux-amd64.tar.gz)
           if [[ -s release-dist/aetherflow-linux-arm64.tar.gz ]]; then
@@ -639,6 +649,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         browser: [chromium, firefox, webkit]
         shard: [1, 2]
@@ -701,6 +712,7 @@ jobs:
           test -x "${RELEASE_E2E_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
           test ! -e "${RELEASE_E2E_DIR}/plugins/sdk-template-rust"
           test ! -e "${RELEASE_E2E_DIR}/plugins/README.md"
+          test -z "$(find "${RELEASE_E2E_DIR}" \( -name 'EGM.md' -o -name '*_DRIFT_REPORT.md' -o -name 'goldfish_review_report.md' \) -print -quit)"
           test "$(cat "${RELEASE_E2E_DIR}/.version")" = "${VERSION_STAMP}"
           bash scripts/run_embedded_e2e.sh --binary "${RELEASE_E2E_DIR}/aetherflow-api" --static-dir "${RELEASE_E2E_DIR}/web/dist" --port 18080 --playwright
 
@@ -741,6 +753,7 @@ jobs:
           test ! -e "${release_root}/bundle/af-transcode"
           test -s "${release_root}/bundle/plugins/telemetry-inspector/plugin.manifest.json"
           test -x "${release_root}/bundle/plugins/telemetry-inspector/backend/hooks/start.sh"
+          test -z "$(find "${release_root}/bundle" \( -name 'EGM.md' -o -name '*_DRIFT_REPORT.md' -o -name 'goldfish_review_report.md' \) -print -quit)"
           cmp "${release_root}/bundle/bin/speedtest-backend" "${release_root}/standalone/speedtest-backend"
           timeout 30s "${release_root}/bundle/bin/af" --version | grep -F '(linux/aarch64)'
           timeout 30s "${release_root}/bundle/bin/speedtest-backend" --version
@@ -752,9 +765,10 @@ jobs:
     name: Attest & Publish Signed Release
     if: github.ref == 'refs/heads/nightly' || github.ref == 'refs/heads/Nightly' || startsWith(github.ref, 'refs/tags/v')
     needs: [validate-release, security-gate, security-frontend, security-python, release-build, release-e2e-amd64, release-arm64-runtime]
+    environment: release-publish
     runs-on: ubuntu-22.04
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
     steps:
@@ -806,8 +820,21 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
           ATTEST_BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
         run: |
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Missing secrets.RELEASE_PUBLISH_TOKEN in the release-publish environment (required so GitHub Releases publish under McEveritts)" >&2
+            exit 1
+          fi
+          if [[ "${GH_TOKEN}" == ghs_* ]]; then
+            echo "::error::Refusing ephemeral GITHUB_TOKEN (ghs_*) for GitHub Release publication; configure a repo-scoped fine-grained McEveritts PAT in secrets.RELEASE_PUBLISH_TOKEN" >&2
+            exit 1
+          fi
+          PUBLISH_LOGIN="$(gh api user --jq .login)"
+          if [[ "${PUBLISH_LOGIN}" != "McEveritts" ]]; then
+            echo "::error::RELEASE_PUBLISH_TOKEN authenticated as '${PUBLISH_LOGIN:-<empty>}', expected 'McEveritts'" >&2
+            exit 1
+          fi
           RELEASE_FLAGS=(--generate-notes)
           if [[ "${RELEASE_TAG}" == *-* ]]; then
             RELEASE_NOTES_FILE="$(mktemp)"

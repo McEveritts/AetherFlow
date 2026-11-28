@@ -202,7 +202,10 @@ def open_request(request, timeout=None):
         payload = {}
     return io.BytesIO(json.dumps(payload).encode())
 
-sys.argv = sys.argv[1:]
+args = sys.argv[1:]
+while args and args[0].startswith("-") and args[0] != "-":
+    args = args[1:]
+sys.argv = args
 with patch("urllib.request.urlopen", side_effect=open_request), patch("time.sleep"):
     exec(compile(sys.stdin.read(), "<production-bootstrap>", "exec"), {"__name__": "__main__"})
 '''

@@ -8,6 +8,7 @@ use super::{
     PLUGIN_TOKEN_ISSUER, PLUGIN_TOKEN_TYP,
 };
 use crate::auth::jwt_secret_bytes;
+use af_models::secret_zeroize::SecretBytes;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -15,11 +16,17 @@ use sha2::Sha256;
 use std::time::Duration;
 use uuid::Uuid;
 
-fn plugin_signing_key() -> Vec<u8> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&jwt_secret_bytes())
-        .expect("HMAC accepts arbitrary key length");
+/// Derives the plugin-token HS256 key from `JWT_SECRET` (`SEC-05`).
+///
+/// Both the root secret and the derived key live in zeroize-on-drop containers, so each
+/// short-lived copy made per mint/verify is wiped (full `0..capacity`) as soon as it is dropped.
+fn plugin_signing_key() -> SecretBytes {
+    let root = jwt_secret_bytes();
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(&root).expect("HMAC accepts arbitrary key length");
+    drop(root);
     mac.update(b"aetherflow-plugin-token-v1");
-    mac.finalize().into_bytes().to_vec()
+    SecretBytes::new(mac.finalize().into_bytes().to_vec())
 }
 
 pub fn mint_scoped_plugin_token(
@@ -75,7 +82,7 @@ pub(super) fn sign_plugin_token(
     let token = encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(&plugin_signing_key()),
+        &EncodingKey::from_secret(plugin_signing_key().expose_secret()),
     )
     .map_err(|e| format!("Failed to encode plugin token: {}", e))?;
 
@@ -89,7 +96,7 @@ pub fn decode_and_verify_plugin_token(token: &str) -> Result<PluginTokenClaims, 
 
     let data = decode::<PluginTokenClaims>(
         token,
-        &DecodingKey::from_secret(&plugin_signing_key()),
+        &DecodingKey::from_secret(plugin_signing_key().expose_secret()),
         &validation,
     )
     .map_err(|e| format!("Invalid plugin token signature or expiry: {}", e))?;
@@ -148,6 +155,28 @@ pub fn revoke_all_tokens_for_plugin(plugin_id: &str) {
         let _ = af_db::revoke_token(
             &jti,
             Duration::from_secs(MAX_PLUGIN_TOKEN_TTL_SECS as u64 + 60),
+        );
+    }
+}
+
+#[cfg(test)]
+mod signing_key_tests {
+    use super::*;
+
+    #[test]
+    fn sec05_plugin_signing_key_is_zeroizing_redacted_and_domain_separated() {
+        let key = plugin_signing_key();
+        assert_eq!(key.len(), 32, "HMAC-SHA256 output");
+        assert_eq!(format!("{key:?}"), "[REDACTED]");
+        assert_eq!(
+            key,
+            plugin_signing_key(),
+            "derivation must be deterministic"
+        );
+        assert_ne!(
+            key.expose_secret(),
+            &jwt_secret_bytes()[..],
+            "plugin tokens must not be signed with the raw session secret"
         );
     }
 }

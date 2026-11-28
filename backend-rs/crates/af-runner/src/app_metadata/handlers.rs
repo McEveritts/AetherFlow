@@ -1,18 +1,25 @@
 use super::extractors_services::extract_app_runtime_meta_local;
 use crate::*;
+use af_models::secret_zeroize::SecretString;
 
-pub(crate) const DISPATCHARR_ADMIN_SCRIPT: &str = r#"import os
+pub(crate) const DISPATCHARR_ADMIN_SCRIPT: &str = r#"import json
+import sys
 from django.contrib.auth import get_user_model
 from django.db import transaction
 
+payload = json.load(sys.stdin)
+username = payload["username"]
+password = payload["password"]
+email = payload.get("email") or f"{username}@localhost"
+
 with transaction.atomic():
-    user, _ = get_user_model().objects.get_or_create(username=os.environ["AF_ADMIN_USER"])
-    user.email = os.environ["AF_ADMIN_EMAIL"]
+    user, _ = get_user_model().objects.get_or_create(username=username)
+    user.email = email
     user.user_level = 10
     user.is_staff = True
     user.is_superuser = True
     user.is_active = True
-    user.set_password(os.environ["AF_ADMIN_PASS"])
+    user.set_password(password)
     user.save()
 "#;
 
@@ -22,21 +29,68 @@ pub(crate) struct DispatcharrCredentialsRequest {
     pub(crate) password: String,
 }
 
-pub(crate) fn dispatcharr_credentials_command(username: &str, password: &str) -> Command {
+impl Drop for DispatcharrCredentialsRequest {
+    fn drop(&mut self) {
+        let mut wiped = SecretString::new(std::mem::take(&mut self.password));
+        wiped.zeroize();
+    }
+}
+
+pub(crate) fn dispatcharr_credentials_command() -> Command {
     let mut command = Command::new("runuser");
     command
+        .env_clear()
+        .env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+        .env("HOME", "/opt/dispatcharr")
+        .env("USER", "dispatcharr")
+        .env("LOGNAME", "dispatcharr")
+        .env("LANG", "C.UTF-8")
+        .env("PYTHONNOUSERSITE", "1")
         .args([
-            "-u", "dispatcharr", "--", "/bin/bash", "-ec",
-            "set -a; source /etc/dispatcharr/dispatcharr.env; set +a; cd /opt/dispatcharr; exec /opt/dispatcharr/env/bin/python manage.py shell",
-        ])
-        .env("AF_ADMIN_USER", username)
-        .env("AF_ADMIN_PASS", password)
-        .env("AF_ADMIN_EMAIL", format!("{}@localhost", username))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
+            "-u",
+            "dispatcharr",
+            "--",
+            "/bin/bash",
+            "-ec",
+            "set -a; source /etc/dispatcharr/dispatcharr.env; set +a; cd /opt/dispatcharr; exec /opt/dispatcharr/env/bin/python -E manage.py shell -c \"$1\"",
+            "af-dispatcharr-sync",
+            DISPATCHARR_ADMIN_SCRIPT,
+        ]);
     command
+}
+
+#[derive(Serialize)]
+struct DispatcharrCredentialsStdinPayload<'a> {
+    username: &'a str,
+    password: &'a str,
+    email: &'a str,
+}
+
+pub(crate) fn dispatcharr_credentials_stdin_payload(
+    username: &str,
+    password: &str,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let email = format!("{username}@localhost");
+    let payload = DispatcharrCredentialsStdinPayload {
+        username,
+        password,
+        email: &email,
+    };
+    let capacity = username
+        .len()
+        .saturating_mul(2)
+        .saturating_add(password.len().saturating_mul(2))
+        .saturating_add(email.len().saturating_mul(2))
+        .saturating_add(64);
+    let mut buf = Vec::with_capacity(capacity);
+    if let Err(err) = serde_json::to_writer(&mut buf, &payload) {
+        drop(af_models::secret_zeroize::SecretBytes::new(buf));
+        return Err(err);
+    }
+    Ok(buf)
 }
 
 pub(crate) async fn handle_dispatcharr_credentials(
@@ -69,19 +123,24 @@ pub(crate) async fn handle_dispatcharr_credentials(
             }),
         );
     }
-    let result = tokio::time::timeout(Duration::from_secs(20), async {
-        use tokio::io::AsyncWriteExt;
-        let mut child = dispatcharr_credentials_command(username, &req.password).spawn()?;
-        let mut input = child
-            .stdin
-            .take()
-            .ok_or_else(|| std::io::Error::other("missing stdin"))?;
-        input.write_all(DISPATCHARR_ADMIN_SCRIPT.as_bytes()).await?;
-        drop(input);
-        child.wait().await
-    })
+    let Ok(payload) = dispatcharr_credentials_stdin_payload(username, &req.password) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "Dispatcharr credential sync failed".to_string(),
+            }),
+        );
+    };
+    let result = bounded_command::output_with_stdin(
+        dispatcharr_credentials_command(),
+        payload,
+        Duration::from_secs(20),
+        64 * 1024,
+    )
     .await;
-    let success = matches!(result, Ok(Ok(status)) if status.success());
+    let success = matches!(result, Ok(out) if out.status.success());
     (
         if success {
             StatusCode::OK
@@ -205,4 +264,56 @@ pub async fn probe_package_version_via_runner(package_id: &str) -> anyhow::Resul
         );
     }
     Ok(result.output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatcharr_stdin_payload_encodes_literals_without_env_exposure() {
+        let username = "user'\"$`\\";
+        let password = "p'\"\\$(touch /tmp/not-executed)\npassword";
+        let payload = dispatcharr_credentials_stdin_payload(username, password).unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(decoded["username"].as_str(), Some(username));
+        assert_eq!(decoded["password"].as_str(), Some(password));
+        assert_eq!(
+            decoded["email"].as_str(),
+            Some(format!("{username}@localhost").as_str())
+        );
+
+        let command = dispatcharr_credentials_command();
+        let std_cmd = command.as_std();
+        let envs: HashMap<_, _> = std_cmd.get_envs().collect();
+        assert_eq!(envs.len(), 6);
+        assert!(!envs.contains_key(std::ffi::OsStr::new("AF_ADMIN_PASS")));
+        assert!(!envs.contains_key(std::ffi::OsStr::new("AF_ADMIN_USER")));
+        assert!(!envs.contains_key(std::ffi::OsStr::new("AF_ADMIN_EMAIL")));
+        assert!(!envs.contains_key(std::ffi::OsStr::new("JWT_SECRET")));
+        assert!(!envs.contains_key(std::ffi::OsStr::new("AES_MASTER_KEY")));
+        assert!(DISPATCHARR_ADMIN_SCRIPT.contains("json.load(sys.stdin)"));
+        assert!(!DISPATCHARR_ADMIN_SCRIPT.contains("AF_ADMIN_PASS"));
+    }
+
+    #[tokio::test]
+    async fn dispatcharr_script_parses_stdin_json_via_output_with_stdin() {
+        let username = "admin'\"$`\\";
+        let password = "s3cr3t\"'$(id)\nline2";
+        let payload = dispatcharr_credentials_stdin_payload(username, password).unwrap();
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.args([
+            "-c",
+            "import json, sys; p = json.load(sys.stdin); print(json.dumps([p['username'], p['password'], p['email']]))",
+        ]);
+        let out = bounded_command::output_with_stdin(cmd, payload, Duration::from_secs(5), 4096)
+            .await
+            .unwrap();
+        assert!(out.status.success());
+        let parsed: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            parsed,
+            vec![username, password, &format!("{username}@localhost")]
+        );
+    }
 }

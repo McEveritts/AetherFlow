@@ -3,14 +3,7 @@ use super::*;
 /// Helper recognizing 7..=40 character lowercase/uppercase hexadecimal strings (`^[0-9a-fA-F]{7,40}$`)
 /// that contain NO dots (`.`), and either are 40 chars OR contain at least one hex letter `[a-fA-F]`.
 pub fn is_git_commit_sha(token: &str) -> bool {
-    let t = token.trim();
-    if t.len() < 7 || t.len() > 40 || t.contains('.') {
-        return false;
-    }
-    if !t.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return false;
-    }
-    t.bytes().any(|b| matches!(b, b'a'..=b'f' | b'A'..=b'F'))
+    af_release::lifecycle::is_hex_commit(token.trim())
 }
 
 /// Normalizes a version token or tag into a canonical version string.
@@ -107,9 +100,6 @@ pub fn public_update_error(error: &str) -> String {
     if lower.contains("rate limit") {
         return "GitHub API rate limit reached; retaining last confirmed version".to_string();
     }
-    if lower.starts_with("installed version check failed") {
-        return error.to_string();
-    }
     match error {
         "" => String::new(),
         "Installed version could not be confirmed"
@@ -164,10 +154,111 @@ pub fn ensure_app_updates_columns_with_connection(conn: &rusqlite::Connection) {
 pub(in crate::workers) static PACKAGE_UPDATE_CACHE_DB_PATH: Lazy<Mutex<String>> =
     Lazy::new(|| Mutex::new(String::new()));
 
-pub fn load_previous_package_update_records() -> HashMap<String, PackageUpdateRecord> {
+pub(in crate::workers) static PACKAGE_UPDATE_CACHE_EPOCH: Lazy<Mutex<String>> =
+    Lazy::new(|| Mutex::new(String::new()));
+
+fn read_package_lifecycle_epoch_on_conn(conn: &rusqlite::Connection) -> String {
+    conn.query_row(
+        "SELECT value FROM system_config WHERE key = 'package_lifecycle_epoch' LIMIT 1",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .unwrap_or_default()
+}
+
+fn read_package_lifecycle_epoch() -> String {
+    let Ok(conn) = af_db::get_read_conn() else {
+        return String::new();
+    };
+    read_package_lifecycle_epoch_on_conn(&conn)
+}
+
+pub(in crate::workers) fn capture_package_lifecycle_snapshot() -> (String, String) {
+    let db_path = af_db::get_db_path();
+    let epoch = read_package_lifecycle_epoch();
+    (db_path, epoch)
+}
+
+fn parse_package_lifecycle_epoch(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        Some(0)
+    } else {
+        trimmed.parse::<u64>().ok()
+    }
+}
+
+fn package_lifecycle_epoch_matches(live_epoch: &str, probe_epoch: &str) -> bool {
+    match (
+        parse_package_lifecycle_epoch(live_epoch),
+        parse_package_lifecycle_epoch(probe_epoch),
+    ) {
+        (Some(live_num), Some(probe_num)) => live_num == probe_num,
+        _ => live_epoch.trim() == probe_epoch.trim(),
+    }
+}
+
+/// Synchronizes `PACKAGE_UPDATE_CACHE` against a `(db_path, snapshot_epoch)`
+/// pair captured outside the cache mutex.
+///
+/// Returns `true` when the snapshot is current (or advanced the cache to a
+/// newer DB/epoch) and may populate the cache, or `false` when the cache has
+/// already advanced past `snapshot_epoch` for the same DB (caller must skip
+/// repopulating the cache from the stale snapshot).
+fn sync_package_update_cache_generation(
+    cache: &mut HashMap<String, PackageUpdateRecord>,
+    db_path: &str,
+    snapshot_epoch: &str,
+) -> bool {
+    let mut db_changed = false;
+    if let Ok(mut tracked_db) = PACKAGE_UPDATE_CACHE_DB_PATH.lock() {
+        if tracked_db.as_str() != db_path {
+            db_changed = true;
+            *tracked_db = db_path.to_string();
+        }
+    }
+
+    if let Ok(mut tracked_epoch) = PACKAGE_UPDATE_CACHE_EPOCH.lock() {
+        if db_changed {
+            *tracked_epoch = snapshot_epoch.to_string();
+            cache.clear();
+            return true;
+        }
+        if tracked_epoch.as_str() == snapshot_epoch {
+            return true;
+        }
+        if let (Some(tracked_num), Some(snapshot_num)) = (
+            parse_package_lifecycle_epoch(&tracked_epoch),
+            parse_package_lifecycle_epoch(snapshot_epoch),
+        ) {
+            if snapshot_num == tracked_num {
+                return true;
+            }
+            if snapshot_num < tracked_num {
+                return false;
+            }
+        }
+        *tracked_epoch = snapshot_epoch.to_string();
+        cache.clear();
+        return true;
+    }
+
+    if db_changed {
+        cache.clear();
+    }
+    true
+}
+
+fn load_previous_package_update_snapshot() -> (String, String, HashMap<String, PackageUpdateRecord>)
+{
+    let db_path = af_db::get_db_path();
+    let mut snapshot_epoch = String::new();
     let mut result = HashMap::new();
 
     if let Ok(conn) = af_db::get_read_conn() {
+        let in_tx = conn.execute_batch("BEGIN DEFERRED").is_ok();
+        snapshot_epoch = read_package_lifecycle_epoch_on_conn(&conn);
+
         let with_source_sql =
             "SELECT package_name, COALESCE(installed_version, ''), COALESCE(latest_version, ''),
                     COALESCE(update_available, 0), COALESCE(update_url, ''),
@@ -205,34 +296,47 @@ pub fn load_previous_package_update_records() -> HashMap<String, PackageUpdateRe
                 }
             }
         }
+        if in_tx {
+            let _ = conn.execute_batch("COMMIT");
+        }
     }
-    result
+    (db_path, snapshot_epoch, result)
+}
+
+pub fn load_previous_package_update_records() -> HashMap<String, PackageUpdateRecord> {
+    load_previous_package_update_snapshot().2
+}
+
+fn apply_package_update_snapshot_to_cache(
+    cache: &mut HashMap<String, PackageUpdateRecord>,
+    db_path: &str,
+    snapshot_epoch: &str,
+    result: &mut HashMap<String, PackageUpdateRecord>,
+) {
+    if !sync_package_update_cache_generation(cache, db_path, snapshot_epoch) {
+        *result = cache.clone();
+        return;
+    }
+    for (k, v) in result.iter() {
+        cache.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    for (k, v) in cache.iter() {
+        let should_overlay = match result.get(k) {
+            None => true,
+            Some(db_rec) => !v.checked_at.is_empty() && v.checked_at > db_rec.checked_at,
+        };
+        if should_overlay {
+            result.insert(k.clone(), v.clone());
+        }
+    }
 }
 
 /// Returns persisted and cached update records with safe status summaries.
 pub fn get_package_update_map() -> HashMap<String, PackageUpdateRecord> {
-    let current_db = af_db::get_db_path();
-    let mut result = load_previous_package_update_records();
+    let (db_path, snapshot_epoch, mut result) = load_previous_package_update_snapshot();
 
     if let Ok(mut cache) = PACKAGE_UPDATE_CACHE.lock() {
-        if let Ok(mut tracked_db) = PACKAGE_UPDATE_CACHE_DB_PATH.lock() {
-            if *tracked_db != current_db {
-                cache.clear();
-                *tracked_db = current_db;
-            }
-        }
-        for (k, v) in &result {
-            cache.entry(k.clone()).or_insert_with(|| v.clone());
-        }
-        for (k, v) in cache.iter() {
-            let should_overlay = match result.get(k) {
-                None => true,
-                Some(db_rec) => !v.checked_at.is_empty() && v.checked_at > db_rec.checked_at,
-            };
-            if should_overlay {
-                result.insert(k.clone(), v.clone());
-            }
-        }
+        apply_package_update_snapshot_to_cache(&mut cache, &db_path, &snapshot_epoch, &mut result);
     }
 
     for record in result.values_mut() {
@@ -559,8 +663,9 @@ pub(in crate::workers) async fn github_release_observation_follows_canonical_rep
     assert!(observed.1.contains("Unpackerr/unpackerr"));
 }
 
-pub fn persist_package_update_record(record: &PackageUpdateRecord) {
-    ensure_app_updates_columns();
+fn sanitize_package_update_record_for_persistence(
+    record: &PackageUpdateRecord,
+) -> PackageUpdateRecord {
     let mut safe_record = record.clone();
     safe_record.release_url = af_release::lifecycle::sanitize_persisted_lifecycle_text(
         &sanitize_git_remote_url_for_display(&safe_record.release_url),
@@ -573,59 +678,497 @@ pub fn persist_package_update_record(record: &PackageUpdateRecord) {
         af_release::lifecycle::sanitize_persisted_lifecycle_text(&safe_record.latest_version);
     safe_record.installed_version =
         af_release::lifecycle::sanitize_persisted_lifecycle_text(&safe_record.installed_version);
-    let record = &safe_record;
+    safe_record
+}
+
+fn upsert_sanitized_package_update_on_conn(
+    conn: &rusqlite::Connection,
+    record: &PackageUpdateRecord,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO app_updates (package_name, installed_version, latest_version, update_available, update_url, checked_at, last_error, source_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(package_name) DO UPDATE SET
+           installed_version = excluded.installed_version,
+           latest_version = excluded.latest_version,
+           update_available = excluded.update_available,
+           update_url = excluded.update_url,
+           checked_at = excluded.checked_at,
+           last_error = excluded.last_error,
+           source_key = excluded.source_key",
+        params![
+            record.package_id,
+            record.installed_version,
+            record.latest_version,
+            record.update_available,
+            record.release_url,
+            record.checked_at,
+            record.error,
+            record.source_key,
+        ],
+    )
+}
+
+pub fn persist_package_update_record(record: &PackageUpdateRecord) {
+    ensure_app_updates_columns();
+    let safe_record = sanitize_package_update_record_for_persistence(record);
 
     if let Ok(conn) = af_db::get_conn() {
-        let _ = conn.execute(
-            "INSERT INTO app_updates (package_name, installed_version, latest_version, update_available, update_url, checked_at, last_error, source_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(package_name) DO UPDATE SET
-               installed_version = excluded.installed_version,
-               latest_version = excluded.latest_version,
-               update_available = excluded.update_available,
-               update_url = excluded.update_url,
-               checked_at = excluded.checked_at,
-               last_error = excluded.last_error,
-               source_key = excluded.source_key",
-            params![
-                record.package_id,
-                record.installed_version,
-                record.latest_version,
-                record.update_available,
-                record.release_url,
-                record.checked_at,
-                record.error,
-                record.source_key,
-            ],
-        );
+        let _ = upsert_sanitized_package_update_on_conn(&conn, &safe_record);
     }
 }
 
-pub(in crate::workers) fn persist_and_cache_package_update(record: &PackageUpdateRecord) -> bool {
-    let mut prev_update_available = false;
-    let mut had_existing = false;
-
-    if let Ok(mut cache) = PACKAGE_UPDATE_CACHE.lock() {
-        if let Some(prev) = cache.get(&record.package_id) {
-            had_existing = true;
-            prev_update_available = prev.update_available;
-        }
-        cache.insert(record.package_id.clone(), record.clone());
+pub(in crate::workers) fn persist_and_cache_package_update_for_epoch(
+    record: &PackageUpdateRecord,
+    probe_db_path: &str,
+    probe_epoch: &str,
+) -> bool {
+    if af_db::get_db_path() != probe_db_path {
+        return false;
     }
 
-    if !had_existing {
-        if let Ok(conn) = af_db::get_conn() {
-            if let Ok(existing_avail) = conn.query_row(
-                "SELECT COALESCE(update_available, 0) FROM app_updates WHERE package_name = ?1",
-                params![record.package_id],
-                |r| r.get::<_, bool>(0),
-            ) {
-                prev_update_available = existing_avail;
+    let safe_record = sanitize_package_update_record_for_persistence(record);
+    let db_prev_update_available = {
+        let Ok(conn) = af_db::get_conn() else {
+            return false;
+        };
+        ensure_app_updates_columns_with_connection(&conn);
+
+        if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+            return false;
+        }
+
+        let live_db_path = af_db::get_db_path();
+        let live_epoch = read_package_lifecycle_epoch_on_conn(&conn);
+        if live_db_path != probe_db_path
+            || !package_lifecycle_epoch_matches(&live_epoch, probe_epoch)
+        {
+            let _ = conn.execute_batch("ROLLBACK");
+            drop(conn);
+            if live_db_path == probe_db_path {
+                if let Ok(mut cache) = PACKAGE_UPDATE_CACHE.lock() {
+                    let _ = sync_package_update_cache_generation(
+                        &mut cache,
+                        &live_db_path,
+                        &live_epoch,
+                    );
+                }
             }
+            return false;
+        }
+
+        let prev_avail = conn
+            .query_row(
+                "SELECT COALESCE(update_available, 0) FROM app_updates WHERE package_name = ?1",
+                params![safe_record.package_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .ok();
+
+        if upsert_sanitized_package_update_on_conn(&conn, &safe_record).is_err() {
+            let _ = conn.execute_batch("ROLLBACK");
+            return false;
+        }
+
+        if conn.execute_batch("COMMIT").is_err() {
+            let _ = conn.execute_batch("ROLLBACK");
+            return false;
+        }
+
+        prev_avail
+    };
+
+    let Ok(mut cache) = PACKAGE_UPDATE_CACHE.lock() else {
+        return false;
+    };
+    let is_current = sync_package_update_cache_generation(&mut cache, probe_db_path, probe_epoch);
+    if !is_current {
+        return false;
+    }
+
+    let prev_update_available = cache
+        .get(&safe_record.package_id)
+        .map(|prev| prev.update_available)
+        .or(db_prev_update_available)
+        .unwrap_or(false);
+    cache.insert(safe_record.package_id.clone(), safe_record.clone());
+
+    !prev_update_available && safe_record.update_available
+}
+
+#[allow(dead_code)]
+pub(in crate::workers) fn persist_and_cache_package_update(record: &PackageUpdateRecord) -> bool {
+    let (db_path, snapshot_epoch) = capture_package_lifecycle_snapshot();
+    persist_and_cache_package_update_for_epoch(record, &db_path, &snapshot_epoch)
+}
+
+#[cfg(test)]
+mod watcher_parity_tests {
+    use super::*;
+    use crate::inventory_regressions::{isolated, Fixture};
+
+    #[test]
+    fn public_update_error_rejects_raw_installed_version_check_failed_prefix() {
+        assert_eq!(
+            public_update_error("Installed version check failed: /usr/bin/probe stderr leaked"),
+            "Update status could not be confirmed"
+        );
+        assert_eq!(
+            public_update_error("installed version check failed: probe returned no output"),
+            "Update status could not be confirmed"
+        );
+        assert_eq!(
+            public_update_error("Installed version could not be confirmed"),
+            "Installed version could not be confirmed"
+        );
+    }
+
+    #[test]
+    fn is_git_commit_sha_matches_af_release_is_hex_commit() {
+        for sample in [
+            "1234567890123456789012345678901234567890",
+            "123456789012345678901234567890123456789a",
+            "6e840ac",
+            "1234567",
+            "1.0.0",
+            "abcdef",
+            " 6e840ac ",
+        ] {
+            assert_eq!(
+                is_git_commit_sha(sample),
+                af_release::lifecycle::is_hex_commit(sample.trim()),
+                "mismatch for sample {sample:?}"
+            );
         }
     }
 
-    persist_package_update_record(record);
+    #[test]
+    fn package_lifecycle_epoch_bump_invalidates_package_update_cache() {
+        if !isolated(
+            "workers::package_updates::watcher::watcher_parity_tests::package_lifecycle_epoch_bump_invalidates_package_update_cache",
+        ) {
+            return;
+        }
+        let _fixture = Fixture::new();
+        af_db::init_db().unwrap();
+        ensure_app_updates_columns();
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO app_updates (package_name, installed_version, latest_version, update_available, checked_at, last_error)
+                 VALUES ('sonarr', '4.0.0', '4.0.1', 1, '2026-11-26T00:00:00Z', '')",
+                [],
+            )
+            .unwrap();
+        }
+        let first = get_package_update_map();
+        assert!(first.contains_key("sonarr"));
 
-    !prev_update_available && record.update_available
+        // Simulate cross-process CLI removal: row deleted from SQLite and epoch bumped in system_config
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute("DELETE FROM app_updates WHERE package_name = 'sonarr'", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO system_config (key, value, updated_at)
+                 VALUES ('package_lifecycle_epoch', '1', CURRENT_TIMESTAMP)
+                 ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = CURRENT_TIMESTAMP",
+                [],
+            )
+            .unwrap();
+        }
+        let after = get_package_update_map();
+        assert!(
+            !after.contains_key("sonarr"),
+            "epoch bump must evict removed app from PACKAGE_UPDATE_CACHE"
+        );
+    }
+
+    #[test]
+    fn stale_snapshot_epoch_cannot_resurrect_removed_package_after_cache_advances() {
+        if !isolated(
+            "workers::package_updates::watcher::watcher_parity_tests::stale_snapshot_epoch_cannot_resurrect_removed_package_after_cache_advances",
+        ) {
+            return;
+        }
+        let db_path = "/tmp/af-stale-epoch-test.sqlite";
+        let mut cache: HashMap<String, PackageUpdateRecord> = HashMap::new();
+
+        // Advance cache to epoch 2 (post-removal empty state)
+        let mut post_remove_snapshot: HashMap<String, PackageUpdateRecord> = HashMap::new();
+        apply_package_update_snapshot_to_cache(&mut cache, db_path, "2", &mut post_remove_snapshot);
+        assert!(cache.is_empty());
+
+        // A concurrent reader captured a stale snapshot at epoch 1 containing removed 'sonarr'
+        let mut stale_snapshot = HashMap::from([(
+            "sonarr".to_string(),
+            PackageUpdateRecord {
+                package_id: "sonarr".to_string(),
+                installed: true,
+                installed_version: "4.0.0".to_string(),
+                latest_version: "4.0.1".to_string(),
+                update_available: true,
+                release_url: String::new(),
+                checked_at: "2026-11-26T00:00:00Z".to_string(),
+                error: String::new(),
+                source_key: String::new(),
+            },
+        )]);
+
+        apply_package_update_snapshot_to_cache(&mut cache, db_path, "1", &mut stale_snapshot);
+        assert!(
+            !cache.contains_key("sonarr"),
+            "stale snapshot epoch must not resurrect removed package in cache"
+        );
+        assert!(
+            !stale_snapshot.contains_key("sonarr"),
+            "stale snapshot response must reflect current cache instead of resurrected package"
+        );
+        assert_eq!(PACKAGE_UPDATE_CACHE_EPOCH.lock().unwrap().as_str(), "2");
+
+        // Advancing to epoch 3 accepts fresh records cleanly
+        let mut fresh_snapshot = HashMap::from([(
+            "radarr".to_string(),
+            PackageUpdateRecord {
+                package_id: "radarr".to_string(),
+                installed: true,
+                installed_version: "5.0.0".to_string(),
+                latest_version: "5.1.0".to_string(),
+                update_available: true,
+                release_url: String::new(),
+                checked_at: "2026-11-27T00:00:00Z".to_string(),
+                error: String::new(),
+                source_key: String::new(),
+            },
+        )]);
+        apply_package_update_snapshot_to_cache(&mut cache, db_path, "3", &mut fresh_snapshot);
+        assert!(cache.contains_key("radarr"));
+        assert!(!cache.contains_key("sonarr"));
+        assert_eq!(PACKAGE_UPDATE_CACHE_EPOCH.lock().unwrap().as_str(), "3");
+    }
+
+    #[test]
+    fn stale_probe_epoch_cannot_resurrect_removed_package_in_sqlite_or_cache() {
+        if !isolated(
+            "workers::package_updates::watcher::watcher_parity_tests::stale_probe_epoch_cannot_resurrect_removed_package_in_sqlite_or_cache",
+        ) {
+            return;
+        }
+        let _fixture = Fixture::new();
+        af_db::init_db().unwrap();
+        ensure_app_updates_columns();
+
+        let (probe_db_path, probe_epoch) = capture_package_lifecycle_snapshot();
+        assert_eq!(probe_epoch, "");
+
+        // Seed and warm cache at initial epoch, then simulate concurrent removal + epoch bump.
+        let initial_record = PackageUpdateRecord {
+            package_id: "sonarr".to_string(),
+            installed: true,
+            installed_version: "4.0.0".to_string(),
+            latest_version: "4.0.0".to_string(),
+            update_available: false,
+            release_url: String::new(),
+            checked_at: "2026-11-26T00:00:00Z".to_string(),
+            error: String::new(),
+            source_key: String::new(),
+        };
+        assert!(!persist_and_cache_package_update_for_epoch(
+            &initial_record,
+            &probe_db_path,
+            &probe_epoch
+        ));
+        assert!(get_package_update_map().contains_key("sonarr"));
+
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute("DELETE FROM app_updates WHERE package_name = 'sonarr'", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO system_config (key, value, updated_at)
+                 VALUES ('package_lifecycle_epoch', '1', CURRENT_TIMESTAMP)
+                 ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = CURRENT_TIMESTAMP",
+                [],
+            )
+            .unwrap();
+        }
+
+        // In-flight probe started at probe_epoch ("") finishes after epoch advanced to "1".
+        let stale_record = PackageUpdateRecord {
+            package_id: "sonarr".to_string(),
+            installed: true,
+            installed_version: "4.0.0".to_string(),
+            latest_version: "4.1.0".to_string(),
+            update_available: true,
+            release_url: "https://github.com/Sonarr/Sonarr/releases/tag/v4.1.0".to_string(),
+            checked_at: "2026-11-27T00:00:00Z".to_string(),
+            error: String::new(),
+            source_key: String::new(),
+        };
+        let notify =
+            persist_and_cache_package_update_for_epoch(&stale_record, &probe_db_path, &probe_epoch);
+        assert!(
+            !notify,
+            "stale probe epoch must never emit an update notification"
+        );
+
+        let sqlite_count: i64 = af_db::get_conn()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM app_updates WHERE package_name = 'sonarr'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sqlite_count, 0,
+            "stale probe epoch must not resurrect removed package in SQLite app_updates"
+        );
+        assert!(
+            !PACKAGE_UPDATE_CACHE.lock().unwrap().contains_key("sonarr"),
+            "stale probe epoch must not resurrect removed package in PACKAGE_UPDATE_CACHE"
+        );
+        assert!(!get_package_update_map().contains_key("sonarr"));
+
+        // Mismatched DB path must also abort without writing SQLite or cache.
+        let wrong_db_record = PackageUpdateRecord {
+            package_id: "lidarr".to_string(),
+            installed: true,
+            installed_version: "2.0.0".to_string(),
+            latest_version: "2.1.0".to_string(),
+            update_available: true,
+            release_url: String::new(),
+            checked_at: "2026-11-27T00:00:00Z".to_string(),
+            error: String::new(),
+            source_key: String::new(),
+        };
+        assert!(!persist_and_cache_package_update_for_epoch(
+            &wrong_db_record,
+            "/tmp/non-matching-db-path.sqlite",
+            "1"
+        ));
+        assert!(!get_package_update_map().contains_key("lidarr"));
+
+        // Fresh probe captured at current epoch ("1") persists, caches, and notifies once.
+        let (fresh_db_path, fresh_epoch) = capture_package_lifecycle_snapshot();
+        assert_eq!(fresh_epoch, "1");
+        let fresh_record = PackageUpdateRecord {
+            package_id: "radarr".to_string(),
+            installed: true,
+            installed_version: "5.0.0".to_string(),
+            latest_version: "5.1.0".to_string(),
+            update_available: true,
+            release_url: "https://github.com/Radarr/Radarr/releases/tag/v5.1.0".to_string(),
+            checked_at: "2026-11-27T00:01:00Z".to_string(),
+            error: String::new(),
+            source_key: String::new(),
+        };
+        assert!(persist_and_cache_package_update_for_epoch(
+            &fresh_record,
+            &fresh_db_path,
+            &fresh_epoch
+        ));
+        assert!(
+            !persist_and_cache_package_update_for_epoch(
+                &fresh_record,
+                &fresh_db_path,
+                &fresh_epoch
+            ),
+            "repeated persist with update_available=true must not re-notify"
+        );
+        let map = get_package_update_map();
+        assert!(map.contains_key("radarr"));
+        assert!(!map.contains_key("sonarr"));
+    }
+
+    #[test]
+    fn af_db_lifecycle_ingress_commits_atomically_invalidate_updates_and_bump_epoch_for_watcher() {
+        if !isolated(
+            "workers::package_updates::watcher::watcher_parity_tests::af_db_lifecycle_ingress_commits_atomically_invalidate_updates_and_bump_epoch_for_watcher",
+        ) {
+            return;
+        }
+        let _fixture = Fixture::new();
+        af_db::init_db().unwrap();
+        ensure_app_updates_columns();
+        {
+            let conn = af_db::get_conn().unwrap();
+            af_release::lifecycle::initialize_schema(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO app_updates (package_name, installed_version, latest_version, update_available, checked_at, last_error)
+                 VALUES ('autodlirssi', '1.0.0', '1.1.0', 1, '2026-11-26T00:00:00Z', '')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO package_lifecycle_jobs (package_id, job_id, action, status, started_at, service_units)
+                 VALUES ('autodl', 'http-update-1', 'update', 'updating', '2026-11-27T00:00:00Z', '[\"autodlirssi\"]')",
+                [],
+            )
+            .unwrap();
+        }
+        let (probe_db_path, probe_epoch) = capture_package_lifecycle_snapshot();
+        assert!(get_package_update_map().contains_key("autodlirssi"));
+
+        // HTTP API lifecycle path (`set_app_ingress_config_for_lifecycle`) atomically deletes
+        // alias-matched `app_updates` and bumps `package_lifecycle_epoch` in the same transaction.
+        af_db::set_app_ingress_config_for_lifecycle(
+            &af_models::AppIngressConfig {
+                app_name: "autodl".into(),
+                listen_port: 18444,
+                ..Default::default()
+            },
+            "http-update-1",
+            "update",
+        )
+        .unwrap();
+
+        assert!(!get_package_update_map().contains_key("autodlirssi"));
+        let stale = PackageUpdateRecord {
+            package_id: "autodlirssi".to_string(),
+            installed: true,
+            installed_version: "1.0.0".to_string(),
+            latest_version: "1.1.0".to_string(),
+            update_available: true,
+            release_url: String::new(),
+            checked_at: "2026-11-27T00:00:00Z".to_string(),
+            error: String::new(),
+            source_key: String::new(),
+        };
+        assert!(
+            !persist_and_cache_package_update_for_epoch(&stale, &probe_db_path, &probe_epoch),
+            "stale in-flight probe captured before HTTP lifecycle commit must be discarded"
+        );
+        assert!(!get_package_update_map().contains_key("autodlirssi"));
+
+        // Remove lifecycle path (`synchronize_lifecycle_ingress`) also bumps epoch atomically.
+        let (post_update_db, post_update_epoch) = capture_package_lifecycle_snapshot();
+        assert_eq!(post_update_epoch, "1");
+        {
+            let mut conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO app_updates (package_name, installed_version, latest_version, update_available, checked_at, last_error)
+                 VALUES ('AutoDLIRSSI', '1.1.0', '1.2.0', 1, '2026-11-27T00:00:00Z', '')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE package_lifecycle_jobs SET job_id='rm-1', action='remove', status='uninstalling' WHERE package_id='autodl'",
+                [],
+            )
+            .unwrap();
+            af_db::synchronize_lifecycle_ingress(
+                &mut conn, "autodl", "remove", "rm-1", 0, false, "",
+            )
+            .unwrap();
+        }
+        let (_, post_remove_epoch) = capture_package_lifecycle_snapshot();
+        assert_eq!(post_remove_epoch, "2");
+        assert!(!persist_and_cache_package_update_for_epoch(
+            &stale,
+            &post_update_db,
+            &post_update_epoch
+        ));
+        assert!(!get_package_update_map().contains_key("AutoDLIRSSI"));
+    }
 }

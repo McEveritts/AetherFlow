@@ -13,7 +13,7 @@ use af_models::{
     resolve_package_fs_root, resolve_package_lock_name, resolve_path_for_fs_root,
     PackageReceiptStatus, MAX_PACKAGE_RECEIPT_BYTES,
 };
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::env;
@@ -144,7 +144,9 @@ pub fn candidate_package_sqlite_dbs(explicit_root: Option<&Path>) -> Vec<PathBuf
         push_unique(PathBuf::from(
             "/opt/AetherFlow/backend/data/aetherflow.sqlite",
         ));
-        push_unique(PathBuf::from("data/aetherflow.sqlite"));
+        if !crate::runner_is_root() {
+            push_unique(PathBuf::from("data/aetherflow.sqlite"));
+        }
     }
 
     candidate_dbs
@@ -217,10 +219,7 @@ pub fn inspect_package_purge_state_with_conn(
             if !matches!(inspect_receipt_file(&db_path, fs_root.as_deref()), Ok(true)) {
                 continue;
             }
-            if let Ok(conn) = Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-            ) {
+            if let Ok(conn) = af_release::fs_security::open_sqlite_isolated_readonly(&db_path) {
                 let _ = conn.busy_timeout(std::time::Duration::from_secs(2));
                 inspect_db_retention_evidence(
                     &conn,

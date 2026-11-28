@@ -166,6 +166,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         gh.write_text(
             "#!/usr/bin/env python3\n"
             "import json, os, pathlib, sys\n"
+            "if sys.argv[1:3] == ['api', 'user']:\n"
+            "    print(os.environ.get('TEST_GH_LOGIN', 'McEveritts'))\n"
+            "    sys.exit(0)\n"
             "pathlib.Path(os.environ['TEST_GH_COMMANDS']).write_text(json.dumps(sys.argv[1:]))\n"
             "if '--notes-file' in sys.argv:\n"
             "    notes_file = pathlib.Path(sys.argv[sys.argv.index('--notes-file') + 1])\n"
@@ -184,6 +187,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "GITHUB_RUN_ATTEMPT": "1",
             "REQUESTED_CHANNEL": "",
             "ATTEST_BUNDLE_PATH": str(self.attest_bundle),
+            "GH_TOKEN": "github_pat_test_release_publish_mock",
             "TEST_GH_COMMANDS": str(self.commands),
             "TEST_RELEASE_NOTES": str(self.notes),
         }
@@ -252,6 +256,222 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.commands.exists())
+
+    def test_publish_fails_closed_without_pat_or_with_ephemeral_github_token(self):
+        tag = "v4.0.0-nightly.123.1"
+        self.write_release_archives(tag)
+        for bad_token in ("", "ghs_ephemeralActionsToken123456"):
+            with self.subTest(bad_token=bad_token):
+                result = self.run_step(
+                    "Publish to GitHub Releases",
+                    RELEASE_TAG=tag,
+                    GH_TOKEN=bad_token,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.commands.exists())
+        wrong_user = self.run_step(
+            "Publish to GitHub Releases",
+            RELEASE_TAG=tag,
+            TEST_GH_LOGIN="github-actions[bot]",
+        )
+        self.assertNotEqual(wrong_user.returncode, 0)
+        self.assertIn("expected 'McEveritts'", wrong_user.stderr)
+        self.assertFalse(self.commands.exists())
+
+        workflow = WORKFLOW.read_text()
+        publish_job = workflow.split("  release-publish:\n", 1)[1]
+        self.assertIn("    environment: release-publish\n", publish_job)
+        self.assertIn("      contents: read\n", publish_job)
+        self.assertNotIn("      contents: write\n", publish_job)
+        self.assertIn("      id-token: write\n", publish_job)
+        self.assertIn("      attestations: write\n", publish_job)
+        self.assertIn("          GH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}\n", publish_job)
+        self.assertNotIn("GH_TOKEN: ${{ github.token }}", publish_job)
+        self.assertIn(
+            "if: github.ref == 'refs/heads/nightly' || github.ref == 'refs/heads/Nightly' || startsWith(github.ref, 'refs/tags/v')",
+            publish_job,
+        )
+        self.assertNotIn("refs/heads/main", publish_job)
+        self.assertNotIn("refs/heads/master", publish_job)
+
+    def test_workflow_concurrency_dag_stays_within_18_job_ceiling(self):
+        import yaml
+
+        def job_concurrency_weight(job_def):
+            strategy = job_def.get("strategy") or {}
+            matrix = strategy.get("matrix") or {}
+            if not matrix:
+                total = 1
+            elif "include" in matrix and len(matrix) == 1:
+                total = len(matrix["include"])
+            else:
+                total = 1
+                for k, v in matrix.items():
+                    if k in ("include", "exclude"):
+                        continue
+                    total *= len(v)
+                total += len(matrix.get("include", []))
+            cap = strategy.get("max-parallel")
+            return min(total, cap) if isinstance(cap, int) else total
+
+        def max_weighted_antichain(jobs_map, skipped_jobs=()):
+            active = {name: cfg for name, cfg in jobs_map.items() if name not in skipped_jobs}
+            names = list(active.keys())
+            weights = {n: job_concurrency_weight(active[n]) for n in names}
+            # Build transitive reachability (ancestors) within active DAG.
+            ancestors = {}
+            for n in names:
+                seen = set()
+                stack = list(
+                    [active[n]["needs"]] if isinstance(active[n].get("needs"), str)
+                    else list(active[n].get("needs") or [])
+                )
+                while stack:
+                    cur = stack.pop()
+                    if cur in active and cur not in seen:
+                        seen.add(cur)
+                        dep = active[cur].get("needs")
+                        if isinstance(dep, str):
+                            stack.append(dep)
+                        elif isinstance(dep, list):
+                            stack.extend(dep)
+                ancestors[n] = seen
+
+            best = 0
+            # Exact branch-and-bound max weighted independent set on comparability graph (<= 12 nodes).
+            def dfs(idx, chosen, cur_weight):
+                nonlocal best
+                if cur_weight > best:
+                    best = cur_weight
+                if idx == len(names):
+                    return
+                rem = sum(weights[names[j]] for j in range(idx, len(names)))
+                if cur_weight + rem <= best:
+                    return
+                node = names[idx]
+                if all(node not in ancestors[c] and c not in ancestors[node] for c in chosen):
+                    dfs(idx + 1, chosen + [node], cur_weight + weights[node])
+                dfs(idx + 1, chosen, cur_weight)
+
+            dfs(0, [], 0)
+            return best
+
+        wf_dir = WORKFLOW.parent
+        ci = yaml.safe_load((wf_dir / "ci.yml").read_text())
+        sec = yaml.safe_load((wf_dir / "security.yml").read_text())
+        rel = yaml.safe_load((wf_dir / "release.yml").read_text())
+        pages = yaml.safe_load((wf_dir / "deploy-pages.yml").read_text())
+
+        # Separate workflow concurrency groups prevent cross-workflow cancellation footguns.
+        self.assertNotEqual(ci["concurrency"]["group"], rel["concurrency"]["group"])
+        self.assertNotEqual(sec["concurrency"]["group"], rel["concurrency"]["group"])
+
+        # Lock exact workflow job sets so newly added uncapped jobs cannot slip past the ceiling silently.
+        self.assertEqual(
+            set(ci["jobs"].keys()),
+            {
+                "release-routing",
+                "node-installers",
+                "palate-installer",
+                "jellyseerr-installer",
+                "release-lifecycle-smoke",
+                "website",
+                "frontend-rs-checks",
+                "frontend-rs",
+                "backend-rs-checks",
+                "backend-rs",
+                "embedded-e2e",
+                "embedded-contracts",
+            },
+        )
+        self.assertEqual(
+            set(sec["jobs"].keys()),
+            {"secret-scan", "rust-security", "frontend-rs-security", "npm-security"},
+        )
+        self.assertEqual(
+            set(rel["jobs"].keys()),
+            {
+                "validate-release",
+                "security-python",
+                "security-frontend",
+                "security-gate",
+                "build-wasm",
+                "package-amd64",
+                "package-arm64",
+                "package-armv7-speedtest",
+                "release-build",
+                "release-e2e-amd64",
+                "release-arm64-runtime",
+                "release-publish",
+            },
+        )
+        self.assertEqual(set(pages["jobs"].keys()), {"build", "deploy"})
+
+        # security.yml: no nightly push triggers; 2 disjoint serial chains with !cancelled() guards.
+        sec_on = sec.get("on", sec.get(True))
+        sec_push_branches = sec_on["push"]["branches"]
+        self.assertNotIn("nightly", sec_push_branches)
+        self.assertNotIn("Nightly", sec_push_branches)
+        self.assertEqual(sec["jobs"]["rust-security"]["needs"], ["secret-scan"])
+        self.assertEqual(sec["jobs"]["frontend-rs-security"]["needs"], ["npm-security"])
+        for chained in ("rust-security", "frontend-rs-security"):
+            self.assertIn("always()", sec["jobs"][chained]["if"])
+            self.assertIn("!cancelled()", sec["jobs"][chained]["if"])
+
+        # ci.yml: matrix caps, full always()+!cancelled()+success/skipped check->build guards, nightly dedup.
+        ci_jobs = ci["jobs"]
+        self.assertEqual(ci_jobs["node-installers"]["strategy"]["max-parallel"], 2)
+        self.assertEqual(ci_jobs["embedded-e2e"]["strategy"]["max-parallel"], 2)
+        self.assertEqual(ci_jobs["embedded-contracts"]["strategy"]["max-parallel"], 3)
+        for build_name, check_name in (("backend-rs", "backend-rs-checks"), ("frontend-rs", "frontend-rs-checks")):
+            self.assertEqual(ci_jobs[build_name]["needs"], [check_name])
+            cond = ci_jobs[build_name]["if"]
+            self.assertIn("always()", cond)
+            self.assertIn("!cancelled()", cond)
+            self.assertIn(f"needs.{check_name}.result == 'success'", cond)
+            self.assertIn(f"needs.{check_name}.result == 'skipped'", cond)
+        skipped_on_nightly = (
+            "node-installers",
+            "palate-installer",
+            "jellyseerr-installer",
+            "frontend-rs-checks",
+            "backend-rs-checks",
+        )
+        for job_name in skipped_on_nightly:
+            cond = ci_jobs[job_name]["if"]
+            self.assertIn("refs/heads/nightly", cond)
+            self.assertIn("refs/heads/Nightly", cond)
+        for kept_on_nightly in ("release-routing", "release-lifecycle-smoke", "website", "embedded-contracts"):
+            self.assertNotIn("if", ci_jobs[kept_on_nightly])
+
+        # release.yml: matrix caps, security-gate staging, and Node 22.19.0 floor parity in security-python.
+        rel_jobs = rel["jobs"]
+        self.assertEqual(rel_jobs["security-python"]["strategy"]["max-parallel"], 2)
+        self.assertEqual(rel_jobs["release-e2e-amd64"]["strategy"]["max-parallel"], 4)
+        for build_job in ("build-wasm", "package-amd64", "package-arm64", "package-armv7-speedtest"):
+            self.assertEqual(rel_jobs[build_job]["needs"], ["validate-release", "security-gate"])
+        self.assertTrue(
+            any(
+                isinstance(step, dict)
+                and str(step.get("uses", "")).startswith("actions/setup-node@")
+                and str((step.get("with") or {}).get("node-version")) == "22.19.0"
+                for step in rel_jobs["security-python"]["steps"]
+            ),
+            "release.yml :: security-python must pin Node 22.19.0 engine floor for parity with ci.yml",
+        )
+
+        # Dynamically computed exact worst-case weighted DAG antichains across all triggers.
+        sec_max = max_weighted_antichain(sec["jobs"])
+        ci_pr_or_main_max = max_weighted_antichain(ci["jobs"])
+        ci_nightly_max = max_weighted_antichain(ci["jobs"], skipped_jobs=skipped_on_nightly)
+        rel_max = max_weighted_antichain(rel["jobs"])
+        pages_max = max_weighted_antichain(pages["jobs"])
+
+        self.assertEqual((ci_pr_or_main_max, ci_nightly_max, sec_max, rel_max, pages_max), (12, 8, 2, 7, 1))
+        self.assertLessEqual(ci_pr_or_main_max + sec_max, 18)  # PR: 14
+        self.assertLessEqual(ci_pr_or_main_max + sec_max + pages_max, 18)  # main + pages: 15
+        self.assertLessEqual(ci_nightly_max + rel_max + sec_max, 18)  # nightly + release + Monday cron: 17
+        self.assertLessEqual(rel_max + sec_max, 18)  # v* tag + Monday cron: 9
 
     def test_release_integrity_requires_the_complete_verified_asset_set(self):
         tag = "v4.0.0-nightly.123.1"
@@ -357,6 +577,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("plugins/telemetry-inspector/${plugin_asset}", gate)
         self.assertIn("for asset in packages.json package_automation.json; do", gate)
         self.assertIn('test ! -e "${RELEASE_E2E_DIR}/config/openapi-v1.yaml"', gate)
+        self.assertIn("EGM.md", gate)
+        self.assertIn("*_DRIFT_REPORT.md", gate)
         self.assertIn('test "$(cat "${RELEASE_E2E_DIR}/.version")" = "${VERSION_STAMP}"', gate)
         package = "Package Release Tarball & SHA-256 Manifest"
         self.assertIn("BUILD_FRONTEND=0", step_script(package))
@@ -431,6 +653,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         cargo.chmod(0o755)
         for name in ("deploy/__pycache__/host.pyc",
                      "packages/tool/tsconfig.tsbuildinfo", "packages/tool/node_modules/cache.js",
+                     "packages/EGM.md", "deploy/EGM.md", "plugins/telemetry-inspector/EGM.md",
+                     "packages/2026-11-26_DRIFT_REPORT.md", "deploy/goldfish_review_report.md",
                      "plugins/telemetry-inspector/backend/__pycache__/runtime.cpython-311.pyc",
                      "web/dist/.pytest_cache/state", "web/dist/.mypy_cache/state"):
             artifact = self.root / name
@@ -493,7 +717,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertFalse(any(name.startswith("./plugins/sdk-template-rust")
                                  or name == "./plugins/README.md" or "__pycache__" in name
                                  or ".pytest_cache" in name or ".mypy_cache" in name
-                                 or "node_modules" in name or name.endswith(".tsbuildinfo") for name in names))
+                                 or "node_modules" in name or name.endswith(".tsbuildinfo")
+                                 or name.endswith("/EGM.md") or name == "./EGM.md"
+                                 or name.endswith("_DRIFT_REPORT.md")
+                                 or name.endswith("/goldfish_review_report.md")
+                                 or name == "./goldfish_review_report.md" for name in names))
             for member in archive.getmembers():
                 self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 1794706390))
             for name in ("aetherflow-api", "bin/af", "bin/speedtest-backend", "bin/af-transcode",
@@ -523,25 +751,32 @@ class ReleaseWorkflowTests(unittest.TestCase):
             stage = self.root / f"release-dist/linux-{arch}/bin"
             stage.mkdir(parents=True)
             (stage / "speedtest-backend").write_bytes(f"staged {arch}".encode())
-        (self.root / "backend-rs").mkdir()
+        # Must fail fast if prebuilt armv7 artifact is absent (no dead cargo fallback).
+        cargo_invoked = self.root / "cargo-invoked"
         cargo = self.root / "bin/cargo"
-        cargo.write_text(
-            "#!/bin/sh\nset -eu\n"
-            'test "$1 $2 $3 $4 $6 $7 $8 $9" = "build --release --locked --target -p af-librespeed --bin speedtest-backend"\n'
-            'test "$AF_BUILD_VERSION" = "4.0.0-nightly.123.1"\n'
-            'test "$5" = armv7-unknown-linux-gnueabihf\n'
-            'test "$CC_armv7_unknown_linux_gnueabihf" = arm-linux-gnueabihf-gcc\n'
-            'test "$CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER" = arm-linux-gnueabihf-gcc\n'
-            'mkdir -p "target/$5/release"\n'
-            'printf "%s" "$5" > "target/$5/release/speedtest-backend"\n'
-        )
+        cargo.write_text(f"#!/bin/sh\ntouch '{cargo_invoked}'\nexit 0\n")
         cargo.chmod(0o755)
+        missing_armv7 = self.run_step(
+            "Build and Package Standalone Rust LibreSpeed Archives",
+            RELEASE_TAG=tag,
+            SOURCE_DATE_EPOCH="1794706390",
+        )
+        self.assertNotEqual(missing_armv7.returncode, 0)
+        self.assertIn("Missing prebuilt ARMv7 speedtest-backend artifact", missing_armv7.stderr)
+        self.assertFalse(cargo_invoked.exists())
+
+        # With all 3 prebuilt binaries staged, packages deterministic GNU archives.
+        armv7_stage = self.root / "release-dist/linux-armv7/bin"
+        armv7_stage.mkdir(parents=True)
+        (armv7_stage / "speedtest-backend").write_bytes(b"staged armv7")
         result = self.run_step("Build and Package Standalone Rust LibreSpeed Archives",
                                RELEASE_TAG=tag, SOURCE_DATE_EPOCH="1794706390")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(cargo_invoked.exists())
         for archive_path, expected in zip(
-            archives[1:], (b"staged amd64", b"staged arm64", b"armv7-unknown-linux-gnueabihf")
+            archives[1:], (b"staged amd64", b"staged arm64", b"staged armv7")
         ):
+            self.assertEqual(archive_path.read_bytes()[4:8], b"\0" * 4)
             with self.subTest(archive=archive_path.name), tarfile.open(archive_path) as archive:
                 self.assertEqual(archive.getnames(), ["speedtest-backend"])
                 entry = archive.getmember("speedtest-backend")
@@ -735,6 +970,116 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         for member in required_members:
             self.assertIn(member, names, f"Required bootstrap member missing: {member}")
+
+        # Verify exact-basename EGM.md / *_DRIFT_REPORT.md / goldfish_review_report.md pathspecs in a synthetic repo.
+        synth_repo = self.root / "synth-bootstrap-repo"
+        synth_repo.mkdir()
+        for rel, body in (
+            ("EGM.md", "# root blueprint\n"),
+            ("backend-rs/EGM.md", "# nested blueprint\n"),
+            ("backend-rs/src/deep/EGM.md", "# deep blueprint\n"),
+            ("backend-rs/CUSTOM_EGM.md", "# unrelated doc ending in EGM.md\n"),
+            ("2026-11-26_DRIFT_REPORT.md", "# drift report\n"),
+            ("nested/2026-11-26_DRIFT_REPORT.md", "# nested drift report\n"),
+            ("goldfish_review_report.md", "# review report\n"),
+            ("nested/goldfish_review_report.md", "# nested review report\n"),
+            ("backend-rs/Cargo.toml", "[workspace]\n"),
+        ):
+            p = synth_repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body)
+        git_env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        subprocess.run(["git", "init", "-q"], cwd=synth_repo, env=git_env, check=True)
+        subprocess.run(["git", "add", "."], cwd=synth_repo, env=git_env, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=synth_repo, env=git_env, check=True)
+        synth_archive = self.root / "synth-bootstrap.tar.gz"
+        synth_res = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", archive_cmd],
+            cwd=synth_repo,
+            env={**git_env, "OUT_ARCHIVE": str(synth_archive)},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(synth_res.returncode, 0, synth_res.stdout + synth_res.stderr)
+        with tarfile.open(synth_archive, "r:gz") as archive:
+            synth_names = set(archive.getnames())
+        self.assertIn("AetherFlow/backend-rs/Cargo.toml", synth_names)
+        self.assertIn("AetherFlow/backend-rs/CUSTOM_EGM.md", synth_names)
+        for excluded in (
+            "AetherFlow/EGM.md",
+            "AetherFlow/backend-rs/EGM.md",
+            "AetherFlow/backend-rs/src/deep/EGM.md",
+            "AetherFlow/2026-11-26_DRIFT_REPORT.md",
+            "AetherFlow/nested/2026-11-26_DRIFT_REPORT.md",
+            "AetherFlow/goldfish_review_report.md",
+            "AetherFlow/nested/goldfish_review_report.md",
+        ):
+            self.assertNotIn(excluded, synth_names)
+
+    def test_create_plugin_sdk_strips_egm_and_drift_artifacts(self):
+        repo_root = WORKFLOW.parents[2]
+        # Copy script + template into an isolated fixture repo and seed internal docs/symlinks so this test
+        # never passes vacuously on a clean CI checkout with no untracked EGM.md files.
+        fixture_repo = self.root / "sdk-fixture-repo"
+        (fixture_repo / "scripts").mkdir(parents=True)
+        shutil.copy2(repo_root / "scripts/create-plugin-sdk.sh", fixture_repo / "scripts/create-plugin-sdk.sh")
+        shutil.copytree(repo_root / "plugins/sdk-template-rust", fixture_repo / "plugins/sdk-template-rust")
+        tpl = fixture_repo / "plugins/sdk-template-rust"
+        (tpl / "EGM.md").write_text("# root template blueprint\n")
+        (tpl / "2026-11-26_DRIFT_REPORT.md").write_text("# drift report\n")
+        (tpl / "goldfish_review_report.md").write_text("# review report\n")
+        (tpl / "CUSTOM_EGM.md").write_text("# unrelated user doc\n")
+        sym_egm = tpl / "backend/EGM.md"
+        sym_egm.unlink(missing_ok=True)
+        sym_egm.symlink_to("../EGM.md")
+
+        out_dir = self.root / "scaffold-plugin"
+        result = subprocess.run(
+            [
+                "bash",
+                str(fixture_repo / "scripts/create-plugin-sdk.sh"),
+                "wave0-test-plugin",
+                "Wave 0 Test Plugin",
+                str(out_dir),
+                "rust",
+            ],
+            cwd=fixture_repo,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((out_dir / "plugin.manifest.json").is_file())
+        self.assertTrue((out_dir / "backend/src/lib.rs").is_file())
+        self.assertTrue((out_dir / "CUSTOM_EGM.md").is_file())
+        leaked = [
+            str(p.relative_to(out_dir))
+            for p in out_dir.rglob("*")
+            if p.name == "EGM.md"
+            or p.name.endswith("_DRIFT_REPORT.md")
+            or p.name == "goldfish_review_report.md"
+        ]
+        self.assertEqual(leaked, [], f"Internal EGM/drift docs leaked into SDK scaffold: {leaked}")
+
+    def test_build_wasm_frontend_and_bootstrap_runtime_checks_strip_internal_docs(self):
+        repo_root = WORKFLOW.parents[2]
+        wasm_script = (repo_root / "scripts/build_wasm_frontend.sh").read_text()
+        self.assertIn("-name 'EGM.md'", wasm_script)
+        self.assertIn("-name '*_DRIFT_REPORT.md'", wasm_script)
+        self.assertIn("-name 'goldfish_review_report.md'", wasm_script)
+        self.assertLess(
+            wasm_script.index("-name 'EGM.md'"),
+            wasm_script.index("compress-assets"),
+            "build_wasm_frontend.sh must strip EGM.md/drift docs before compress-assets generates .gz/.br sidecars",
+        )
+        bootstrap_step = step_script("Build and Package Standalone Rust LibreSpeed Archives")
+        self.assertIn("tar -ztf release-dist/aetherflow-bootstrap.tar.gz", bootstrap_step)
+        self.assertIn("Internal EGM/drift documentation leaked into aetherflow-bootstrap.tar.gz", bootstrap_step)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ pub mod fs_security;
 pub mod health;
 pub mod lifecycle;
 pub mod lock;
+pub mod process_group;
 pub mod runtime;
 pub mod snapshot;
 pub mod symlink;

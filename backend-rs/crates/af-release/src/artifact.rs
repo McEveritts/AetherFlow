@@ -9,7 +9,8 @@ mod tests;
 
 pub use archive::{
     extract_and_validate_release_archive, prepare_release_permissions,
-    resolve_managed_current_source_path, simulate_offline_artifact, stage_running_release_manager,
+    prepare_release_permissions_with_options, resolve_managed_current_source_path,
+    simulate_offline_artifact, stage_running_release_manager,
 };
 pub use provider::{
     parse_stable_tag_from_redirect_url, resolve_stable_tag_from_latest_redirect, ArtifactProvider,
@@ -21,15 +22,17 @@ use crate::error::{ReleaseError, ReleaseResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::Duration;
+use tokio::process::Command;
 
 const EMBEDDED_VERIFY_PROVENANCE_PY: &str = include_str!("../../../../deploy/verify-provenance.py");
 const EMBEDDED_LOG_RETENTION_PY: &str = include_str!("../../../../deploy/log-retention.py");
 
 const PROVENANCE_VERIFIER_TIMEOUT: Duration = Duration::from_secs(60);
+/// Per-stream (stdout and stderr each) capture cap for the provenance verifier.
+const PROVENANCE_VERIFIER_OUTPUT_LIMIT: usize = 1024 * 1024;
 
 /// Returns `true` iff `tag` is a canonical v4+ semver release tag
 /// (`^v([4-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([._-][A-Za-z0-9]+)*)?$`).
@@ -140,81 +143,53 @@ pub fn verify_release_provenance_with_token(
     if let Some(bf) = bundle_file {
         cmd.arg("--bundle-file").arg(bf);
     }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    run_provenance_verifier(
+        cmd,
+        artifact_name,
+        expected_digest,
+        PROVENANCE_VERIFIER_TIMEOUT,
+        PROVENANCE_VERIFIER_OUTPUT_LIMIT,
+    )
+}
 
-    let mut child = cmd.spawn().map_err(|e| {
-        ReleaseError::ArtifactVerification(format!(
-            "failed to spawn python3 for Sigstore provenance verification: {}",
-            e
-        ))
-    })?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let feed_res = stdin.write_all(EMBEDDED_VERIFY_PROVENANCE_PY.as_bytes());
-        drop(stdin);
-        if let Err(e) = feed_res {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(ReleaseError::ArtifactVerification(format!(
-                "failed to feed embedded provenance verifier to python3: {}",
+/// Feeds the embedded verifier over stdin and supervises the verifier inside
+/// its own process group via [`crate::process_group`]: stdout/stderr are
+/// bounded, the timeout kills and reaps the whole group (including any
+/// helpers it spawned), and nothing blocks on unbounded pipe reads.
+fn run_provenance_verifier(
+    cmd: Command,
+    artifact_name: &str,
+    expected_digest: &str,
+    timeout: Duration,
+    output_limit: usize,
+) -> ReleaseResult<()> {
+    let output = crate::process_group::output_blocking(
+        cmd,
+        Some(EMBEDDED_VERIFY_PROVENANCE_PY.as_bytes().to_vec()),
+        timeout,
+        output_limit,
+    )
+    .map_err(|e| {
+        ReleaseError::ArtifactVerification(match e.kind() {
+            io::ErrorKind::TimedOut => format!(
+                "Sigstore build provenance verifier timed out after {}s for {}",
+                timeout.as_secs(),
+                artifact_name
+            ),
+            io::ErrorKind::InvalidData => format!(
+                "Sigstore build provenance verifier output exceeded the {} byte capture limit for {}",
+                output_limit, artifact_name
+            ),
+            _ => format!(
+                "failed to run python3 for Sigstore provenance verification: {}",
                 e
-            )));
-        }
-    }
-
-    let stdout_handle = child.stdout.take().map(|mut out| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = out.read_to_end(&mut buf);
-            buf
+            ),
         })
-    });
-    let stderr_handle = child.stderr.take().map(|mut err| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = err.read_to_end(&mut buf);
-            buf
-        })
-    });
+    })?;
 
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st,
-            Ok(None) => {
-                if start.elapsed() >= PROVENANCE_VERIFIER_TIMEOUT {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(ReleaseError::ArtifactVerification(format!(
-                        "Sigstore build provenance verifier timed out after {}s for {}",
-                        PROVENANCE_VERIFIER_TIMEOUT.as_secs(),
-                        artifact_name
-                    )));
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(ReleaseError::ArtifactVerification(format!(
-                    "waiting on Sigstore provenance verifier failed: {}",
-                    e
-                )));
-            }
-        }
-    };
-
-    let stdout_bytes = stdout_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr_bytes = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-
-    if !status.success() {
-        let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
-        let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let detail = if !stderr.is_empty() { stderr } else { stdout };
         return Err(ReleaseError::ArtifactVerification(format!(
             "Sigstore build provenance verification failed for {} (sha256:{}): {}",
@@ -388,4 +363,124 @@ pub fn verify_artifact_checksum(
         });
     }
     Ok(actual)
+}
+
+#[cfg(all(test, unix))]
+mod provenance_process_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn shell(script: &str) -> Command {
+        let mut command = Command::new("/bin/bash");
+        command.args(["-c", script]);
+        command
+    }
+
+    fn scratch() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("af-provenance-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        root
+    }
+
+    fn message(err: ReleaseError) -> String {
+        match err {
+            ReleaseError::ArtifactVerification(msg) => msg,
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    fn pid_alive(pid: i32) -> bool {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, fields)| !matches!(fields.split_whitespace().next(), Some("Z" | "X")))
+    }
+
+    #[test]
+    fn verifier_receives_embedded_script_on_stdin_and_success_passes() {
+        let root = scratch();
+        let captured = root.join("stdin.py");
+        let mut cmd = shell("cat > \"$AF_CAPTURE\"");
+        cmd.env("AF_CAPTURE", &captured);
+        run_provenance_verifier(cmd, "a.tar.gz", "ab", Duration::from_secs(10), 1024).unwrap();
+        assert_eq!(
+            fs::read_to_string(&captured).unwrap(),
+            EMBEDDED_VERIFY_PROVENANCE_PY
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verifier_failure_reports_stderr_then_stdout_detail() {
+        let err = run_provenance_verifier(
+            shell("cat >/dev/null; echo out-detail; echo err-detail >&2; exit 3"),
+            "a.tar.gz",
+            "deadbeef",
+            Duration::from_secs(10),
+            1024,
+        )
+        .unwrap_err();
+        let msg = message(err);
+        assert!(msg.contains("verification failed for a.tar.gz (sha256:deadbeef)"));
+        assert!(msg.contains("err-detail"), "{msg}");
+        let err = run_provenance_verifier(
+            shell("cat >/dev/null; echo only-stdout; exit 1"),
+            "a.tar.gz",
+            "deadbeef",
+            Duration::from_secs(10),
+            1024,
+        )
+        .unwrap_err();
+        assert!(message(err).contains("only-stdout"));
+    }
+
+    #[test]
+    fn verifier_timeout_kills_entire_process_group() {
+        let root = scratch();
+        let pid_file = root.join("helper.pid");
+        let mut cmd = shell("cat >/dev/null; sleep 60 & echo $! > \"$AF_PID\"; wait");
+        cmd.env("AF_PID", &pid_file);
+        let started = std::time::Instant::now();
+        let err = run_provenance_verifier(cmd, "a.tar.gz", "ab", Duration::from_millis(400), 1024)
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(message(err).contains("timed out"));
+        let pid: i32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !pid_alive(pid),
+            "verifier helper pid={pid} survived timeout"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verifier_output_is_bounded() {
+        for script in ["cat >/dev/null; yes", "cat >/dev/null; yes >&2"] {
+            let err = run_provenance_verifier(
+                shell(script),
+                "a.tar.gz",
+                "ab",
+                Duration::from_secs(10),
+                4096,
+            )
+            .unwrap_err();
+            assert!(message(err).contains("capture limit"));
+        }
+    }
+
+    #[test]
+    fn missing_interpreter_is_reported_as_run_failure() {
+        let err = run_provenance_verifier(
+            Command::new("/nonexistent/af-python3"),
+            "a.tar.gz",
+            "ab",
+            Duration::from_secs(10),
+            1024,
+        )
+        .unwrap_err();
+        assert!(message(err).contains("failed to run python3"));
+    }
 }

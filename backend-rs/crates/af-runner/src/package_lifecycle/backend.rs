@@ -4,9 +4,8 @@ use super::admitted_snapshots::{
 use super::coordinator::CoordinatedOperation;
 use af_models::{PackageRunnerRequest, SystemctlRequest};
 use af_release::lifecycle;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures::{future::BoxFuture, StreamExt};
-use rusqlite::Connection;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -40,15 +39,23 @@ pub(super) async fn run_direct(
             "Package must be installed before it can be updated"
         );
     }
-    let conn = Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     if request.action == "remove" && request.delete_data {
-        let inspection = crate::inspect_package_purge_state_with_conn(
-            &package.name,
-            Some(&package.lock_file),
-            environment.fs_root.as_deref(),
-            Some(&conn),
-        )
-        .map_err(anyhow::Error::msg)?;
+        let pkg_name = package.name.clone();
+        let pkg_lock = package.lock_file.clone();
+        let fs_root = environment.fs_root.clone();
+        let db_for_purge = database.clone();
+        let inspection = tokio::task::spawn_blocking(move || {
+            let isolated_db =
+                af_release::fs_security::open_sqlite_isolated_readonly(&db_for_purge).ok();
+            crate::inspect_package_purge_state_with_conn(
+                &pkg_name,
+                Some(&pkg_lock),
+                fs_root.as_deref(),
+                isolated_db.as_deref(),
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .await??;
         match inspection.eligibility {
             crate::PackagePurgeEligibility::Installed
             | crate::PackagePurgeEligibility::RetainedProven => {}
@@ -63,7 +70,8 @@ pub(super) async fn run_direct(
             }
         }
     }
-    let mut operation = CoordinatedOperation::admit(conn, request, package, units)?;
+    let conn = super::coordinator::OwnerScopedConnection::open_hardened(&database, true)?;
+    let mut operation = CoordinatedOperation::admit_scoped(conn, request, package, units)?;
     drop(guard);
     let identity = serde_json::json!({
         "job_id": operation.request.lifecycle_job_id,
@@ -108,56 +116,32 @@ impl LifecycleBackend for HostBackend {
 
     fn active<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
         Box::pin(async move {
-            use tokio::io::AsyncReadExt;
-            let mut child = tokio::process::Command::new("systemctl")
-                .args(["show", "--property=ActiveState", "--value", "--", unit])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .spawn()?;
-            let mut stdout = child
-                .stdout
-                .take()
-                .context("Application status pipe missing")?
-                .take(65);
-            let mut bytes = Vec::new();
-            let read = tokio::time::timeout(Duration::from_secs(5), async {
-                stdout.read_to_end(&mut bytes).await?;
-                child.wait().await
-            })
-            .await;
-            let status = match read {
-                Ok(Ok(status)) => status,
-                error => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    anyhow::bail!("Cannot confirm application service state: {error:?}");
-                }
-            };
+            let mut cmd = tokio::process::Command::new("systemctl");
+            cmd.args(["show", "--property=ActiveState", "--value", "--", unit]);
+            let output = crate::bounded_command::output(cmd, Duration::from_secs(5), 4096)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("Cannot confirm application service state: {error:?}")
+                })?;
             anyhow::ensure!(
-                status.success() && bytes.len() < 65,
+                output.status.success() && output.stdout.len() < 65,
                 "Cannot inspect application service state"
             );
-            let status = String::from_utf8(bytes)?;
+            let status = String::from_utf8(output.stdout)?;
             parse_systemd_active_state(&status)
         })
     }
 
     fn quiescent<'a>(&'a self, unit: &'a str) -> BoxFuture<'a, Result<bool>> {
         Box::pin(async move {
-            let output = tokio::time::timeout(
-                Duration::from_secs(5),
-                tokio::process::Command::new("systemctl")
-                    .args(["is-active", "--", unit])
-                    .output(),
-            )
-            .await;
-            let output = match output {
-                Ok(Ok(out)) => out,
-                error => {
-                    anyhow::bail!("Cannot confirm application service state: {error:?}");
-                }
-            };
+            let mut is_active_cmd = tokio::process::Command::new("systemctl");
+            is_active_cmd.args(["is-active", "--", unit]);
+            let output =
+                crate::bounded_command::output(is_active_cmd, Duration::from_secs(5), 64 * 1024)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("Cannot confirm application service state: {error:?}")
+                    })?;
             let stdout_str = String::from_utf8_lossy(&output.stdout);
             let status = stdout_str.trim();
             if !status.is_empty() {
@@ -174,19 +158,17 @@ impl LifecycleBackend for HostBackend {
                     || stderr_lower.contains("could not be found")
                     || stderr_lower.contains("no such file"))
             {
-                if let Ok(Ok(show_out)) = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    tokio::process::Command::new("systemctl")
-                        .args([
-                            "show",
-                            "--property=LoadState,ActiveState",
-                            "--value",
-                            "--",
-                            unit,
-                        ])
-                        .output(),
-                )
-                .await
+                let mut show_cmd = tokio::process::Command::new("systemctl");
+                show_cmd.args([
+                    "show",
+                    "--property=LoadState,ActiveState",
+                    "--value",
+                    "--",
+                    unit,
+                ]);
+                if let Ok(show_out) =
+                    crate::bounded_command::output(show_cmd, Duration::from_secs(5), 64 * 1024)
+                        .await
                 {
                     if show_out.status.success() {
                         let text = String::from_utf8_lossy(&show_out.stdout);
@@ -224,19 +206,17 @@ impl LifecycleBackend for HostBackend {
             .await;
             if !response.success {
                 if action == "stop" {
-                    if let Ok(Ok(output)) = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        tokio::process::Command::new("systemctl")
-                            .args([
-                                "show",
-                                "--property=LoadState,ActiveState,SubState",
-                                "--value",
-                                "--",
-                                unit,
-                            ])
-                            .output(),
-                    )
-                    .await
+                    let mut show_cmd = tokio::process::Command::new("systemctl");
+                    show_cmd.args([
+                        "show",
+                        "--property=LoadState,ActiveState,SubState",
+                        "--value",
+                        "--",
+                        unit,
+                    ]);
+                    if let Ok(output) =
+                        crate::bounded_command::output(show_cmd, Duration::from_secs(5), 64 * 1024)
+                            .await
                     {
                         if output.status.success() {
                             let text = String::from_utf8_lossy(&output.stdout);

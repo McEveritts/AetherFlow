@@ -9,7 +9,7 @@ use af_models::{Package, PackageRunnerRequest};
 use af_release::lifecycle;
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -160,11 +160,7 @@ fn collect_stale_admitted_snapshots(database: &Path) -> Vec<AdmittedLifecycleSna
     if candidate_keys.is_empty() {
         return Vec::new();
     }
-    let conn = Connection::open_with_flags(
-        database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .ok();
+    let conn = af_release::fs_security::open_sqlite_isolated_readonly(database).ok();
     if let Some(ref c) = conn {
         let _ = c.busy_timeout(Duration::from_secs(2));
     }
@@ -376,14 +372,9 @@ pub async fn restore_admitted_lifecycle_snapshot(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "systemctl".to_string());
-        let _ = tokio::time::timeout(
-            Duration::from_secs(15),
-            tokio::process::Command::new(systemctl_bin)
-                .arg("daemon-reload")
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
+        let mut cmd = tokio::process::Command::new(systemctl_bin);
+        cmd.arg("daemon-reload");
+        let _ = crate::bounded_command::output(cmd, Duration::from_secs(15), 64 * 1024).await;
     }
     if vhosts_changed {
         crate::reload_apache_after_rollback_if_live(fs_root.as_deref()).await;

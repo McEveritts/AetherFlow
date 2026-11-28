@@ -166,12 +166,55 @@ impl ReceiptDirectory {
         Ok(Some(status))
     }
 
+    pub fn write_protected_config_file(
+        &self,
+        name: &OsStr,
+        cfg: &af_release::ReleaseConfig,
+    ) -> Result<()> {
+        verify_pinned_receipt_directory(self, None)?;
+        cfg.validate().map_err(io_error)?;
+        let serialized = cfg.to_serialized_conf_string();
+        self.write_regular_atomic(name, serialized.as_bytes(), 0o600)
+    }
+
+    pub fn verify_root_owner(&self) -> Result<()> {
+        verify_pinned_receipt_directory(self, None)
+    }
+
+    pub fn remove_regular_file_if_present(&self, name: &OsStr) -> Result<()> {
+        validate_single_file_name(name)?;
+        verify_pinned_receipt_directory(self, None)?;
+        let entry = match entry_at(self.file(), name) {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if (entry.st_mode & libc::S_IFMT) != libc::S_IFREG || entry.st_nlink != 1 {
+            return Err(io_error(
+                "Refusing to remove non-regular or hardlinked receipt artifact",
+            ));
+        }
+        if unsafe { libc::geteuid() } == 0 && entry.st_uid != 0 {
+            return Err(io_error(
+                "Refusing to remove non-root-owned receipt artifact as root",
+            ));
+        }
+        if unsafe { libc::unlinkat(self.file().as_raw_fd(), c_name(name)?.as_ptr(), 0) } != 0 {
+            let error = Error::last_os_error();
+            if error.kind() != ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+        self.verify()
+    }
+
     pub fn compare_exchange(
         &self,
         name: &OsStr,
         expected: &SelfUpdateJobStatus,
         replacement: &SelfUpdateJobStatus,
     ) -> Result<SelfUpdateJobStatus> {
+        verify_pinned_receipt_directory(self, None)?;
         compare_exchange_locked(
             ReceiptLock::acquire_in(self.try_clone()?, name, true)?,
             expected,
@@ -268,7 +311,7 @@ impl ReceiptDirectory {
     }
 
     fn open(path: &Path, create: bool) -> Result<Self> {
-        Self::open_with_mode(path, create, 0o755)
+        Self::open_with_mode(path, create, 0o700)
     }
 
     fn open_with_mode(path: &Path, create: bool, leaf_mode: u32) -> Result<Self> {
@@ -334,7 +377,7 @@ impl ReceiptDirectory {
         self.verify()?;
         if create {
             let result =
-                unsafe { libc::mkdirat(self.file().as_raw_fd(), c_name(name)?.as_ptr(), 0o755) };
+                unsafe { libc::mkdirat(self.file().as_raw_fd(), c_name(name)?.as_ptr(), 0o700) };
             if result != 0 && Error::last_os_error().kind() != ErrorKind::AlreadyExists {
                 return Err(Error::last_os_error());
             }
@@ -567,11 +610,86 @@ fn redact_status(status: &SelfUpdateJobStatus) -> SelfUpdateJobStatus {
     status
 }
 
+fn read_pinned_receipt_directory_env() -> Result<Option<(u64, u64)>> {
+    let dev_raw = std::env::var("AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let ino_raw = std::env::var("AETHERFLOW_SELF_UPDATE_DIRECTORY_INO")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    match (dev_raw, ino_raw) {
+        (Some(dev_s), Some(ino_s)) => {
+            let expected_dev: u64 = dev_s
+                .parse()
+                .map_err(|_| io_error("Invalid AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV"))?;
+            let expected_ino: u64 = ino_s
+                .parse()
+                .map_err(|_| io_error("Invalid AETHERFLOW_SELF_UPDATE_DIRECTORY_INO"))?;
+            Ok(Some((expected_dev, expected_ino)))
+        }
+        (None, None) => Ok(None),
+        _ => Err(io_error(
+            "Incomplete AETHERFLOW_SELF_UPDATE_DIRECTORY_{DEV,INO} identity pin",
+        )),
+    }
+}
+
+pub(crate) fn verify_pinned_receipt_directory(
+    directory: &ReceiptDirectory,
+    pinned: Option<(u64, u64)>,
+) -> Result<()> {
+    directory.verify()?;
+    let meta = directory.file().metadata()?;
+    if unsafe { libc::geteuid() } == 0 {
+        if meta.uid() != 0 || (meta.mode() & 0o022) != 0 {
+            return Err(io_error(
+                "Self-update receipt directory must be owned by root and not group/world writable when executing as root",
+            ));
+        }
+        for (_, anc) in directory
+            .chain
+            .iter()
+            .take(directory.chain.len().saturating_sub(1))
+        {
+            let anc_meta = anc.metadata()?;
+            if anc_meta.uid() != 0
+                || ((anc_meta.mode() & 0o022) != 0 && (anc_meta.mode() & libc::S_ISVTX) == 0)
+            {
+                return Err(io_error(
+                    "Self-update receipt directory ancestor must be root-owned and non-writable (or sticky) when executing as root",
+                ));
+            }
+        }
+    }
+    if let Some((expected_dev, expected_ino)) = pinned {
+        if (meta.dev(), meta.ino()) != (expected_dev, expected_ino) {
+            return Err(io_error(
+                "Self-update receipt directory identity does not match pinned launch directory",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn write(path: &Path, status: &SelfUpdateJobStatus) -> Result<()> {
     status
         .validate_invariants(Some(&status.job_unit))
         .map_err(io_error)?;
-    let guard = ReceiptLock::acquire(path)?;
+    let pinned = read_pinned_receipt_directory_env()?;
+    let guard = if pinned.is_some() {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io_error("Missing receipt filename"))?;
+        let directory = ReceiptDirectory::open(path.parent().unwrap_or(Path::new(".")), false)?;
+        verify_pinned_receipt_directory(&directory, pinned)?;
+        ReceiptLock::acquire_in(directory, name, true)?
+    } else {
+        let guard = ReceiptLock::acquire(path)?;
+        verify_pinned_receipt_directory(&guard.directory, None)?;
+        guard
+    };
     let previous = guard.read()?;
     if let Some((current, _)) = previous.as_ref() {
         current
@@ -592,7 +710,23 @@ pub fn compare_exchange(
     expected: &SelfUpdateJobStatus,
     replacement: &SelfUpdateJobStatus,
 ) -> Result<SelfUpdateJobStatus> {
-    compare_exchange_locked(ReceiptLock::acquire(path)?, expected, replacement)
+    compare_exchange_pinned(path, expected, replacement, None)
+}
+
+pub fn compare_exchange_pinned(
+    path: &Path,
+    expected: &SelfUpdateJobStatus,
+    replacement: &SelfUpdateJobStatus,
+    pinned: Option<(u64, u64)>,
+) -> Result<SelfUpdateJobStatus> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io_error("Missing receipt filename"))?;
+    let directory =
+        ReceiptDirectory::open(path.parent().unwrap_or(Path::new(".")), pinned.is_none())?;
+    verify_pinned_receipt_directory(&directory, pinned)?;
+    let guard = ReceiptLock::acquire_in(directory, name, true)?;
+    compare_exchange_locked(guard, expected, replacement)
 }
 
 fn compare_exchange_locked(
@@ -617,11 +751,23 @@ fn compare_exchange_locked(
 }
 
 pub fn claim(path: &Path, unit: &str) -> Result<()> {
-    let guard = ReceiptLock::acquire(path)?;
+    let pinned = read_pinned_receipt_directory_env()?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io_error("Missing receipt filename"))?;
+    let directory =
+        ReceiptDirectory::open(path.parent().unwrap_or(Path::new(".")), pinned.is_none())?;
+    verify_pinned_receipt_directory(&directory, pinned)?;
+    let guard = ReceiptLock::acquire_in(directory, name, true)?;
     let previous = guard.read()?;
+    if pinned.is_some() && previous.is_none() {
+        return Err(io_error(
+            "Self-update admission receipt is missing; refusing worker claim",
+        ));
+    }
     if let Some((current, _)) = previous.as_ref() {
         current.validate_invariants(Some(unit)).map_err(io_error)?;
-        if current.completed {
+        if current.completed || !matches!(current.status.as_str(), "launching" | "running") {
             return Err(io_error(
                 "Self-update admission was closed; refusing a late worker",
             ));
@@ -655,14 +801,28 @@ impl LaunchOwner {
         let metadata = self.directory.file().metadata()?;
         Ok((metadata.dev(), metadata.ino()))
     }
+
+    pub fn remove_regular_file_if_present(&self, name: &OsStr) -> Result<()> {
+        self.directory.remove_regular_file_if_present(name)
+    }
+
+    pub fn write_protected_config_file(
+        &self,
+        name: &OsStr,
+        cfg: &af_release::ReleaseConfig,
+    ) -> Result<()> {
+        self.directory.write_protected_config_file(name, cfg)
+    }
 }
 
 pub fn begin_launch(path: &Path) -> Result<LaunchOwner> {
     let guard = ReceiptLock::acquire(path)?;
+    verify_pinned_receipt_directory(&guard.directory, None)?;
     let lease_path = path.with_extension("lifecycle-owners");
     let lease_directory = guard
         .directory
         .child(lease_path.file_name().unwrap(), true)?;
+    verify_pinned_receipt_directory(&lease_directory, None)?;
     let owner = uuid::Uuid::new_v4().to_string();
     let file = lease_directory.open_file(
         OsStr::new(&owner),

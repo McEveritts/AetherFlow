@@ -167,6 +167,14 @@ pub fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = ()>
     }
 }
 
+/// Total daemon shutdown drain budget (`SEC-02`), strictly below systemd's
+/// `TimeoutStopSec=30s` so both active connections and tracked process-group
+/// supervisors finish reaping before `SIGKILL`.
+#[cfg(unix)]
+pub(crate) const RUNNER_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(unix)]
+const RUNNER_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Runs the Privileged Root Daemon (`aetherflow-api runner` / `--runner`) over `/run/aetherflow/runner.sock`.
 #[cfg(unix)]
 pub async fn run_privileged_daemon() -> anyhow::Result<()> {
@@ -198,16 +206,36 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
     tracing::info!(socket = %sock_path, "AetherFlow Privileged Runner listening");
     let app = build_runner_router();
 
-    serve_runner_connections(listener, app, shutdown_signal()?).await?;
+    serve_runner_connections_with_registry(
+        listener,
+        app,
+        shutdown_signal()?,
+        Some(af_release::process_group::global_registry()),
+    )
+    .await?;
     let _ = fs::remove_file(&sock_path);
     Ok(())
 }
 
-#[cfg(unix)]
+/// Serves runner Unix-socket connections without shutting down the process-wide
+/// supervisor registry (used by in-process tests that spin up temporary
+/// listeners; production [`run_privileged_daemon`] passes
+/// `Some(af_release::process_group::global_registry())`).
+#[cfg(all(test, unix))]
 pub(crate) async fn serve_runner_connections(
     listener: tokio::net::UnixListener,
     app: Router,
     shutdown: impl std::future::Future<Output = ()>,
+) -> anyhow::Result<()> {
+    serve_runner_connections_with_registry(listener, app, shutdown, None).await
+}
+
+#[cfg(unix)]
+pub(crate) async fn serve_runner_connections_with_registry(
+    listener: tokio::net::UnixListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()>,
+    supervisor_registry: Option<&af_release::process_group::SupervisorRegistry>,
 ) -> anyhow::Result<()> {
     use hyper::service::Service;
     use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -284,14 +312,26 @@ pub(crate) async fn serve_runner_connections(
     drop(listener);
     tracing::info!("Privileged Runner draining active requests");
     let _ = drain.send(true);
+    let drain_deadline = tokio::time::Instant::now() + RUNNER_DRAIN_TIMEOUT;
+    let connection_deadline = tokio::time::Instant::now() + RUNNER_CONNECTION_DRAIN_TIMEOUT;
     let draining = async { while connections.join_next().await.is_some() {} };
-    if tokio::time::timeout(std::time::Duration::from_secs(30), draining)
+    if tokio::time::timeout_at(connection_deadline, draining)
         .await
         .is_err()
     {
         tracing::warn!("Runner drain deadline exceeded; terminating remaining connections");
         connections.abort_all();
         while connections.join_next().await.is_some() {}
+    }
+    if let Some(registry) = supervisor_registry {
+        let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+        let report = registry.shutdown(remaining).await;
+        if !report.drained {
+            tracing::warn!(
+                remaining_supervisors = report.remaining,
+                "Runner process-group supervisor drain deadline exceeded"
+            );
+        }
     }
     Ok(())
 }
@@ -300,4 +340,80 @@ pub(crate) async fn serve_runner_connections(
 pub async fn run_privileged_daemon() -> anyhow::Result<()> {
     tracing::warn!("UNIX domain socket runner mode requires a Unix/Linux host");
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_drain_timeout_is_strictly_below_systemd_timeout_stop_sec() {
+        assert_eq!(RUNNER_DRAIN_TIMEOUT, Duration::from_secs(20));
+        assert!(RUNNER_CONNECTION_DRAIN_TIMEOUT < RUNNER_DRAIN_TIMEOUT);
+        assert!(RUNNER_DRAIN_TIMEOUT < Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn daemon_shutdown_cancels_and_reaps_tracked_supervisors_before_exit() {
+        let short_id = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let root = PathBuf::from("/tmp").join(format!("af-dd-{short_id}"));
+        fs::create_dir_all(&root).unwrap();
+        let sock_path = root.join("r.sock");
+        let pid_file = root.join("descendant.pid");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        let registry = af_release::process_group::SupervisorRegistry::new();
+
+        let mut cmd = Command::new("/bin/bash");
+        cmd.args(["-c", "sleep 60 & echo $! > \"$AF_PID_FILE\"; wait"])
+            .env("AF_PID_FILE", &pid_file);
+        let reg_for_task = registry.clone();
+        let child_task = tokio::spawn(async move {
+            af_release::process_group::output_in(&reg_for_task, cmd, Duration::from_secs(60), 1024)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !pid_file.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let descendant_pid: i32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(registry.active(), 1);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let reg_for_server = registry.clone();
+        let server = tokio::spawn(async move {
+            serve_runner_connections_with_registry(
+                listener,
+                Router::new(),
+                async {
+                    let _ = shutdown_rx.await;
+                },
+                Some(&reg_for_server),
+            )
+            .await
+        });
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert!(registry.is_shutting_down());
+        assert_eq!(registry.active(), 0);
+        assert!(
+            !af_release::process_group::group_is_live(Some(descendant_pid as u32)),
+            "tracked descendant pid={descendant_pid} must be reaped before daemon exit"
+        );
+        let err = child_task.await.unwrap().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

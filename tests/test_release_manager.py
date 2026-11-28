@@ -210,7 +210,14 @@ os.execvp(inner[0], inner)
         )
         return result.stdout.strip()
 
-    def write_artifact(self, version=b"v4.0.0\n", index=b"<html>app</html>", wasm=b"wasm", include_transcode=True):
+    def write_artifact(
+        self,
+        version=b"v4.0.0\n",
+        index=b"<html>app</html>",
+        wasm=b"wasm",
+        include_transcode=True,
+        packages_tag=b"v1",
+    ):
         binary = b"#!/bin/bash\necho aetherflow-api\n"
         unit = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api\nFrom=artifact\n"
         runner = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api runner\nFrom=artifact\n"
@@ -230,6 +237,15 @@ os.execvp(inner[0], inner)
         ]
         if include_transcode:
             entries.insert(5, ("bin/af-transcode", b"transcode-fixture", 0o600))
+        if packages_tag is not None:
+            entries.extend([
+                ("packages/common.sh", b"#!/bin/bash\n# common " + packages_tag + b"\n", 0o644),
+                ("packages/lib/cli_shim.sh", b"#!/bin/bash\n# cli_shim " + packages_tag + b"\n", 0o644),
+                ("packages/package/install/installpackage-Nginx", b"#!/bin/bash\n# nginx " + packages_tag + b"\n", 0o755),
+                ("packages/system/af", b"#!/bin/bash\n# legacy-af " + packages_tag + b"\n", 0o755),
+                ("packages/system/af-certbot-sync", b"#!/bin/bash\n# certbot-sync " + packages_tag + b"\n", 0o600),
+                ("packages/system/af-systemd-sandbox", b"#!/bin/bash\n# systemd-sandbox " + packages_tag + b"\n", 0o600),
+            ])
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
             directory = tarfile.TarInfo(".")
@@ -264,6 +280,9 @@ os.execvp(inner[0], inner)
             "CURRENT_LINK": str(self.current),
             "REPO_DIR": str(self.root / "repo"),
             "SYSTEMD_UNITS_DST": str(self.units),
+            "CLI_BIN_DIR": str(self.root / "usr" / "local" / "bin"),
+            "LEGACY_BIN_ROOT": str(self.root / "usr" / "local" / "bin" / "AetherFlow"),
+            "SYS_BIN_DIR": str(self.root / "usr" / "bin"),
             "TRANSCODE_SHIM_PATH": str(self.root / "usr" / "lib" / "aetherflow" / "transcode" / "ffmpeg"),
             "DRY_RUN_ROOT": str(self.dry),
             "LEGACY_OPT_ROOT": str(self.legacy_root),
@@ -499,7 +518,10 @@ os.execvp(inner[0], inner)
         self.assertFalse(missing.exists())
         versions = list((self.dry / "releases").glob("*/.version"))
         self.assertEqual(len(versions), 1)
-        self.assertEqual(versions[0].read_text().strip(), "v4.0.0-dryrun")
+        repo_version = (ROOT / ".version").read_text(encoding="utf-8").strip()
+        if not repo_version.startswith("v"):
+            repo_version = f"v{repo_version}"
+        self.assertEqual(versions[0].read_text().strip(), f"{repo_version}-dryrun")
         self.assertNotIn("curl ", self.commands.read_text())
         self.assertTrue((self.dry / "current").is_symlink())
         self.assertFalse((self.dry / "current" / "af").exists())
@@ -510,6 +532,24 @@ os.execvp(inner[0], inner)
         self.assertTrue((self.dry / "current" / "bin" / "af-transcode").is_file())
         self.assertEqual((self.dry / "current" / "bin" / "af-transcode").stat().st_mode & 0o777, 0o755)
         self.assertTrue((self.dry / "current" / "plugins" / "telemetry-inspector" / "plugin.manifest.json").is_file())
+        placeholder_wasm = self.dry / "current" / "web" / "dist" / "dry-run-placeholder.wasm"
+        self.assertTrue(placeholder_wasm.is_file())
+        self.assertEqual(placeholder_wasm.stat().st_size, 0)
+        self.assertFalse((self.dry / "current" / "web" / "dist" / "app.wasm").exists())
+        self.assertTrue((self.dry / "usr" / "local" / "bin" / "af").is_symlink())
+        for dry_helper in (
+            self.dry / "opt" / "AetherFlow" / "packages" / "system" / "af-certbot-sync",
+            self.dry / "usr" / "local" / "bin" / "AetherFlow" / "system" / "af-certbot-sync",
+            self.dry / "usr" / "local" / "bin" / "af-certbot-sync",
+            self.dry / "usr" / "bin" / "af-certbot-sync",
+            self.dry / "usr" / "bin" / "af-systemd-sandbox",
+        ):
+            self.assertFalse(dry_helper.is_symlink(), f"expected regular file, not symlink: {dry_helper}")
+            self.assertTrue(dry_helper.is_file(), f"missing dry-run synced helper: {dry_helper}")
+            self.assertEqual(dry_helper.stat().st_mode & 0o777, 0o755)
+        self.assertFalse((self.legacy_root / "packages").exists())
+        self.assertFalse((self.root / "usr" / "local" / "bin" / "af-certbot-sync").exists())
+        self.assertFalse((self.root / "usr" / "bin" / "af-certbot-sync").exists())
 
     def test_env_file_aetherflow_db_path_when_db_path_missing(self):
         other_db = self.root / "live" / "from-aether.sqlite"
@@ -1451,6 +1491,189 @@ os.execvp(inner[0], inner)
         )
         self.assertNotEqual(failed.returncode, 0, failed.stdout + failed.stderr)
         self.assertIn("systemctl restart af-transcode-worker.service", self.commands.read_text())
+
+    def test_pipe15_archive_cap_512mib_and_dynamic_dry_run_version_fallback(self):
+        self.prepare_live_units()
+        res = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        cmds = self.commands.read_text()
+        self.assertIn("--max-filesize 536870912", cmds)
+        self.assertNotIn("--max-filesize 268435456", cmds)
+        self.assertIn("--max-filesize 4194304", cmds)
+
+        standalone_root = self.root / "standalone-script-copy"
+        standalone_deploy = standalone_root / "deploy"
+        standalone_deploy.mkdir(parents=True)
+        copied_script = standalone_deploy / "release-manager.sh"
+        shutil.copy2(SCRIPT, copied_script)
+        shutil.copy2(ROOT / "deploy" / "release-manager.conf", standalone_deploy / "release-manager.conf")
+
+        for raw_ver, expected_stamp in (
+            ("4.2.0\n", "v4.2.0-dryrun"),
+            ("v4.3.1\n", "v4.3.1-dryrun"),
+            (None, "v4.0.1-dryrun"),
+        ):
+            with self.subTest(raw_ver=raw_ver):
+                ver_path = standalone_root / ".version"
+                if raw_ver is None:
+                    ver_path.unlink(missing_ok=True)
+                else:
+                    ver_path.write_text(raw_ver, encoding="utf-8")
+                sub_dry = self.root / f"dry-ver-{expected_stamp}"
+                sub_res = subprocess.run(
+                    [self.bash, str(copied_script), "deploy", "--dry-run", "--offline"],
+                    env=self.base_env(
+                        DRY_RUN_ROOT=str(sub_dry),
+                        REPO_DIR=str(self.root / "nonexistent-repo"),
+                        TEST_FORBID_CURL="1",
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+                self.assertEqual(sub_res.returncode, 0, sub_res.stdout + sub_res.stderr)
+                stamped = list((sub_dry / "releases").glob("*/.version"))
+                self.assertEqual(len(stamped), 1)
+                self.assertEqual(stamped[0].read_text(encoding="utf-8").strip(), expected_stamp)
+
+    def test_pipe02_atomic_helper_and_package_sync_across_deploy_and_rollback(self):
+        self.prepare_live_units()
+        opt_pkgs = self.legacy_root / "packages"
+        bin_pkgs = self.root / "usr" / "local" / "bin" / "AetherFlow"
+        local_certbot = self.root / "usr" / "local" / "bin" / "af-certbot-sync"
+        sys_certbot = self.root / "usr" / "bin" / "af-certbot-sync"
+        sys_sandbox = self.root / "usr" / "bin" / "af-systemd-sandbox"
+
+        # Seed stale package files, retired af-heal binaries, a pre-existing symlink at
+        # /usr/local/bin/af-certbot-sync, and an open file descriptor on /usr/bin/af-certbot-sync.
+        (opt_pkgs / "package" / "install").mkdir(parents=True)
+        (opt_pkgs / "system").mkdir(parents=True)
+        (opt_pkgs / "package" / "install" / "stale-pkg").write_text("stale-opt\n")
+        (opt_pkgs / "system" / "af-heal").write_text("retired-opt-heal\n")
+
+        (bin_pkgs / "lib").mkdir(parents=True)
+        (bin_pkgs / "system").mkdir(parents=True)
+        (bin_pkgs / "lib" / "stale-lib.sh").write_text("stale-bin-lib\n")
+        (bin_pkgs / "system" / "af-heal").write_text("retired-bin-heal\n")
+
+        local_certbot.parent.mkdir(parents=True, exist_ok=True)
+        outside_victim = self.root / "certbot-symlink-victim"
+        outside_victim.write_bytes(b"UNTOUCHED-VICTIM-PAYLOAD")
+        local_certbot.symlink_to(outside_victim)
+
+        sys_certbot.parent.mkdir(parents=True, exist_ok=True)
+        sys_certbot.write_bytes(b"old-certbot-v0")
+        sys_certbot.chmod(0o644)
+        (sys_certbot.parent / "af-heal").write_text("retired-usr-bin-heal\n")
+        old_sys_certbot_ino = sys_certbot.lstat().st_ino
+
+        def assert_all_five_targets(tag_bytes: bytes) -> None:
+            expected_files = (
+                (opt_pkgs / "common.sh", b"#!/bin/bash\n# common " + tag_bytes + b"\n"),
+                (opt_pkgs / "lib" / "cli_shim.sh", b"#!/bin/bash\n# cli_shim " + tag_bytes + b"\n"),
+                (opt_pkgs / "package" / "install" / "installpackage-Nginx", b"#!/bin/bash\n# nginx " + tag_bytes + b"\n"),
+                (opt_pkgs / "system" / "af", b"#!/bin/bash\n# legacy-af " + tag_bytes + b"\n"),
+                (opt_pkgs / "system" / "af-certbot-sync", b"#!/bin/bash\n# certbot-sync " + tag_bytes + b"\n"),
+                (opt_pkgs / "system" / "af-systemd-sandbox", b"#!/bin/bash\n# systemd-sandbox " + tag_bytes + b"\n"),
+                (bin_pkgs / "common.sh", b"#!/bin/bash\n# common " + tag_bytes + b"\n"),
+                (bin_pkgs / "lib" / "cli_shim.sh", b"#!/bin/bash\n# cli_shim " + tag_bytes + b"\n"),
+                (bin_pkgs / "package" / "install" / "installpackage-Nginx", b"#!/bin/bash\n# nginx " + tag_bytes + b"\n"),
+                (bin_pkgs / "system" / "af", b"#!/bin/bash\n# legacy-af " + tag_bytes + b"\n"),
+                (bin_pkgs / "system" / "af-certbot-sync", b"#!/bin/bash\n# certbot-sync " + tag_bytes + b"\n"),
+                (bin_pkgs / "system" / "af-systemd-sandbox", b"#!/bin/bash\n# systemd-sandbox " + tag_bytes + b"\n"),
+                (local_certbot, b"#!/bin/bash\n# certbot-sync " + tag_bytes + b"\n"),
+                (sys_certbot, b"#!/bin/bash\n# certbot-sync " + tag_bytes + b"\n"),
+                (sys_sandbox, b"#!/bin/bash\n# systemd-sandbox " + tag_bytes + b"\n"),
+            )
+            for target_path, expected_payload in expected_files:
+                self.assertFalse(target_path.is_symlink(), f"target must not be a symlink: {target_path}")
+                self.assertTrue(target_path.is_file(), f"missing synced regular file: {target_path}")
+                self.assertEqual(target_path.stat().st_mode & 0o777, 0o755, f"wrong mode on {target_path}")
+                self.assertEqual(target_path.read_bytes(), expected_payload, f"wrong payload on {target_path}")
+            for parent_dir in (opt_pkgs, bin_pkgs, local_certbot.parent, sys_certbot.parent):
+                leftovers = list(parent_dir.rglob(".af-sync.*"))
+                self.assertEqual(leftovers, [], f"leftover temp sync files in {parent_dir}: {leftovers}")
+
+        # 1. Deploy v1: atomically syncs all 5 targets, replaces symlink without touching victim, prunes stale/af-heal.
+        self.write_artifact(version=b"v4.0.0\n", packages_tag=b"v1")
+        with sys_certbot.open("rb") as open_old_handle:
+            deploy_v1 = self.run_manager("deploy", "--channel", "stable")
+            self.assertEqual(deploy_v1.returncode, 0, deploy_v1.stdout + deploy_v1.stderr)
+            self.assertEqual(open_old_handle.read(), b"old-certbot-v0")
+        self.assertNotEqual(sys_certbot.lstat().st_ino, old_sys_certbot_ino)
+        self.assertEqual(outside_victim.read_bytes(), b"UNTOUCHED-VICTIM-PAYLOAD")
+        self.assertFalse((opt_pkgs / "package" / "install" / "stale-pkg").exists())
+        self.assertFalse((bin_pkgs / "lib" / "stale-lib.sh").exists())
+        self.assertFalse((opt_pkgs / "system" / "af-heal").exists())
+        self.assertFalse((bin_pkgs / "system" / "af-heal").exists())
+        self.assertFalse((sys_certbot.parent / "af-heal").exists())
+        assert_all_five_targets(b"v1")
+
+        # 2. Failed deploy of v2 auto-rolls back all 5 targets to v1.
+        time_spacer = self.releases / "spacer"
+        del time_spacer
+        v1_release = self.current.resolve()
+        # Rename v1 slot to 100 so epoch allocation for v2 never collides within the same second.
+        slot_100 = self.releases / "100"
+        v1_release.rename(slot_100)
+        self.current.unlink()
+        self.current.symlink_to(slot_100)
+
+        self.write_artifact(version=b"v4.0.0\n", packages_tag=b"v2")
+        failed_v2 = self.run_manager(
+            "deploy",
+            "--channel",
+            "stable",
+            TEST_HEALTH_CODE="503",
+            TEST_HEALTH_BODY='{"status":"not_ready","database":"unreachable"}',
+            TEST_ROLLBACK_HEALTH_CODE="200",
+        )
+        self.assertEqual(failed_v2.returncode, 2, failed_v2.stdout + failed_v2.stderr)
+        self.assertEqual(self.current.resolve(), slot_100.resolve())
+        assert_all_five_targets(b"v1")
+
+        # 3. Healthy deploy of v2 updates all 5 targets to v2, then explicit rollback reverts all 5 targets to v1.
+        for cand in list(self.releases.iterdir()):
+            if cand.is_dir() and cand.name != "100":
+                shutil.rmtree(cand)
+        (self.releases / ".recovery_state.json").unlink(missing_ok=True)
+        deploy_v2 = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(deploy_v2.returncode, 0, deploy_v2.stdout + deploy_v2.stderr)
+        assert_all_five_targets(b"v2")
+
+        explicit_rb = self.run_manager("rollback")
+        self.assertEqual(explicit_rb.returncode, 0, explicit_rb.stdout + explicit_rb.stderr)
+        self.assertEqual(self.current.resolve(), slot_100.resolve())
+        assert_all_five_targets(b"v1")
+
+    def test_pipe02_refuses_symlinked_helper_or_package_directories_before_swap(self):
+        self.prepare_live_units()
+        outside_pkg_dir = self.root / "outside-packages-victim"
+        outside_pkg_dir.mkdir(parents=True)
+        (outside_pkg_dir / "keep.txt").write_text("UNTOUCHED\n")
+        (self.legacy_root / "packages").symlink_to(outside_pkg_dir)
+
+        pkg_sym_res = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(pkg_sym_res.returncode, 4, pkg_sym_res.stdout + pkg_sym_res.stderr)
+        self.assertFalse(self.current.exists())
+        self.assertEqual((outside_pkg_dir / "keep.txt").read_text(), "UNTOUCHED\n")
+        self.assertFalse((outside_pkg_dir / "common.sh").exists())
+
+        (self.legacy_root / "packages").unlink()
+        (self.releases / ".recovery_state.json").unlink(missing_ok=True)
+        for cand in list(self.releases.iterdir()):
+            if cand.is_dir() and not cand.name.startswith("."):
+                shutil.rmtree(cand)
+
+        outside_usr_bin = self.root / "outside-usr-bin-victim"
+        outside_usr_bin.mkdir(parents=True)
+        (self.root / "usr").mkdir(parents=True, exist_ok=True)
+        (self.root / "usr" / "bin").symlink_to(outside_usr_bin)
+
+        bin_sym_res = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(bin_sym_res.returncode, 4, bin_sym_res.stdout + bin_sym_res.stderr)
+        self.assertFalse(self.current.exists())
+        self.assertFalse((outside_usr_bin / "af-certbot-sync").exists())
 
 
 class SourceReleaseFrontendTests(unittest.TestCase):

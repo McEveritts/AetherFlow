@@ -47,6 +47,10 @@
     font-size: 11px;
     overflow-x: auto;
   }
+  pre.error {
+    border-color: rgba(244, 63, 94, 0.45);
+    color: #fda4af;
+  }
 </style>
 </head>
 <body>
@@ -69,24 +73,47 @@
   <script>
     const pluginId = 'telemetry-inspector';
     const outputNode = document.getElementById('output');
+    let requestSeq = 0;
     const requestStatusThroughBridge = () => {
       window.parent.postMessage({
         type: 'AF_PLUGIN_PROXY_REQUEST',
         pluginId,
+        requestId: `${pluginId}-${++requestSeq}`,
         path: 'status',
         method: 'GET'
       }, '*');
     };
     window.addEventListener('message', (event) => {
-      const msg = event.data || {};
+      if (event.source !== window.parent) {
+        return;
+      }
+      const msg = event.data;
+      if (!msg || typeof msg !== 'object' || msg.pluginId !== pluginId) {
+        return;
+      }
       if (msg.type === 'AF_PLUGIN_INIT') {
+        outputNode.classList.remove('error');
         outputNode.textContent = JSON.stringify({
           status: 'handshake_complete',
-          capabilities: msg.capabilities || []
+          pluginId,
+          capabilities: Array.isArray(msg.capabilities) ? msg.capabilities : [],
+          scopes: Array.isArray(msg.scopes) ? msg.scopes : []
         }, null, 2);
         requestStatusThroughBridge();
       } else if (msg.type === 'AF_PLUGIN_PROXY_RESPONSE') {
-        outputNode.textContent = JSON.stringify(msg.payload, null, 2);
+        if (msg.ok === false || (msg.ok !== true && typeof msg.error === 'string')) {
+          outputNode.classList.add('error');
+          outputNode.textContent = JSON.stringify({
+            ok: false,
+            status: typeof msg.status === 'number' ? msg.status : null,
+            error: typeof msg.error === 'string' && msg.error.trim().length > 0
+              ? msg.error
+              : 'Plugin proxy request failed'
+          }, null, 2);
+          return;
+        }
+        outputNode.classList.remove('error');
+        outputNode.textContent = JSON.stringify(msg.payload ?? null, null, 2);
       }
     });
     document.getElementById('probe-btn').addEventListener('click', () => {

@@ -16,6 +16,7 @@ on:
 permissions:
   contents: read
 
+# Serial build -> deploy pipeline (at most 1 active runner slot inside the repo's <= 18 Actions concurrency budget).
 concurrency:
   group: "pages"
   cancel-in-progress: false

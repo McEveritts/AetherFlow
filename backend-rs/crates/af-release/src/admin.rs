@@ -103,14 +103,20 @@ pub fn resolve_release_manager_conf_for_root(explicit_root: Option<&Path>) -> Op
         PathBuf::from("/etc/aetherflow/release-manager.conf"),
         PathBuf::from("/opt/AetherFlow/current/deploy/release-manager.conf"),
         PathBuf::from("/opt/AetherFlow/deploy/release-manager.conf"),
-        PathBuf::from("deploy/release-manager.conf"),
-        PathBuf::from("../deploy/release-manager.conf"),
     ];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             candidates.push(exe_dir.join("deploy/release-manager.conf"));
             candidates.push(exe_dir.join("../deploy/release-manager.conf"));
         }
+    }
+    #[cfg(unix)]
+    let allow_relative_cwd = unsafe { libc::geteuid() != 0 };
+    #[cfg(not(unix))]
+    let allow_relative_cwd = true;
+    if allow_relative_cwd {
+        candidates.push(PathBuf::from("deploy/release-manager.conf"));
+        candidates.push(PathBuf::from("../deploy/release-manager.conf"));
     }
     candidates.into_iter().find(|c| c.is_file())
 }
@@ -149,14 +155,22 @@ fn map_default_release_lock_parent(parent_dir: &Path, isolated_root: Option<&Pat
 }
 
 pub fn resolve_maintenance_lock_path_for_config(cfg: &ReleaseConfig) -> ReleaseResult<PathBuf> {
-    let resolved_db = crate::config::try_resolve_db_path(cfg, None)?;
+    resolve_maintenance_lock_path_for_config_with_env(cfg, None)
+}
+
+pub fn resolve_maintenance_lock_path_for_config_with_env(
+    cfg: &ReleaseConfig,
+    systemd_env_blob: Option<&str>,
+) -> ReleaseResult<PathBuf> {
     let candidate_lock = match std::env::var("AETHERFLOW_MAINTENANCE_LOCK_PATH")
         .ok()
         .map(|raw_val| raw_val.trim().to_string())
         .filter(|trimmed| !trimmed.is_empty())
     {
         Some(explicit_lock) => PathBuf::from(explicit_lock),
+        None if cfg.is_dry_run_config() => cfg.data_dir.join(".snapshot.lock"),
         None => {
+            let resolved_db = crate::config::try_resolve_db_path(cfg, systemd_env_blob)?;
             if let Some(db_parent) = resolved_db
                 .path
                 .parent()
@@ -185,7 +199,8 @@ pub fn resolve_maintenance_lock_path_for_config(cfg: &ReleaseConfig) -> ReleaseR
 }
 
 pub fn resolve_self_update_jobs_dir_for_config(cfg: &ReleaseConfig) -> ReleaseResult<PathBuf> {
-    let jobs_dir = cfg.data_dir.join(".self-update-jobs");
+    let jobs_parent = map_default_release_lock_parent(&cfg.data_dir, cfg.isolated_root.as_deref());
+    let jobs_dir = jobs_parent.join(".self-update-jobs");
     crate::config::validate_no_parent_traversal(&jobs_dir, "self-update jobs directory")?;
     if let Some(ref root_path) = cfg.isolated_root {
         if !crate::config::path_is_within_root(&jobs_dir, root_path) {
@@ -212,33 +227,66 @@ pub fn resolve_self_update_jobs_dir_from_process_env(
 }
 
 pub fn ensure_interoperable_maintenance_lock_file(cfg: &ReleaseConfig) -> ReleaseResult<PathBuf> {
-    let shared_lock_path = resolve_maintenance_lock_path_for_config(cfg)?;
+    ensure_interoperable_maintenance_lock_file_with_env(cfg, None)
+}
+
+pub fn ensure_interoperable_maintenance_lock_file_with_env(
+    cfg: &ReleaseConfig,
+    systemd_env_blob: Option<&str>,
+) -> ReleaseResult<PathBuf> {
+    let shared_lock_path =
+        resolve_maintenance_lock_path_for_config_with_env(cfg, systemd_env_blob)?;
     crate::fs_security::ensure_no_symlink_ancestors(&shared_lock_path)?;
 
-    let is_runtime_anchor = shared_lock_path
+    let parent = shared_lock_path
         .parent()
-        .map(|parent_dir| {
-            parent_dir == Path::new("/run/aetherflow")
-                || cfg
-                    .isolated_root
-                    .as_ref()
-                    .map(|iso| parent_dir == iso.join("run/aetherflow"))
-                    .unwrap_or(false)
-        })
-        .unwrap_or(false);
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| ReleaseError::PathValidation {
+            path: shared_lock_path.clone(),
+            reason: "maintenance lock path has no parent directory".to_string(),
+        })?;
+    let leaf = shared_lock_path
+        .file_name()
+        .ok_or_else(|| ReleaseError::PathValidation {
+            path: shared_lock_path.clone(),
+            reason: "maintenance lock path has no filename".to_string(),
+        })?;
 
-    if let Some(parent) = shared_lock_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            crate::fs_security::create_dir_all_no_symlinks(parent, 0o750)?;
-        }
+    let is_runtime_anchor = parent == Path::new("/run/aetherflow")
+        || cfg
+            .isolated_root
+            .as_ref()
+            .map(|iso| parent == iso.join("run/aetherflow"))
+            .unwrap_or(false);
+
+    #[cfg(not(unix))]
+    {
+        let _ = (leaf, is_runtime_anchor);
+        crate::fs_security::create_dir_all_no_symlinks(parent, 0o750)?;
     }
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::io::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+
+        // Pin the parent directory once via component-wise `O_DIRECTORY | O_NOFOLLOW` so every
+        // subsequent inspection, ownership update, and lockfile open/create executes strictly via
+        // `openat(parent_dfd, leaf)` with zero path-based TOCTOU window.
+        let parent_dir = crate::fs_security::open_or_create_dir_nofollow(parent, 0o750)?;
+        let parent_dfd = parent_dir.as_raw_fd();
+        let leaf_c =
+            std::ffi::CString::new(leaf.as_bytes()).map_err(|_| ReleaseError::PathValidation {
+                path: shared_lock_path.clone(),
+                reason: "maintenance lock filename contains NUL byte".to_string(),
+            })?;
 
         let euid = unsafe { libc::geteuid() };
+        let mut parent_uid: libc::uid_t = 0;
+        let mut parent_st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(parent_dfd, &mut parent_st) } == 0 {
+            parent_uid = parent_st.st_uid;
+        }
         let mut target_owner: Option<(libc::uid_t, libc::gid_t)> = None;
         if euid == 0 {
             let uid_env = std::env::var("AETHERFLOW_SERVICE_UID")
@@ -250,22 +298,11 @@ pub fn ensure_interoperable_maintenance_lock_file(cfg: &ReleaseConfig) -> Releas
             if let (Some(uid_val), Some(gid_val)) = (uid_env, gid_env) {
                 target_owner = Some((uid_val as libc::uid_t, gid_val as libc::gid_t));
             }
-            if target_owner.is_none() {
-                if let Some(parent) = shared_lock_path.parent() {
-                    if let Ok(parent_file) = std::fs::OpenOptions::new()
-                        .read(true)
-                        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
-                        .open(parent)
-                    {
-                        let mut pst: libc::stat = unsafe { std::mem::zeroed() };
-                        if unsafe { libc::fstat(parent_file.as_raw_fd(), &mut pst) } == 0
-                            && pst.st_uid != 0
-                            && (pst.st_mode & libc::S_ISVTX) == 0
-                        {
-                            target_owner = Some((pst.st_uid, pst.st_gid));
-                        }
-                    }
-                }
+            if target_owner.is_none()
+                && parent_st.st_uid != 0
+                && (parent_st.st_mode & libc::S_ISVTX) == 0
+            {
+                target_owner = Some((parent_st.st_uid, parent_st.st_gid));
             }
             if target_owner.is_none() {
                 let user_name = std::env::var("AETHERFLOW_SERVICE_USER")
@@ -296,47 +333,52 @@ pub fn ensure_interoperable_maintenance_lock_file(cfg: &ReleaseConfig) -> Releas
                 }
             }
             if is_runtime_anchor {
-                if let Some(parent) = shared_lock_path.parent() {
-                    if let Ok(parent_file) = std::fs::OpenOptions::new()
-                        .read(true)
-                        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
-                        .open(parent)
-                    {
-                        let pfd = parent_file.as_raw_fd();
-                        if let Some((_, target_gid)) = target_owner {
-                            let _ = unsafe { libc::fchown(pfd, 0, target_gid) };
-                        }
-                        let _ = unsafe { libc::fchmod(pfd, 0o750) };
-                    }
+                if let Some((_, target_gid)) = target_owner {
+                    let _ = unsafe { libc::fchown(parent_dfd, 0, target_gid) };
                 }
+                let _ = unsafe { libc::fchmod(parent_dfd, 0o750) };
             }
         }
 
-        let file = match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&shared_lock_path)
-        {
-            Ok(existing) => existing,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .mode(0o660)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(&shared_lock_path)
-                .map_err(|create_err| {
-                    ReleaseError::io(
-                        format!(
-                            "initializing shared maintenance lockfile {}",
-                            shared_lock_path.display()
-                        ),
-                        create_err,
+        let open_existing = || unsafe {
+            libc::openat(
+                parent_dfd,
+                leaf_c.as_ptr(),
+                libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+
+        let (raw_fd, created_fresh) = {
+            let mut created = false;
+            let mut fd = open_existing();
+            if fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                fd = unsafe {
+                    libc::openat(
+                        parent_dfd,
+                        leaf_c.as_ptr(),
+                        libc::O_RDWR
+                            | libc::O_CREAT
+                            | libc::O_EXCL
+                            | libc::O_NOFOLLOW
+                            | libc::O_NONBLOCK
+                            | libc::O_CLOEXEC,
+                        0o660 as libc::c_uint,
                     )
-                })?,
-            Err(err) => {
+                };
+                if fd >= 0 {
+                    created = true;
+                } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
+                    fd = open_existing();
+                }
+            }
+            if fd < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::ELOOP) {
+                    return Err(ReleaseError::PathValidation {
+                        path: shared_lock_path,
+                        reason: "maintenance lockfile is a symbolic link".to_string(),
+                    });
+                }
                 return Err(ReleaseError::io(
                     format!(
                         "initializing shared maintenance lockfile {}",
@@ -345,7 +387,9 @@ pub fn ensure_interoperable_maintenance_lock_file(cfg: &ReleaseConfig) -> Releas
                     err,
                 ));
             }
+            (fd, created)
         };
+        let file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
 
         let fd = file.as_raw_fd();
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -369,6 +413,18 @@ pub fn ensure_interoperable_maintenance_lock_file(cfg: &ReleaseConfig) -> Releas
         }
 
         if euid == 0 {
+            if !is_runtime_anchor && parent_uid != 0 && !created_fresh {
+                let expected_uid = target_owner.map(|(uid, _)| uid).unwrap_or(parent_uid);
+                if st.st_uid == 0 || st.st_uid != expected_uid {
+                    return Err(ReleaseError::PathValidation {
+                        path: shared_lock_path,
+                        reason: format!(
+                            "refusing to chown pre-existing file (uid={}) at maintenance lock path inside non-root directory (uid={parent_uid})",
+                            st.st_uid
+                        ),
+                    });
+                }
+            }
             if let Some((target_uid, target_gid)) = target_owner {
                 let desired_uid = if is_runtime_anchor { 0 } else { target_uid };
                 if unsafe { libc::fchown(fd, desired_uid, target_gid) } != 0 {
@@ -509,10 +565,6 @@ where
     }
 
     cfg.release_channel = opts.channel;
-    let effective_for_lock = cfg.with_dry_run(opts.dry_run);
-    if let Err(e) = ensure_interoperable_maintenance_lock_file(&effective_for_lock) {
-        return (e.exit_code(), Err(e));
-    }
     let engine = ReleaseEngine::new_production(cfg);
     match engine.execute(&opts) {
         Ok(outcome) => (ExitCode::Success, Ok(outcome)),
@@ -533,48 +585,29 @@ pub fn ensure_no_active_package_lifecycle_jobs(
     cfg: &ReleaseConfig,
     command: ReleaseCommand,
 ) -> ReleaseResult<()> {
-    let path = crate::config::try_resolve_db_path(cfg, None)?.path;
-    crate::fs_security::ensure_no_symlink_ancestors(&path)?;
-    let meta = match std::fs::symlink_metadata(&path) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    ensure_no_active_package_lifecycle_jobs_with_env(cfg, command, None)
+}
+
+pub fn ensure_no_active_package_lifecycle_jobs_with_env(
+    cfg: &ReleaseConfig,
+    command: ReleaseCommand,
+    systemd_env_blob: Option<&str>,
+) -> ReleaseResult<()> {
+    let path = crate::config::try_resolve_db_path(cfg, systemd_env_blob)?.path;
+    let mut file = match crate::fs_security::validate_sqlite_file_and_sidecars_nofollow(&path) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(()),
         Err(err) => {
-            return Err(ReleaseError::io(
-                "inspecting lifecycle database metadata",
-                err,
-            ))
+            if command == ReleaseCommand::Rollback {
+                return Ok(());
+            }
+            return Err(err);
         }
     };
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return Err(ReleaseError::PathValidation {
-            path: path.clone(),
-            reason: "lifecycle database path must be a regular non-symlink file".to_string(),
-        });
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if meta.nlink() != 1 {
-            return Err(ReleaseError::PathValidation {
-                path: path.clone(),
-                reason: "lifecycle database path must not have multiple hardlinks".to_string(),
-            });
-        }
-    }
     // Reject a corrupt header before opening SQLite: even a read-only WAL
     // connection can rebuild -shm. Explicit recovery must preserve those files
     // until the rollback engine validates its snapshot and quiesces writers.
     let mut header = [0u8; 16];
-    let mut open_opts = std::fs::OpenOptions::new();
-    open_opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open_opts.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = open_opts
-        .open(&path)
-        .map_err(|e| ReleaseError::io("reading lifecycle database header", e))?;
     use std::io::Read;
     let count = file
         .read(&mut header)
@@ -590,41 +623,61 @@ pub fn ensure_no_active_package_lifecycle_jobs(
             "Cannot verify application lifecycle journal: invalid SQLite header".into(),
         ));
     }
-    let active = (|| -> rusqlite::Result<bool> {
-        let conn = rusqlite::Connection::open_with_flags(
-            &path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let table: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs')", [], |r| r.get(0))?;
+
+    // When `root` inspects a database inside an unprivileged directory (e.g. `aetherflow`-owned
+    // `/var/lib/aetherflow`), `open_sqlite_isolated_for_reconcile` copies pinned `O_NOFOLLOW` FDs
+    // into a private `0700` root scratch replica (`is_scratch == true`) so `reconcile_jobs_with_options`
+    // evaluates real `.lifecycle-owners` locks and checks active rows strictly in-scratch without
+    // `root` ever opening live SQLite sidecars (`-wal`/`-shm`/`-journal`) in `/var/lib/aetherflow`.
+    let active = (|| -> Result<bool, ReleaseError> {
+        let (conn, is_scratch) = crate::fs_security::open_sqlite_isolated_for_reconcile(&path)?;
+        let table: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| ReleaseError::Snapshot {
+                db_path: path.clone(),
+                reason: e.to_string(),
+            })?;
         if !table {
             return Ok(false);
         }
-        crate::lifecycle::reconcile_jobs(&conn, &path).map_err(|error| {
-            error
-                .downcast::<rusqlite::Error>()
-                .unwrap_or_else(|error| rusqlite::Error::InvalidParameterName(error.to_string()))
-        })?;
-        conn.query_row("SELECT EXISTS(SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted'))", [], |r| r.get(0))
+        crate::lifecycle::reconcile_jobs_with_options(&conn, &path, !is_scratch).map_err(
+            |error| ReleaseError::Snapshot {
+                db_path: path.clone(),
+                reason: error.to_string(),
+            },
+        )?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted'))",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| ReleaseError::Snapshot {
+            db_path: path.clone(),
+            reason: e.to_string(),
+        })
     })();
     let active = match active {
         Ok(active) => active,
-        // Explicit rollback must still be able to recover a corrupt database.
-        // Other I/O, busy, or permission errors remain fail-closed.
-        Err(rusqlite::Error::SqliteFailure(error, _))
+        Err(ReleaseError::Snapshot { ref reason, .. })
             if command == ReleaseCommand::Rollback
-                && matches!(
-                    error.code,
-                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
-                ) =>
+                && (reason.contains("database disk image is malformed")
+                    || reason.contains("file is not a database")
+                    || reason.contains("DatabaseCorrupt")
+                    || reason.contains("NotADatabase")) =>
         {
             false
         }
+        Err(ReleaseError::PathValidation { .. }) if command == ReleaseCommand::Rollback => false,
+        Err(ReleaseError::Config(msg)) => return Err(ReleaseError::Config(msg)),
         Err(error) => {
             return Err(ReleaseError::Config(format!(
                 "Cannot verify application lifecycle journal: {}",
                 error
-            )))
+            )));
         }
     };
     if active {

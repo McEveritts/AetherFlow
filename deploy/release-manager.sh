@@ -76,7 +76,7 @@ write_self_update_status_receipt() {
     # The scheduler creates the directory and receipt and pins the directory's
     # device/inode. Never bootstrap or rebind a worker receipt by a pathname.
     if command -v python3 >/dev/null 2>&1; then
-        python3 - "${SELF_UPDATE_STATUS_FILE}" "${status_str}" "${completed_bool}" "${success_bool}" "${SELF_UPDATE_JOB_UNIT}" "${exit_code_val}" "${err_msg}" "${AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV:-}" "${AETHERFLOW_SELF_UPDATE_DIRECTORY_INO:-}" <<'PY'
+        python3 -I - "${SELF_UPDATE_STATUS_FILE}" "${status_str}" "${completed_bool}" "${success_bool}" "${SELF_UPDATE_JOB_UNIT}" "${exit_code_val}" "${err_msg}" "${AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV:-}" "${AETHERFLOW_SELF_UPDATE_DIRECTORY_INO:-}" <<'PY'
 import fcntl, json, os, pathlib, stat, sys, uuid
 final_path, status_str, completed_s, success_s, job_unit, exit_s, err_msg, device, inode = sys.argv[1:]
 if not device.isdecimal() or not inode.isdecimal():
@@ -225,7 +225,7 @@ save_recovery_state() {
     command -v python3 >/dev/null 2>&1 || return 0
     RECOVERY_PHASE="${phase}"
     RECOVERY_OWNS_JOURNAL=true
-    python3 - "${RELEASES_DIR}" "${RECOVERY_OPERATION_ID}" "${RECOVERY_COMMAND}" "${RECOVERY_CHANNEL}" "${DRY_RUN:-false}" "${phase}" "${RECOVERY_CANDIDATE_RELEASE}" "${RECOVERY_PREVIOUS_RELEASE}" "${RESOLVED_DB_PATH:-}" "${RESOLVED_DB_SOURCE:-}" "${RECOVERY_SNAPSHOT_PATH}" "${RECOVERY_STARTED_AT}" "${err_msg}" <<'PY'
+    python3 -I - "${RELEASES_DIR}" "${RECOVERY_OPERATION_ID}" "${RECOVERY_COMMAND}" "${RECOVERY_CHANNEL}" "${DRY_RUN:-false}" "${phase}" "${RECOVERY_CANDIDATE_RELEASE}" "${RECOVERY_PREVIOUS_RELEASE}" "${RESOLVED_DB_PATH:-}" "${RESOLVED_DB_SOURCE:-}" "${RECOVERY_SNAPSHOT_PATH}" "${RECOVERY_STARTED_AT}" "${err_msg}" <<'PY'
 import datetime, json, os, pathlib, stat, sys, uuid
 
 (
@@ -312,7 +312,7 @@ finalize_recovery_state_on_exit() {
             save_recovery_state "failed" "${msg}" || true
             ;;
         stage4_rollback)
-            if [[ "${RECOVERY_FROM_UNFINISHED_POST_SWAP}" == true ]]; then
+            if [[ "${RECOVERY_FROM_UNFINISHED_POST_SWAP}" == true || "${ROLLBACK_POST_SWAP_ACTIVE:-false}" == true ]]; then
                 save_recovery_state "stage4_rollback" "${msg}" || true
             else
                 save_recovery_state "failed" "${msg}" || true
@@ -335,6 +335,22 @@ finalize_self_update_status_on_exit() {
     fi
 }
 
+release_fd_lock_coproc() {
+    if [[ -n "${AF_LOCK_COPROC_IN_FD:-}" ]]; then
+        eval "exec ${AF_LOCK_COPROC_IN_FD}>&-" 2>/dev/null || true
+        AF_LOCK_COPROC_IN_FD=""
+    fi
+    if [[ -n "${AF_LOCK_COPROC_OUT_FD:-}" ]]; then
+        eval "exec ${AF_LOCK_COPROC_OUT_FD}<&-" 2>/dev/null || true
+        AF_LOCK_COPROC_OUT_FD=""
+    fi
+    if [[ -n "${AF_LOCK_COPROC_PID:-}" ]]; then
+        kill "${AF_LOCK_COPROC_PID}" 2>/dev/null || true
+        wait "${AF_LOCK_COPROC_PID}" 2>/dev/null || true
+        AF_LOCK_COPROC_PID=""
+    fi
+}
+
 cleanup_on_exit() {
     local rc="$1"
     if [[ -n "${ACTIVE_STAGE_DIR:-}" && -d "${ACTIVE_STAGE_DIR}" && ! -L "${ACTIVE_STAGE_DIR}" ]]; then
@@ -343,6 +359,7 @@ cleanup_on_exit() {
     ACTIVE_STAGE_DIR=""
     finalize_recovery_state_on_exit "${rc}"
     finalize_self_update_status_on_exit "${rc}"
+    release_fd_lock_coproc
 }
 
 if [[ -n "${SELF_UPDATE_STATUS_FILE}" ]]; then
@@ -382,7 +399,7 @@ if [[ -n "${EFFECTIVE_RELEASE_ROOT}" ]]; then
     : "${ENV_FILE:=${EFFECTIVE_RELEASE_ROOT}/etc/aetherflow/aetherflow.env}"
     : "${SYSTEMD_UNITS_SRC:=${EFFECTIVE_RELEASE_ROOT}/opt/AetherFlow/deploy/systemd}"
     : "${SYSTEMD_UNITS_DST:=${EFFECTIVE_RELEASE_ROOT}/etc/systemd/system}"
-    : "${CLI_BIN_DIR:=${EFFECTIVE_RELEASE_ROOT}/usr/local/bin}"
+    : "${SYS_BIN_DIR:=${EFFECTIVE_RELEASE_ROOT}/usr/bin}"
     : "${TRANSCODE_SHIM_PATH:=${EFFECTIVE_RELEASE_ROOT}/usr/lib/aetherflow/transcode/ffmpeg}"
 fi
 
@@ -390,11 +407,13 @@ load_conf_file_safely() {
     local conf_path="$1"
     if command -v python3 >/dev/null 2>&1; then
         local parsed_records=""
-        if ! parsed_records="$(python3 - "${conf_path}" "${SCRIPT_DIR}" <<'PY'
-import base64, re, sys
+        if ! parsed_records="$(python3 -I - "${conf_path}" "${SCRIPT_DIR}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY'
+import base64, errno, os, pathlib, re, stat, sys
 
 conf_path = sys.argv[1]
 script_dir = sys.argv[2]
+confine_root_raw = sys.argv[3]
+MAX_CONF_BYTES = 65536
 allowed_keys = {
     "RELEASES_DIR", "CURRENT_LINK", "REPO_DIR", "LEGACY_OPT_ROOT", "DRY_RUN_ROOT",
     "GITHUB_REPO", "RELEASE_CHANNEL", "ARTIFACT_NAME", "RELEASE_ASSET_NAME", "CHECKSUM_NAME", "GIT_BRANCH",
@@ -477,9 +496,107 @@ def decode_value(raw, key, line_no):
         raise ValueError(f"unsupported parameter expansion for {key} at line {line_no}")
     return s.replace("${SCRIPT_DIR}", script_dir), False
 
+def open_conf_file_via_openat(path_str):
+    p = pathlib.PurePosixPath(path_str)
+    if ".." in p.parts:
+        raise ValueError(f"refusing parent traversal in configuration path: {path_str}")
+    abs_p = pathlib.PurePosixPath(os.path.abspath(path_str))
+    leaf_name = abs_p.name
+    if not leaf_name or leaf_name in (".", ".."):
+        raise ValueError(f"invalid configuration path: {path_str}")
+    confine = pathlib.PurePosixPath(confine_root_raw.rstrip("/") or "/") if confine_root_raw else None
+    if confine is not None:
+        try:
+            rel_parents = abs_p.parent.relative_to(confine).parts
+            anchor = pathlib.Path(str(confine))
+        except ValueError:
+            rel_parents = abs_p.parent.parts[1:]
+            anchor = pathlib.Path("/")
+    else:
+        rel_parents = abs_p.parent.parts[1:]
+        anchor = pathlib.Path("/")
+
+    O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+    O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+    O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+    O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+    cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    cur = anchor
+    try:
+        for part in rel_parents:
+            nxt = cur / part
+            st = os.stat(part, dir_fd=cur_fd, follow_symlinks=False)
+            if stat.S_ISLNK(st.st_mode):
+                if part == "current" and cur.name == "AetherFlow" and cur.parent.name == "opt":
+                    if os.geteuid() == 0 and st.st_uid != 0:
+                        raise ValueError(f"refusing non-root-owned current release symlink: {nxt}")
+                    raw_target = pathlib.PurePosixPath(os.readlink(part, dir_fd=cur_fd))
+                    if ".." in raw_target.parts:
+                        raise ValueError(f"refusing traversal in current release symlink: {nxt}")
+                    resolved_target = raw_target if raw_target.is_absolute() else pathlib.PurePosixPath(str(cur)) / raw_target
+                    expected_releases = pathlib.PurePosixPath(str(cur / "releases"))
+                    if resolved_target.parent != expected_releases:
+                        raise ValueError(f"refusing current release symlink outside releases/: {nxt}")
+                    rel_fd = os.open("releases", os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+                    try:
+                        epoch_fd = os.open(resolved_target.name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=rel_fd)
+                    except Exception:
+                        os.close(rel_fd)
+                        raise
+                    try:
+                        if os.geteuid() == 0:
+                            for hfd, hpath in ((rel_fd, expected_releases), (epoch_fd, resolved_target)):
+                                hst = os.fstat(hfd)
+                                if hst.st_uid != 0 or (hst.st_mode & 0o022) != 0:
+                                    raise ValueError(f"refusing untrusted release directory ownership/mode: {hpath}")
+                    except Exception:
+                        os.close(epoch_fd)
+                        os.close(rel_fd)
+                        raise
+                    os.close(rel_fd)
+                    os.close(cur_fd)
+                    cur_fd = epoch_fd
+                    cur = pathlib.Path(str(resolved_target))
+                    continue
+                raise ValueError(f"refusing symlinked configuration ancestor directory: {nxt}")
+            if not stat.S_ISDIR(st.st_mode):
+                raise ValueError(f"configuration ancestor is not a directory: {nxt}")
+            nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+            cur = nxt
+        return os.open(leaf_name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=cur_fd)
+    finally:
+        os.close(cur_fd)
+
 try:
-    with open(conf_path, "r", encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
+    fd = open_conf_file_via_openat(conf_path)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"configuration path is not a regular file: {conf_path}")
+        if (st.st_mode & 0o002) != 0:
+            raise ValueError(f"refusing world-writable configuration file (mode {st.st_mode & 0o777:04o}): {conf_path}")
+        if os.geteuid() == 0:
+            if st.st_uid != 0:
+                raise ValueError(f"refusing non-root-owned configuration file (uid={st.st_uid}) while running as root: {conf_path}")
+            if (st.st_mode & 0o022) != 0:
+                raise ValueError(f"refusing group/world-writable configuration file (mode {st.st_mode & 0o777:04o}) while running as root: {conf_path}")
+        if st.st_size > MAX_CONF_BYTES:
+            raise ValueError(f"configuration file exceeds maximum size ({MAX_CONF_BYTES} bytes): {conf_path}")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 8192)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_CONF_BYTES:
+                raise ValueError(f"configuration file exceeds maximum size ({MAX_CONF_BYTES} bytes): {conf_path}")
+            chunks.append(chunk)
+        lines = b"".join(chunks).decode("utf-8").splitlines()
+    finally:
+        os.close(fd)
     for idx, raw_line in enumerate(lines, 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -512,7 +629,7 @@ PY
             rest="${rec#*:}"
             key="${rest%%:*}"
             encoded_val="${rest#*:}"
-            val="$(python3 -c 'import base64, sys; sys.stdout.write(base64.b64decode(sys.argv[1]).decode("utf-8"))' "${encoded_val}")"
+            val="$(python3 -I -c 'import base64, sys; sys.stdout.write(base64.b64decode(sys.argv[1]).decode("utf-8"))' "${encoded_val}")"
             if [[ "${mode}" == "DEFAULT" ]]; then
                 if [[ -z "${!key:-}" ]]; then
                     printf -v "${key}" '%s' "${val}"
@@ -556,10 +673,10 @@ elif [[ -n "${CLI_CONF_OVERRIDE}" || -z "${EFFECTIVE_RELEASE_ROOT}" ]]; then
 fi
 
 : "${SQLITE_DB:=aetherflow.sqlite}"
-: "${SNAPSHOT_TIMEOUT:=10}"
-: "${MAX_RELEASES:=5}"
-: "${HEALTH_RETRIES:=15}"
-: "${HEALTH_INTERVAL:=2}"
+: "${SNAPSHOT_TIMEOUT:=30}"
+: "${MAX_RELEASES:=3}"
+: "${HEALTH_RETRIES:=10}"
+: "${HEALTH_INTERVAL:=3}"
 # Default to the public deep readiness gate. Explicit HEALTH_ENDPOINT overrides
 # are preserved; any override used for deployment must report full application
 # readiness to supply an equivalent release gate.
@@ -599,8 +716,10 @@ validate_path_within_isolated_root() {
 
 if [[ -n "${EFFECTIVE_RELEASE_ROOT}" ]]; then
     : "${CLI_BIN_DIR:=${EFFECTIVE_RELEASE_ROOT}/usr/local/bin}"
+    : "${LEGACY_BIN_ROOT:=${CLI_BIN_DIR%/}/AetherFlow}"
+    : "${SYS_BIN_DIR:=${EFFECTIVE_RELEASE_ROOT}/usr/bin}"
     : "${TRANSCODE_SHIM_PATH:=${EFFECTIVE_RELEASE_ROOT}/usr/lib/aetherflow/transcode/ffmpeg}"
-    for _root_check_var in RELEASES_DIR CURRENT_LINK REPO_DIR LEGACY_OPT_ROOT DRY_RUN_ROOT LOG_FILE DATA_DIR ENV_DIR ENV_FILE SYSTEMD_UNITS_DST CLI_BIN_DIR TRANSCODE_SHIM_PATH; do
+    for _root_check_var in RELEASES_DIR CURRENT_LINK REPO_DIR LEGACY_OPT_ROOT DRY_RUN_ROOT LOG_FILE DATA_DIR ENV_DIR ENV_FILE SYSTEMD_UNITS_DST CLI_BIN_DIR LEGACY_BIN_ROOT SYS_BIN_DIR TRANSCODE_SHIM_PATH; do
         validate_path_within_isolated_root "${_root_check_var}" "${!_root_check_var:-}"
     done
 fi
@@ -684,10 +803,12 @@ case "${COMMAND}" in
 esac
 
 # Captured before the dry-run rewrite so resolution still sees the host layout.
+CONFIG_REPO_DIR="${REPO_DIR:-}"
 CONFIG_ENV_FILE="${ENV_FILE}"
 CONFIG_DATA_DIR="${DATA_DIR}"
 LEGACY_OPT_ROOT="${LEGACY_OPT_ROOT:-/opt/AetherFlow}"
-LEGACY_BIN_ROOT="${LEGACY_BIN_ROOT:-/usr/local/bin/AetherFlow}"
+LEGACY_BIN_ROOT="${LEGACY_BIN_ROOT:-${CLI_BIN_DIR:-/usr/local/bin}/AetherFlow}"
+SYS_BIN_DIR="${SYS_BIN_DIR:-/usr/bin}"
 DRY_RUN_ROOT="${DRY_RUN_ROOT:-/tmp/aetherflow-dryrun}"
 RESOLVED_DB_PATH=""
 RESOLVED_DB_SOURCE=""
@@ -698,19 +819,239 @@ is_trusted_root_env_file() {
     local target="$1"
     [[ -n "${target}" && -f "${target}" && ! -L "${target}" ]] || return 1
     command -v python3 >/dev/null 2>&1 || return 1
-    python3 - "${target}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY' >/dev/null 2>&1
-import os, stat, sys
+    python3 -I - "${target}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY' >/dev/null 2>&1
+import os, pathlib, stat, sys
 target, isolated_root = sys.argv[1], sys.argv[2]
-st = os.lstat(target)
-if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+p = pathlib.PurePosixPath(os.path.abspath(target))
+if not p.is_absolute() or ".." in p.parts or len(p.parts) < 2:
     sys.exit(1)
-if st.st_mode & 0o022:
+
+confine = pathlib.PurePosixPath(isolated_root.rstrip("/") or "/") if isolated_root else None
+if confine is not None:
+    try:
+        rel_parent = p.parent.relative_to(confine).parts
+        anchor = pathlib.Path(str(confine))
+    except ValueError:
+        sys.exit(1)
+else:
+    rel_parent = p.parent.parts[1:]
+    anchor = pathlib.Path("/")
+
+cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+try:
+    for part in rel_parent:
+        nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt_fd
+        if confine is None:
+            dst = os.fstat(cur_fd)
+            if not stat.S_ISDIR(dst.st_mode) or dst.st_uid != 0 or (dst.st_mode & 0o022) != 0:
+                sys.exit(1)
+    fd = os.open(p.parts[-1], os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=cur_fd)
+finally:
+    os.close(cur_fd)
+try:
+    st = os.fstat(fd)
+finally:
+    os.close(fd)
+if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or (st.st_mode & 0o022) != 0:
     sys.exit(1)
 if st.st_uid == 0:
     sys.exit(0)
 if isolated_root and st.st_uid == os.geteuid():
     sys.exit(0)
 sys.exit(1)
+PY
+}
+
+write_atomic_private_file() {
+    local dest_path="$1"
+    local file_mode="$2"
+    local content="$3"
+    python3 -I - "${dest_path}" "${file_mode}" "${content}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY'
+import errno, os, pathlib, stat, sys, uuid
+
+dest_path, mode_s, content, confine_raw = sys.argv[1:5]
+mode = int(mode_s, 8) & 0o777
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+p = pathlib.PurePosixPath(os.path.abspath(dest_path))
+if not p.is_absolute() or ".." in p.parts or len(p.parts) < 2:
+    raise SystemExit(f"Invalid destination file path: {dest_path}")
+leaf = p.parts[-1]
+if not leaf or leaf in (".", ".."):
+    raise SystemExit(f"Invalid destination leaf name: {dest_path}")
+
+confine = pathlib.PurePosixPath(confine_raw.rstrip("/") or "/") if confine_raw else None
+if confine is not None:
+    try:
+        rel_parent = p.parent.relative_to(confine).parts
+        anchor = pathlib.Path(str(confine))
+    except ValueError:
+        raise SystemExit(f"Path {dest_path} escapes isolated root {confine}")
+else:
+    rel_parent = p.parent.parts[1:]
+    anchor = pathlib.Path("/")
+
+cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+try:
+    for part in rel_parent:
+        nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt_fd
+    try:
+        existing = os.stat(leaf, dir_fd=cur_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        raise SystemExit(f"Refusing non-regular or symlinked target file: {dest_path}")
+    tmp_name = f".{leaf}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode, dir_fd=cur_fd)
+    try:
+        data = content.encode("utf-8")
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError(f"short write to {dest_path}")
+            view = view[written:]
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+    except Exception:
+        os.close(fd)
+        try:
+            os.unlink(tmp_name, dir_fd=cur_fd)
+        except OSError as rm_err:
+            _ = rm_err
+        raise
+    os.close(fd)
+    os.replace(tmp_name, leaf, src_dir_fd=cur_fd, dst_dir_fd=cur_fd)
+    try:
+        os.fsync(cur_fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.EBADF, errno.EROFS):
+            raise
+finally:
+    os.close(cur_fd)
+PY
+}
+
+ensure_trusted_dry_run_tree() {
+    local dry_root="$1"
+    shift
+    python3 -I - "${dry_root}" "${EFFECTIVE_RELEASE_ROOT:-}" "$@" <<'PY'
+import os, pathlib, stat, sys
+
+dry_root = sys.argv[1]
+confine_raw = sys.argv[2]
+subdirs = sys.argv[3:]
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+is_root = os.geteuid() == 0
+
+p_root = pathlib.PurePosixPath(os.path.abspath(dry_root))
+if not p_root.is_absolute() or ".." in p_root.parts or len(p_root.parts) < 2:
+    raise SystemExit(f"Refusing invalid DRY_RUN_ROOT: {dry_root}")
+
+confine = pathlib.PurePosixPath(confine_raw.rstrip("/") or "/") if confine_raw else None
+if confine is not None:
+    try:
+        rel_root = p_root.relative_to(confine).parts
+        anchor = pathlib.Path(str(confine))
+    except ValueError:
+        raise SystemExit(f"DRY_RUN_ROOT {dry_root} escapes isolated root {confine}")
+else:
+    rel_root = p_root.parts[1:]
+    anchor = pathlib.Path("/")
+
+def verify_root_dir_fd(fd, label):
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        raise SystemExit(f"Refusing non-directory dry-run path: {label}")
+    if is_root:
+        if st.st_uid != 0:
+            raise SystemExit(f"Refusing non-root-owned dry-run directory (uid={st.st_uid}): {label}")
+        if (st.st_mode & 0o022) != 0:
+            raise SystemExit(f"Refusing group/world-writable root dry-run directory (mode={stat.S_IMODE(st.st_mode):o}): {label}")
+
+cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+try:
+    cur_path = anchor
+    # Walk ancestors up to DRY_RUN_ROOT parent (root-owned, allowing sticky /tmp or /var/tmp when non-isolated).
+    for part in rel_root[:-1]:
+        cur_path = cur_path / part
+        try:
+            nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        except FileNotFoundError:
+            try:
+                os.mkdir(part, 0o755, dir_fd=cur_fd)
+            except FileExistsError as exists_err:
+                _ = exists_err
+            nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt_fd
+        if is_root and confine is None:
+            st = os.fstat(cur_fd)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+                raise SystemExit(f"Refusing untrusted DRY_RUN_ROOT ancestor: {cur_path}")
+            if (st.st_mode & 0o022) != 0 and (st.st_mode & stat.S_ISVTX) == 0:
+                raise SystemExit(f"Refusing non-sticky writable DRY_RUN_ROOT ancestor: {cur_path}")
+
+    root_leaf = rel_root[-1]
+    cur_path = cur_path / root_leaf
+    try:
+        root_fd = os.open(root_leaf, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+    except FileNotFoundError:
+        created_root = False
+        try:
+            os.mkdir(root_leaf, 0o700, dir_fd=cur_fd)
+            created_root = True
+        except FileExistsError as exists_err:
+            _ = exists_err
+        root_fd = os.open(root_leaf, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        if created_root:
+            os.fchmod(root_fd, 0o700)
+    os.close(cur_fd)
+    cur_fd = root_fd
+    verify_root_dir_fd(cur_fd, str(cur_path))
+
+    for spec in subdirs:
+        rel_sub, mode_s = spec.split(":", 1)
+        sub_mode = int(mode_s, 8) & 0o755
+        sub_fd = os.dup(cur_fd)
+        sub_path = cur_path
+        try:
+            for part in pathlib.PurePosixPath(rel_sub).parts:
+                if part in ("", ".", "..", "/"):
+                    raise SystemExit(f"Invalid dry-run subdir component: {rel_sub}")
+                sub_path = sub_path / part
+                try:
+                    nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=sub_fd)
+                except FileNotFoundError:
+                    created_sub = False
+                    try:
+                        os.mkdir(part, sub_mode, dir_fd=sub_fd)
+                        created_sub = True
+                    except FileExistsError as exists_err:
+                        _ = exists_err
+                    nxt = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=sub_fd)
+                    if created_sub:
+                        os.fchmod(nxt, sub_mode)
+                os.close(sub_fd)
+                sub_fd = nxt
+                verify_root_dir_fd(sub_fd, str(sub_path))
+        finally:
+            os.close(sub_fd)
+finally:
+    os.close(cur_fd)
 PY
 }
 
@@ -721,12 +1062,19 @@ if [[ "${DRY_RUN}" == true ]]; then
     RELEASES_DIR="${DRY_RUN_ROOT}/releases"
     CURRENT_LINK="${DRY_RUN_ROOT}/current"
     REPO_DIR="${DRY_RUN_ROOT}/repo"
+    LEGACY_OPT_ROOT="${DRY_RUN_ROOT}/opt/AetherFlow"
     DATA_DIR="${DRY_RUN_ROOT}/data"
     ENV_DIR="${DRY_RUN_ROOT}/etc"
     ENV_FILE="${DRY_RUN_ROOT}/etc/aetherflow.env"
     LOG_FILE="${DRY_RUN_ROOT}/deploy.log"
     CLI_BIN_DIR="${DRY_RUN_ROOT}/usr/local/bin"
-    mkdir -p "${REPO_DIR}" "${DATA_DIR}" "${ENV_DIR}"
+    LEGACY_BIN_ROOT="${CLI_BIN_DIR}/AetherFlow"
+    SYS_BIN_DIR="${DRY_RUN_ROOT}/usr/bin"
+    if ! ensure_trusted_dry_run_tree "${DRY_RUN_ROOT}" \
+        "releases:0755" "repo:0755" "opt/AetherFlow:0755" "data:0700" "etc:0750" "usr/local/bin:0755" "usr/bin:0755"; then
+        echo "[FATAL] Refusing untrusted or symlinked DRY_RUN_ROOT: ${DRY_RUN_ROOT}" >&2
+        exit 4
+    fi
 fi
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -753,7 +1101,7 @@ append_log_line_locked() {
     local line="$1"
     [[ "${LOG_FILE}" != "/dev/null" ]] || return 0
     if command -v python3 >/dev/null 2>&1; then
-        python3 - "${LOG_FILE}" "${line}" <<'PY' || return 1
+        python3 -I - "${LOG_FILE}" "${line}" <<'PY' || return 1
 import fcntl, os, stat, sys
 
 target, line = sys.argv[1], sys.argv[2]
@@ -761,14 +1109,17 @@ parent = os.path.dirname(target) or "."
 pst = os.lstat(parent)
 if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
     raise SystemExit(1)
-flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
 fd = os.open(target, flags, 0o640)
 try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        raise SystemExit(1)
+    if hasattr(os, "O_NONBLOCK"):
+        cur_fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, cur_fl & ~os.O_NONBLOCK)
     fcntl.flock(fd, fcntl.LOCK_SH)
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-            raise SystemExit(1)
         data = (line + "\n").encode("utf-8", errors="replace")
         view = memoryview(data)
         while view:
@@ -818,14 +1169,20 @@ RELEASE_DIR="${RELEASES_DIR}/${EPOCH}"
 read_env_file_value() {
     local file="$1"
     local key="$2"
-    [[ -f "${file}" ]] || return 1
+    [[ -f "${file}" && ! -L "${file}" ]] || return 1
 
     if command -v python3 >/dev/null 2>&1; then
-        python3 - "${file}" "${key}" <<'PY'
-import sys
+        python3 -I - "${file}" "${key}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY'
+import os, pathlib, stat, sys
 
 path, target_key = sys.argv[1], sys.argv[2]
+confine_root_raw = sys.argv[3] if len(sys.argv) > 3 else ""
 prefix = target_key + "="
+MAX_ENV_BYTES = 262144
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 found = ""
 
 def decode_val(raw):
@@ -859,18 +1216,57 @@ def decode_val(raw):
     return s
 
 try:
-    with open(path, "r", encoding="utf-8") as fh:
-        for raw_line in fh:
-            line = raw_line.rstrip("\r\n").lstrip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export") and len(line) > 6 and line[6].isspace():
-                line = line[6:].lstrip()
-            if not line.startswith(prefix):
-                continue
-            val = decode_val(line[len(prefix):])
-            if val:
-                found = val
+    p = pathlib.PurePosixPath(os.path.abspath(path))
+    if ".." in p.parts or len(p.parts) < 2:
+        sys.exit(1)
+    confine = pathlib.PurePosixPath(confine_root_raw.rstrip("/") or "/") if confine_root_raw else None
+    if confine is not None:
+        try:
+            rel_parent = p.parent.relative_to(confine).parts
+            anchor = pathlib.Path(str(confine))
+        except ValueError:
+            rel_parent = p.parent.parts[1:]
+            anchor = pathlib.Path("/")
+    else:
+        rel_parent = p.parent.parts[1:]
+        anchor = pathlib.Path("/")
+    cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    try:
+        for part in rel_parent:
+            nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+        fd = os.open(p.parts[-1], os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=cur_fd)
+    finally:
+        os.close(cur_fd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_ENV_BYTES:
+            sys.exit(1)
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 8192)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_ENV_BYTES:
+                sys.exit(1)
+            chunks.append(chunk)
+        content = b"".join(chunks).decode("utf-8")
+    finally:
+        os.close(fd)
+    for raw_line in content.splitlines():
+        line = raw_line.rstrip("\r\n").lstrip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export") and len(line) > 6 and line[6].isspace():
+            line = line[6:].lstrip()
+        if not line.startswith(prefix):
+            continue
+        val = decode_val(line[len(prefix):])
+        if val:
+            found = val
 except Exception:
     sys.exit(1)
 
@@ -949,7 +1345,7 @@ read_systemd_environment_value() {
     [[ -n "${blob}" ]] || return 1
 
     if command -v python3 >/dev/null 2>&1; then
-        printf '%s' "${blob}" | python3 -c '
+        printf '%s' "${blob}" | python3 -I -c '
 import shlex, sys
 key = sys.argv[1]
 chunks = []
@@ -1026,9 +1422,11 @@ resolve_db_path_quiet() {
         RESOLVED_DB_SOURCE="AETHERFLOW_DB_PATH"
     else
         local file_af="" file_db="" file_alias=""
-        file_af="$(read_env_file_value "${CONFIG_ENV_FILE}" "AF_DB_PATH" || true)"
-        file_db="$(read_env_file_value "${CONFIG_ENV_FILE}" "DB_PATH" || true)"
-        file_alias="$(read_env_file_value "${CONFIG_ENV_FILE}" "AETHERFLOW_DB_PATH" || true)"
+        if [[ "${AETHERFLOW_SKIP_ENV_FILES:-0}" != "1" || "${CONFIG_ENV_FILE}" != "/etc/aetherflow/aetherflow.env" ]]; then
+            file_af="$(read_env_file_value "${CONFIG_ENV_FILE}" "AF_DB_PATH" || true)"
+            file_db="$(read_env_file_value "${CONFIG_ENV_FILE}" "DB_PATH" || true)"
+            file_alias="$(read_env_file_value "${CONFIG_ENV_FILE}" "AETHERFLOW_DB_PATH" || true)"
+        fi
 
         if [[ -n "${EFFECTIVE_RELEASE_ROOT}" ]]; then
             if [[ -n "${file_af}" && -n "${file_db}" && "${file_af%/}" != "${file_db%/}" ]]; then
@@ -1056,7 +1454,10 @@ resolve_db_path_quiet() {
             if command -v systemctl >/dev/null 2>&1; then
                 unit_blob="$(systemctl show -p Environment aetherflow-api 2>/dev/null || true)"
             fi
-            if [[ -n "${unit_blob}" ]] && val="$(read_systemd_environment_value "DB_PATH" "${unit_blob}")"; then
+            if [[ -n "${unit_blob}" ]] && val="$(read_systemd_environment_value "AF_DB_PATH" "${unit_blob}")"; then
+                RESOLVED_DB_PATH="${val}"
+                RESOLVED_DB_SOURCE="systemd:aetherflow-api:AF_DB_PATH"
+            elif [[ -n "${unit_blob}" ]] && val="$(read_systemd_environment_value "DB_PATH" "${unit_blob}")"; then
                 RESOLVED_DB_PATH="${val}"
                 RESOLVED_DB_SOURCE="systemd:aetherflow-api:DB_PATH"
             elif [[ -n "${unit_blob}" ]] && val="$(read_systemd_environment_value "AETHERFLOW_DB_PATH" "${unit_blob}")"; then
@@ -1082,39 +1483,885 @@ resolve_db_path() {
     log_info "Resolved database path: ${RESOLVED_DB_PATH} (source: ${RESOLVED_DB_SOURCE})"
 }
 
+atomic_publish_db_file() {
+    local mode="$1"      # "backup" (service-owned 0600), "snapshot" (root-owned 0600), or "restore" (service-owned 0600 + quarantine)
+    local src_path="$2"
+    local dest_path="$3"
+    local lock_leaf="${4:-}"
+    local lock_timeout="${5:-30}"
+    python3 -I - "${mode}" "${src_path}" "${dest_path}" "${EFFECTIVE_RELEASE_ROOT:-}" "${lock_leaf}" "${lock_timeout}" <<'PY'
+import errno, fcntl, os, pathlib, pwd, shutil, sqlite3, stat, subprocess, sys, time, uuid
+
+mode, src_path, dest_path, confine_root_raw, lock_leaf, lock_timeout_raw = sys.argv[1:7]
+lock_timeout = max(1, int(lock_timeout_raw or "30"))
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+is_root = os.geteuid() == 0
+
+def open_dir_nofollow(dir_str, create=False):
+    p = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if ".." in p.parts:
+        raise SystemExit(f"Refusing parent traversal in DB directory: {dir_str}")
+    confine = pathlib.PurePosixPath(confine_root_raw.rstrip("/") or "/") if confine_root_raw else None
+    if confine is not None:
+        try:
+            rel_parts = p.relative_to(confine).parts
+            anchor = pathlib.Path(str(confine))
+        except ValueError:
+            raise SystemExit(f"DB directory {dir_str} escapes isolated root {confine}")
+        if create and not os.path.lexists(anchor):
+            os.makedirs(anchor, mode=0o755, exist_ok=True)
+    else:
+        rel_parts = p.parts[1:]
+        anchor = pathlib.Path("/")
+    cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    cur = anchor
+    try:
+        for part in rel_parts:
+            cur = cur / part
+            try:
+                nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise SystemExit(f"DB directory does not exist: {cur}")
+                created_dir = False
+                try:
+                    os.mkdir(part, 0o700, dir_fd=cur_fd)
+                    created_dir = True
+                except FileExistsError as exists_err:
+                    _ = exists_err
+                nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+                if created_dir:
+                    os.fchmod(nxt_fd, 0o700)
+            except OSError as exc:
+                raise SystemExit(f"Refusing symlinked or non-directory DB parent path {cur}: {exc}")
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+        return cur_fd
+    except Exception:
+        os.close(cur_fd)
+        raise
+
+dest_abs = os.path.abspath(dest_path)
+parent_str = os.path.dirname(dest_abs)
+leaf_name = os.path.basename(dest_abs)
+if not leaf_name or leaf_name in (".", ".."):
+    raise SystemExit(f"Invalid DB destination path: {dest_path}")
+
+parent_fd = open_dir_nofollow(parent_str, create=True)
+lock_fd = -1
+stage_base_fd = -1
+stage_fd = -1
+stage_name = f".af-db-stage.{os.getpid()}.{uuid.uuid4().hex}"
+stage_path = None
+try:
+    parent_st = os.fstat(parent_fd)
+    if not stat.S_ISDIR(parent_st.st_mode):
+        raise SystemExit(f"DB parent is not a directory: {parent_str}")
+    if lock_leaf:
+        if "/" in lock_leaf or lock_leaf in (".", ".."):
+            raise SystemExit(f"Invalid snapshot lock filename: {lock_leaf}")
+        lock_fd = os.open(lock_leaf, os.O_RDWR | os.O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600, dir_fd=parent_fd)
+        lst = os.fstat(lock_fd)
+        if not stat.S_ISREG(lst.st_mode) or lst.st_nlink != 1:
+            raise SystemExit(f"Refusing non-regular or hardlinked snapshot lock file: {lock_leaf}")
+        os.fchmod(lock_fd, 0o600)
+        deadline = time.monotonic() + float(lock_timeout)
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise SystemExit(f"Timed out acquiring snapshot lock {lock_leaf} after {lock_timeout}s")
+                time.sleep(0.05)
+
+    # Prefer nearest same-FS root-owned non-group/world-writable ancestor when root writes into
+    # an unprivileged service directory (matching PrivateStagingDir in af-release/src/fs_security.rs).
+    chosen_base = None
+    if is_root and parent_st.st_uid != 0:
+        cur_anc = pathlib.Path(parent_str).parent
+        while str(cur_anc) != str(cur_anc.parent) or str(cur_anc) == "/":
+            anc_fd = -1
+            try:
+                anc_fd = open_dir_nofollow(str(cur_anc), create=False)
+                anc_st = os.fstat(anc_fd)
+                if anc_st.st_dev != parent_st.st_dev:
+                    os.close(anc_fd)
+                    anc_fd = -1
+                    break
+                if anc_st.st_uid == 0 and (anc_st.st_mode & 0o022) == 0:
+                    os.mkdir(stage_name, 0o700, dir_fd=anc_fd)
+                    chosen_base = (anc_fd, str(cur_anc))
+                    anc_fd = -1
+                    break
+            except OSError:
+                if anc_fd >= 0:
+                    os.close(anc_fd)
+                    anc_fd = -1
+                break
+            if anc_fd >= 0:
+                os.close(anc_fd)
+            if str(cur_anc) == "/":
+                break
+            cur_anc = cur_anc.parent
+
+    if chosen_base is not None:
+        stage_base_fd, base_str = chosen_base
+    else:
+        os.mkdir(stage_name, 0o700, dir_fd=parent_fd)
+        stage_base_fd = os.dup(parent_fd)
+        base_str = parent_str
+
+    stage_path = os.path.join(base_str, stage_name)
+    stage_fd = os.open(stage_name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=stage_base_fd)
+    stage_st = os.fstat(stage_fd)
+    expected_uid = 0 if is_root else os.geteuid()
+    if not stat.S_ISDIR(stage_st.st_mode) or stage_st.st_dev != parent_st.st_dev or stage_st.st_uid != expected_uid:
+        raise SystemExit(f"Private staging directory failed same-FS/owner invariants: {stage_path}")
+    os.fchmod(stage_fd, 0o700)
+
+    def is_trusted_root_path_dir(dir_str, allow_sticky):
+        dp = pathlib.PurePosixPath(os.path.abspath(dir_str))
+        if not dp.is_absolute() or ".." in dp.parts:
+            return False
+        cur_p = pathlib.Path("/")
+        for part in dp.parts:
+            cur_p = pathlib.Path("/") if part == "/" else cur_p / part
+            try:
+                cst = os.lstat(cur_p)
+            except OSError:
+                return False
+            if stat.S_ISLNK(cst.st_mode) or not stat.S_ISDIR(cst.st_mode) or cst.st_uid != 0:
+                return False
+            writable = (cst.st_mode & 0o022) != 0
+            sticky = (cst.st_mode & getattr(stat, "S_ISVTX", 0o1000)) != 0
+            if writable and not (allow_sticky and sticky):
+                return False
+        return True
+
+    MAX_SCRATCH_BYTES = 2 * 1024 * 1024 * 1024
+
+    def create_trusted_root_scratch(min_free=16 * 1024 * 1024):
+        sc_name = f".af-root-db-stage.{os.getpid()}.{uuid.uuid4().hex}"
+        candidates = ("/var/tmp", "/tmp", "/run") if is_root else (os.environ.get("TMPDIR", "/tmp"),)
+        for cand in candidates:
+            if is_root and not is_trusted_root_path_dir(cand, allow_sticky=True):
+                continue
+            cand_fd = -1
+            try:
+                cand_fd = os.open(cand, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                vfs = os.fstatvfs(cand_fd)
+                avail = vfs.f_bavail * (vfs.f_frsize or vfs.f_bsize)
+                if avail < min_free:
+                    os.close(cand_fd)
+                    continue
+                os.mkdir(sc_name, 0o700, dir_fd=cand_fd)
+                sc_fd = os.open(sc_name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cand_fd)
+                sc_st = os.fstat(sc_fd)
+                if not stat.S_ISDIR(sc_st.st_mode) or sc_st.st_uid != expected_uid:
+                    os.close(sc_fd)
+                    os.rmdir(sc_name, dir_fd=cand_fd)
+                    os.close(cand_fd)
+                    continue
+                os.fchmod(sc_fd, 0o700)
+                return cand_fd, sc_fd, sc_name, os.path.join(cand, sc_name)
+            except OSError:
+                if cand_fd >= 0:
+                    os.close(cand_fd)
+        raise SystemExit("Failed to create trusted root-owned 0700 scratch directory for SQLite backup")
+
+    SQLITE_JOURNAL_MAGIC = b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
+
+    def reject_super_journal_fd(fd, label_path):
+        st = os.fstat(fd)
+        if st.st_size >= 16:
+            os.lseek(fd, -8, os.SEEK_END)
+            tail = os.read(fd, 8)
+            os.lseek(fd, 0, os.SEEK_SET)
+            if tail == SQLITE_JOURNAL_MAGIC:
+                raise SystemExit(f"Refusing SQLite rollback journal with super-journal trailer: {label_path}")
+
+    def copy_fd_to_dirfd(in_fd, out_dir_fd, out_name, remaining_cap=None):
+        out_fd = os.open(out_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=out_dir_fd)
+        copied = 0
+        tail8 = b""
+        try:
+            while True:
+                chunk = os.read(in_fd, 65536)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if remaining_cap is not None and copied > remaining_cap:
+                    raise SystemExit(f"SQLite scratch copy exceeded {MAX_SCRATCH_BYTES} byte limit")
+                tail8 = (tail8 + chunk)[-8:]
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(out_fd, view)
+                    if written <= 0:
+                        raise OSError(f"short write staging {out_name}")
+                    view = view[written:]
+            if out_name.endswith("-journal") and copied >= 16 and tail8 == SQLITE_JOURNAL_MAGIC:
+                raise SystemExit(f"Refusing SQLite rollback journal with super-journal trailer: {out_name}")
+            return None if remaining_cap is None else (remaining_cap - copied)
+        finally:
+            os.close(out_fd)
+
+    staged_ext = ".bak" if leaf_name.endswith(".bak") else ".sqlite"
+    staged_name = f"staged.{uuid.uuid4().hex}{staged_ext}"
+    staged_full = os.path.join(stage_path, staged_name)
+    stage_path_safe_for_root = (not is_root) or is_trusted_root_path_dir(base_str, allow_sticky=True)
+
+    def py_sqlite_backup_and_check(src_file, dst_file, readonly_src=False):
+        src_uri = pathlib.Path(src_file).as_uri() + ("?mode=ro" if readonly_src else "")
+        src_conn = sqlite3.connect(src_uri, uri=True, timeout=5)
+        try:
+            src_conn.execute("PRAGMA trusted_schema = OFF;")
+            dst_conn = sqlite3.connect(dst_file, timeout=5)
+            try:
+                dst_conn.execute("PRAGMA trusted_schema = OFF;")
+                src_conn.backup(dst_conn)
+                dst_conn.commit()
+            finally:
+                dst_conn.close()
+        finally:
+            src_conn.close()
+
+    def py_sqlite_integrity_ok(target_file):
+        conn = sqlite3.connect(pathlib.Path(target_file).as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            conn.execute("PRAGMA trusted_schema = OFF;")
+            row = conn.execute("PRAGMA integrity_check;").fetchone()
+            return "".join((row[0] if row and row[0] else "").split())
+        finally:
+            conn.close()
+
+    if mode == "placeholder":
+        placeholder_sql = "CREATE TABLE IF NOT EXISTS _meta (key TEXT, value TEXT); INSERT INTO _meta VALUES ('version','dryrun');"
+        if stage_path_safe_for_root:
+            init_fd = os.open(staged_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=stage_fd)
+            os.close(init_fd)
+            pconn = sqlite3.connect(staged_full, timeout=5)
+            try:
+                pconn.execute("PRAGMA trusted_schema = OFF;")
+                pconn.executescript(placeholder_sql)
+                pconn.commit()
+            finally:
+                pconn.close()
+        else:
+            sc_base_fd, sc_fd, sc_name, sc_path = create_trusted_root_scratch(16 * 1024 * 1024)
+            try:
+                sc_init = os.open(staged_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=sc_fd)
+                os.close(sc_init)
+                pconn = sqlite3.connect(os.path.join(sc_path, staged_name), timeout=5)
+                try:
+                    pconn.execute("PRAGMA trusted_schema = OFF;")
+                    pconn.executescript(placeholder_sql)
+                    pconn.commit()
+                finally:
+                    pconn.close()
+                sc_vfd = os.open(staged_name, os.O_RDONLY | O_NOFOLLOW | O_CLOEXEC, dir_fd=sc_fd)
+                try:
+                    sc_vst = os.fstat(sc_vfd)
+                    if not stat.S_ISREG(sc_vst.st_mode) or sc_vst.st_nlink != 1 or sc_vst.st_size < 100:
+                        raise SystemExit("Staged SQLite placeholder failed size/exclusivity invariant")
+                    if os.read(sc_vfd, 16) != b"SQLite format 3\x00":
+                        raise SystemExit("Staged SQLite placeholder failed SQLite header verification")
+                    os.lseek(sc_vfd, 0, os.SEEK_SET)
+                    copy_fd_to_dirfd(sc_vfd, stage_fd, staged_name)
+                finally:
+                    os.close(sc_vfd)
+            finally:
+                for sc_left in (staged_name, staged_name + "-wal", staged_name + "-shm", staged_name + "-journal"):
+                    try:
+                        os.unlink(sc_left, dir_fd=sc_fd)
+                    except FileNotFoundError:
+                        _ = sc_left
+                os.close(sc_fd)
+                try:
+                    os.rmdir(sc_name, dir_fd=sc_base_fd)
+                except OSError:
+                    _ = sc_name
+                os.close(sc_base_fd)
+    else:
+        src_abs = os.path.abspath(src_path)
+        src_parent_str = os.path.dirname(src_abs)
+        src_leaf_name = os.path.basename(src_abs)
+
+        def db_files_root_owned_safe(pfd, lname):
+            for sfx in ("", "-wal", "-shm", "-journal"):
+                try:
+                    fst = os.stat(lname + sfx, dir_fd=pfd, follow_symlinks=False)
+                except FileNotFoundError:
+                    fst = None
+                if fst is not None and (fst.st_uid != 0 or (fst.st_mode & 0o022) != 0):
+                    return False
+            return True
+
+        # Validate source is a regular non-symlink file before reading/backing up (create=False!).
+        src_parent_fd = open_dir_nofollow(src_parent_str, create=False)
+        src_path_safe_for_root = (not is_root) or (
+            is_trusted_root_path_dir(src_parent_str, allow_sticky=False)
+            and db_files_root_owned_safe(src_parent_fd, src_leaf_name)
+        )
+        src_fd = -1
+        try:
+            src_fd = os.open(src_leaf_name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=src_parent_fd)
+            src_st = os.fstat(src_fd)
+            if not stat.S_ISREG(src_st.st_mode) or src_st.st_nlink != 1:
+                raise SystemExit(f"Refusing non-regular or hardlinked source DB file: {src_path}")
+            if mode in ("backup", "snapshot") and (is_root or shutil.which("sqlite3")):
+                if stage_path_safe_for_root and src_path_safe_for_root:
+                    try:
+                        jcheck_fd = os.open(src_leaf_name + "-journal", os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=src_parent_fd)
+                    except FileNotFoundError:
+                        jcheck_fd = -1
+                    if jcheck_fd >= 0:
+                        try:
+                            jst = os.fstat(jcheck_fd)
+                            if not stat.S_ISREG(jst.st_mode) or jst.st_nlink != 1:
+                                raise SystemExit(f"Refusing non-regular or hardlinked source -journal sidecar for {src_path}")
+                            reject_super_journal_fd(jcheck_fd, src_path)
+                        finally:
+                            os.close(jcheck_fd)
+                    init_fd = os.open(staged_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=stage_fd)
+                    os.close(init_fd)
+                    os.close(src_fd)
+                    src_fd = -1
+                    if is_root:
+                        # Never invoke the sqlite3 CLI binary as root (shell.c registers edit() without DIRECTONLY).
+                        py_sqlite_backup_and_check(src_abs, staged_full, readonly_src=True)
+                    else:
+                        res = subprocess.run(
+                            ["sqlite3", "--readonly", src_abs, f".backup '{staged_name}'"],
+                            cwd=stage_path,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if res.returncode != 0:
+                            raise SystemExit(f"sqlite3 backup failed: {res.stderr.strip()}")
+                else:
+                    # Never pass an unprivileged-writable staging path or swappable source path to
+                    # root SQLite: run via libsqlite3 (Python sqlite3, PRAGMA trusted_schema = OFF)
+                    # inside a guaranteed root-owned 0700 scratch directory and stream-copy strictly
+                    # via open FDs into `stage_fd`.
+                    last_err = "sqlite3 isolated backup failed"
+                    copied_to_stage = False
+                    for attempt in range(3):
+                        wal_fd = -1
+                        jrn_fd = -1
+                        req_bytes = src_st.st_size
+                        if not src_path_safe_for_root:
+                            if attempt > 0:
+                                if src_fd >= 0:
+                                    os.close(src_fd)
+                                    src_fd = -1
+                                src_fd = os.open(src_leaf_name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=src_parent_fd)
+                                src_st = os.fstat(src_fd)
+                                if not stat.S_ISREG(src_st.st_mode) or src_st.st_nlink != 1:
+                                    raise SystemExit(f"Refusing non-regular or hardlinked source DB file: {src_path}")
+                                req_bytes = src_st.st_size
+                            else:
+                                os.lseek(src_fd, 0, os.SEEK_SET)
+                            for suffix in ("-wal", "-shm", "-journal"):
+                                try:
+                                    sfd = os.open(src_leaf_name + suffix, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=src_parent_fd)
+                                except FileNotFoundError:
+                                    continue
+                                except OSError as werr:
+                                    raise SystemExit(f"Refusing untrusted source {suffix} sidecar for {src_path}: {werr}")
+                                sst = os.fstat(sfd)
+                                if not stat.S_ISREG(sst.st_mode) or sst.st_nlink != 1:
+                                    os.close(sfd)
+                                    raise SystemExit(f"Refusing non-regular or hardlinked source {suffix} sidecar for {src_path}")
+                                if suffix == "-wal":
+                                    wal_fd = sfd
+                                    req_bytes += sst.st_size
+                                elif suffix == "-journal":
+                                    jrn_fd = sfd
+                                    req_bytes += sst.st_size
+                                else:
+                                    os.close(sfd)
+                            if req_bytes > MAX_SCRATCH_BYTES:
+                                for fd_c in (wal_fd, jrn_fd):
+                                    if fd_c >= 0:
+                                        os.close(fd_c)
+                                raise SystemExit(f"Source SQLite database exceeds {MAX_SCRATCH_BYTES} byte scratch cap")
+                        sc_base_fd, sc_fd, sc_name, sc_path = create_trusted_root_scratch(req_bytes * 2 + 16 * 1024 * 1024)
+                        try:
+                            sc_staged = os.path.join(sc_path, staged_name)
+                            sc_init = os.open(staged_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=sc_fd)
+                            os.close(sc_init)
+                            backup_ok = False
+                            if src_path_safe_for_root:
+                                try:
+                                    jcheck_fd = os.open(src_leaf_name + "-journal", os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=src_parent_fd)
+                                except FileNotFoundError:
+                                    jcheck_fd = -1
+                                if jcheck_fd >= 0:
+                                    try:
+                                        jst = os.fstat(jcheck_fd)
+                                        if not stat.S_ISREG(jst.st_mode) or jst.st_nlink != 1:
+                                            raise SystemExit(f"Refusing non-regular or hardlinked source -journal sidecar for {src_path}")
+                                        reject_super_journal_fd(jcheck_fd, src_path)
+                                    finally:
+                                        os.close(jcheck_fd)
+                                try:
+                                    py_sqlite_backup_and_check(src_abs, sc_staged, readonly_src=True)
+                                    backup_ok = True
+                                except Exception as b_err:
+                                    last_err = f"sqlite3 backup failed: {b_err}"
+                            else:
+                                rem_cap = copy_fd_to_dirfd(src_fd, sc_fd, "src.sqlite", MAX_SCRATCH_BYTES)
+                                if wal_fd >= 0:
+                                    rem_cap = copy_fd_to_dirfd(wal_fd, sc_fd, "src.sqlite-wal", rem_cap)
+                                if jrn_fd >= 0:
+                                    copy_fd_to_dirfd(jrn_fd, sc_fd, "src.sqlite-journal", rem_cap)
+                                try:
+                                    py_sqlite_backup_and_check(os.path.join(sc_path, "src.sqlite"), sc_staged, readonly_src=False)
+                                    backup_ok = True
+                                except Exception as b_err:
+                                    last_err = f"sqlite3 backup failed: {b_err}"
+                            if backup_ok:
+                                try:
+                                    ic_line = py_sqlite_integrity_ok(sc_staged)
+                                except Exception as ic_err:
+                                    ic_line = f"error: {ic_err}"
+                                if ic_line == "ok":
+                                    sc_vfd = os.open(staged_name, os.O_RDONLY | O_NOFOLLOW | O_CLOEXEC, dir_fd=sc_fd)
+                                    try:
+                                        sc_vst = os.fstat(sc_vfd)
+                                        if not stat.S_ISREG(sc_vst.st_mode) or sc_vst.st_nlink != 1 or sc_vst.st_size < 100:
+                                            raise SystemExit("Staged SQLite backup failed size/exclusivity invariant")
+                                        hdr = os.read(sc_vfd, 16)
+                                        if hdr != b"SQLite format 3\x00":
+                                            raise SystemExit("Staged SQLite backup failed SQLite header verification")
+                                        os.lseek(sc_vfd, 0, os.SEEK_SET)
+                                        copy_fd_to_dirfd(sc_vfd, stage_fd, staged_name)
+                                        copied_to_stage = True
+                                        break
+                                    finally:
+                                        os.close(sc_vfd)
+                                else:
+                                    last_err = f"sqlite3 integrity check failed on isolated backup: {ic_line}"
+                        finally:
+                            for fd_c in (wal_fd, jrn_fd):
+                                if fd_c >= 0:
+                                    os.close(fd_c)
+                            for sc_left in ("src.sqlite", "src.sqlite-wal", "src.sqlite-shm", "src.sqlite-journal", staged_name, staged_name + "-wal", staged_name + "-shm", staged_name + "-journal"):
+                                try:
+                                    os.unlink(sc_left, dir_fd=sc_fd)
+                                except FileNotFoundError:
+                                    _ = sc_left
+                            os.close(sc_fd)
+                            try:
+                                os.rmdir(sc_name, dir_fd=sc_base_fd)
+                            except OSError:
+                                _ = sc_name
+                            os.close(sc_base_fd)
+                        if attempt < 2:
+                            time.sleep(0.025)
+                    if not copied_to_stage:
+                        raise SystemExit(last_err)
+            else:
+                copy_fd_to_dirfd(src_fd, stage_fd, staged_name)
+        finally:
+            if src_fd >= 0:
+                os.close(src_fd)
+            os.close(src_parent_fd)
+
+    # Remove any SQLite sidecars inside stage dir so cleanup rmdir succeeds.
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            os.unlink(staged_name + suffix, dir_fd=stage_fd)
+        except FileNotFoundError:
+            _ = suffix
+
+    # Apply target ownership + 0600 + fsync directly on the open staged FD BEFORE publishing.
+    verify_fd = os.open(staged_name, os.O_RDONLY | O_NOFOLLOW | O_CLOEXEC, dir_fd=stage_fd)
+    try:
+        vst = os.fstat(verify_fd)
+        if not stat.S_ISREG(vst.st_mode) or vst.st_nlink != 1:
+            raise SystemExit(f"Staged DB file is not an exclusive regular file: {staged_full}")
+        if mode in ("backup", "snapshot", "placeholder"):
+            if vst.st_size < 100 or os.read(verify_fd, 16) != b"SQLite format 3\x00":
+                raise SystemExit(f"Staged DB backup failed SQLite format 3 header/size check: {staged_full}")
+        if is_root:
+            if mode in ("snapshot", "placeholder"):
+                os.fchown(verify_fd, 0, 0)
+            else:
+                try:
+                    af_pw = pwd.getpwnam("aetherflow")
+                except KeyError:
+                    af_pw = None
+                if af_pw is not None:
+                    os.fchown(verify_fd, af_pw.pw_uid, af_pw.pw_gid)
+        os.fchmod(verify_fd, 0o600)
+        os.fsync(verify_fd)
+    finally:
+        os.close(verify_fd)
+
+    # Handle existing leaf safely on parent_fd without ever following symlinks.
+    try:
+        leaf_st = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        leaf_st = None
+    quarantine_name = None
+    if leaf_st is not None:
+        if stat.S_ISDIR(leaf_st.st_mode) and not stat.S_ISLNK(leaf_st.st_mode):
+            raise SystemExit(f"Refusing to overwrite directory at DB path: {dest_path}")
+        elif stat.S_ISREG(leaf_st.st_mode) and mode == "restore":
+            quarantine_name = f"{leaf_name}.corrupted.{int(time.time())}.{uuid.uuid4()}"
+            os.replace(leaf_name, quarantine_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        elif not stat.S_ISREG(leaf_st.st_mode):
+            # Symlink (including symlink to root directory or dangling symlink) or special file.
+            os.unlink(leaf_name, dir_fd=parent_fd)
+
+    try:
+        os.replace(staged_name, leaf_name, src_dir_fd=stage_fd, dst_dir_fd=parent_fd)
+    except OSError:
+        if quarantine_name is not None:
+            try:
+                os.replace(quarantine_name, leaf_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            except OSError as rev_err:
+                _ = rev_err
+        raise
+    # Remove stale WAL/SHM/journal sidecars in parent_fd ONLY after atomic replace succeeds.
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            os.unlink(leaf_name + suffix, dir_fd=parent_fd)
+        except (FileNotFoundError, IsADirectoryError):
+            _ = suffix
+    try:
+        os.fsync(parent_fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.EBADF, errno.EROFS):
+            raise
+finally:
+    if stage_fd >= 0:
+        for leftover in (staged_name, staged_name + "-wal", staged_name + "-shm", staged_name + "-journal"):
+            try:
+                os.unlink(leftover, dir_fd=stage_fd)
+            except FileNotFoundError:
+                _ = leftover
+        os.close(stage_fd)
+    if stage_base_fd >= 0:
+        try:
+            os.rmdir(stage_name, dir_fd=stage_base_fd)
+        except OSError as rm_err:
+            if rm_err.errno != errno.ENOENT:
+                sys.stderr.write(f"warning: failed to remove staging dir {stage_path}: {rm_err}\n")
+        os.close(stage_base_fd)
+    if lock_fd >= 0:
+        os.close(lock_fd)
+    os.close(parent_fd)
+PY
+}
+
 sqlite_online_backup() {
     local src="$1"
     local dest="$2"
-    local dest_dir escaped
-    dest_dir="$(dirname "${dest}")"
-    mkdir -p "${dest_dir}"
-    escaped="${dest//\'/\'\'}"
-    # --readonly: .backup reads the source and writes only dest. Opening a hot
-    # WAL read-write would checkpoint it, which a dry-run must not do.
-    sqlite3 --readonly "${src}" ".backup '${escaped}'"
+    atomic_publish_db_file "snapshot" "${src}" "${dest}"
 }
 
 sqlite_integrity() {
     local db="$1"
     local result=""
-    if ! python3 - "${db}" <<'PY'
-import os
-import stat
-import sys
+    result="$(python3 -I - "${db}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY'
+import os, pathlib, shutil, sqlite3, stat, subprocess, sys, time, uuid
 
-descriptor = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-with os.fdopen(descriptor, "rb") as database:
-    if not stat.S_ISREG(os.fstat(database.fileno()).st_mode) or database.read(16) != b"SQLite format 3\x00":
-        raise SystemExit(1)
+db_path, confine_root_raw = sys.argv[1:3]
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+is_root = os.geteuid() == 0
+
+def open_dir_nofollow(dir_str):
+    p = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if ".." in p.parts:
+        return -1
+    confine = pathlib.PurePosixPath(confine_root_raw.rstrip("/") or "/") if confine_root_raw else None
+    if confine is not None:
+        try:
+            rel_parts = p.relative_to(confine).parts
+            anchor = pathlib.Path(str(confine))
+        except ValueError:
+            rel_parts = p.parts[1:]
+            anchor = pathlib.Path("/")
+    else:
+        rel_parts = p.parts[1:]
+        anchor = pathlib.Path("/")
+    try:
+        cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    except OSError:
+        return -1
+    try:
+        for part in rel_parts:
+            nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+        return cur_fd
+    except OSError:
+        os.close(cur_fd)
+        return -1
+
+def is_trusted_root_path_dir(dir_str, allow_sticky):
+    dp = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if not dp.is_absolute() or ".." in dp.parts:
+        return False
+    cur_p = pathlib.Path("/")
+    for part in dp.parts:
+        cur_p = pathlib.Path("/") if part == "/" else cur_p / part
+        try:
+            cst = os.lstat(cur_p)
+        except OSError:
+            return False
+        if stat.S_ISLNK(cst.st_mode) or not stat.S_ISDIR(cst.st_mode) or cst.st_uid != 0:
+            return False
+        writable = (cst.st_mode & 0o022) != 0
+        sticky = (cst.st_mode & getattr(stat, "S_ISVTX", 0o1000)) != 0
+        if writable and not (allow_sticky and sticky):
+            return False
+    return True
+
+MAX_SCRATCH_BYTES = 2 * 1024 * 1024 * 1024
+SQLITE_JOURNAL_MAGIC = b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
+
+def has_super_journal_trailer(fd):
+    st = os.fstat(fd)
+    if st.st_size < 16:
+        return False
+    os.lseek(fd, -8, os.SEEK_END)
+    tail = os.read(fd, 8)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return tail == SQLITE_JOURNAL_MAGIC
+
+def copy_fd(in_fd, out_dir_fd, out_name, remaining_cap):
+    out_fd = os.open(out_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=out_dir_fd)
+    copied = 0
+    tail8 = b""
+    try:
+        while True:
+            chunk = os.read(in_fd, 65536)
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > remaining_cap:
+                raise OSError("scratch copy cap exceeded")
+            tail8 = (tail8 + chunk)[-8:]
+            view = memoryview(chunk)
+            while view:
+                w = os.write(out_fd, view)
+                if w <= 0:
+                    raise OSError("short write")
+                view = view[w:]
+        if out_name.endswith("-journal") and copied >= 16 and tail8 == SQLITE_JOURNAL_MAGIC:
+            raise OSError("forbidden SQLite super-journal trailer")
+        return remaining_cap - copied
+    finally:
+        os.close(out_fd)
+
+def create_root_scratch(min_free=16 * 1024 * 1024):
+    sc_name = f".af-root-ic.{os.getpid()}.{uuid.uuid4().hex}"
+    for cand in ("/var/tmp", "/tmp", "/run"):
+        if not is_trusted_root_path_dir(cand, allow_sticky=True):
+            continue
+        cand_fd = -1
+        try:
+            cand_fd = os.open(cand, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            vfs = os.fstatvfs(cand_fd)
+            avail = vfs.f_bavail * (vfs.f_frsize or vfs.f_bsize)
+            if avail < min_free:
+                os.close(cand_fd)
+                continue
+            os.mkdir(sc_name, 0o700, dir_fd=cand_fd)
+            sc_fd = os.open(sc_name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cand_fd)
+            if not stat.S_ISDIR(os.fstat(sc_fd).st_mode) or os.fstat(sc_fd).st_uid != 0:
+                os.close(sc_fd)
+                os.rmdir(sc_name, dir_fd=cand_fd)
+                os.close(cand_fd)
+                continue
+            os.fchmod(sc_fd, 0o700)
+            return cand_fd, sc_fd, sc_name, os.path.join(cand, sc_name)
+        except OSError:
+            if cand_fd >= 0:
+                os.close(cand_fd)
+    return None
+
+db_abs = os.path.abspath(db_path)
+parent_str = os.path.dirname(db_abs)
+leaf_name = os.path.basename(db_abs)
+parent_fd = open_dir_nofollow(parent_str)
+if parent_fd < 0:
+    sys.stdout.write("error")
+    sys.exit(0)
+
+try:
+    try:
+        db_fd = os.open(leaf_name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+    except FileNotFoundError:
+        sys.stdout.write("missing")
+        sys.exit(0)
+    except OSError:
+        sys.stdout.write("error")
+        sys.exit(0)
+    try:
+        st = os.fstat(db_fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            sys.stdout.write("error")
+            sys.exit(0)
+        if os.read(db_fd, 16) != b"SQLite format 3\x00":
+            sys.stdout.write("error")
+            sys.exit(0)
+        # Validate any present sidecars are exclusive regular files (reject symlinks/FIFOs).
+        for suffix in ("-wal", "-shm", "-journal"):
+            try:
+                sc_fd = os.open(leaf_name + suffix, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                sys.stdout.write("error")
+                sys.exit(0)
+            try:
+                sc_st = os.fstat(sc_fd)
+                if not stat.S_ISREG(sc_st.st_mode) or sc_st.st_nlink != 1:
+                    sys.stdout.write("error")
+                    sys.exit(0)
+                if suffix == "-journal" and has_super_journal_trailer(sc_fd):
+                    sys.stdout.write("error")
+                    sys.exit(0)
+            finally:
+                os.close(sc_fd)
+
+        def db_files_root_owned_safe(pfd, lname):
+            for sfx in ("", "-wal", "-shm", "-journal"):
+                try:
+                    fst = os.stat(lname + sfx, dir_fd=pfd, follow_symlinks=False)
+                except FileNotFoundError:
+                    fst = None
+                if fst is not None and (fst.st_uid != 0 or (fst.st_mode & 0o022) != 0):
+                    return False
+            return True
+
+        if is_root and (
+            not is_trusted_root_path_dir(parent_str, allow_sticky=False)
+            or not db_files_root_owned_safe(parent_fd, leaf_name)
+        ):
+            last_res = "error"
+            for attempt in range(3):
+                wal_fd = -1
+                jrn_fd = -1
+                try:
+                    if attempt > 0:
+                        if db_fd >= 0:
+                            os.close(db_fd)
+                            db_fd = -1
+                        try:
+                            db_fd = os.open(leaf_name, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+                        except OSError:
+                            sys.stdout.write("error")
+                            sys.exit(0)
+                        st = os.fstat(db_fd)
+                        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                            sys.stdout.write("error")
+                            sys.exit(0)
+                    else:
+                        os.lseek(db_fd, 0, os.SEEK_SET)
+                    req_bytes = st.st_size
+                    for suffix in ("-wal", "-shm", "-journal"):
+                        try:
+                            sfd = os.open(leaf_name + suffix, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            sys.stdout.write("error")
+                            sys.exit(0)
+                        sst = os.fstat(sfd)
+                        if not stat.S_ISREG(sst.st_mode) or sst.st_nlink != 1:
+                            os.close(sfd)
+                            sys.stdout.write("error")
+                            sys.exit(0)
+                        if suffix == "-wal":
+                            wal_fd = sfd
+                            req_bytes += sst.st_size
+                        elif suffix == "-journal":
+                            jrn_fd = sfd
+                            req_bytes += sst.st_size
+                        else:
+                            os.close(sfd)
+                    if req_bytes > MAX_SCRATCH_BYTES:
+                        sys.stdout.write("error")
+                        sys.exit(0)
+                    sc = create_root_scratch(req_bytes * 2 + 16 * 1024 * 1024)
+                    if sc is None:
+                        break
+                    sc_base_fd, sc_fd, sc_name, sc_path = sc
+                    try:
+                        rem_cap = copy_fd(db_fd, sc_fd, "check.sqlite", MAX_SCRATCH_BYTES)
+                        if wal_fd >= 0:
+                            rem_cap = copy_fd(wal_fd, sc_fd, "check.sqlite-wal", rem_cap)
+                        if jrn_fd >= 0:
+                            copy_fd(jrn_fd, sc_fd, "check.sqlite-journal", rem_cap)
+                        target = os.path.join(sc_path, "check.sqlite")
+                        # Always use Python stdlib sqlite3 (libsqlite3 directly, PRAGMA trusted_schema = OFF)
+                        # instead of /usr/bin/sqlite3 CLI (shell.c registers edit() without SQLITE_DIRECTONLY).
+                        conn = sqlite3.connect(target, timeout=5)
+                        try:
+                            conn.execute("PRAGMA trusted_schema = OFF;")
+                            row = conn.execute("PRAGMA integrity_check;").fetchone()
+                            cleaned = "".join((row[0] if row and row[0] else "").split())
+                        finally:
+                            conn.close()
+                        if cleaned == "ok":
+                            sys.stdout.write("ok")
+                            sys.exit(0)
+                        last_res = cleaned or "error"
+                    except Exception:
+                        last_res = "error"
+                    finally:
+                        for leftover in ("check.sqlite", "check.sqlite-wal", "check.sqlite-shm", "check.sqlite-journal"):
+                            try:
+                                os.unlink(leftover, dir_fd=sc_fd)
+                            except FileNotFoundError:
+                                _ = leftover
+                        os.close(sc_fd)
+                        try:
+                            os.rmdir(sc_name, dir_fd=sc_base_fd)
+                        except OSError:
+                            _ = sc_name
+                        os.close(sc_base_fd)
+                finally:
+                    for fd_c in (wal_fd, jrn_fd):
+                        if fd_c >= 0:
+                            os.close(fd_c)
+                if attempt < 2:
+                    time.sleep(0.025)
+            sys.stdout.write(last_res or "error")
+            sys.exit(0)
+    finally:
+        if db_fd >= 0:
+            os.close(db_fd)
+finally:
+    os.close(parent_fd)
+
+try:
+    # Always use libsqlite3 via Python stdlib sqlite3 (PRAGMA trusted_schema = OFF), never /usr/bin/sqlite3 CLI.
+    conn = sqlite3.connect(pathlib.Path(db_abs).as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        conn.execute("PRAGMA trusted_schema = OFF;")
+        row = conn.execute("PRAGMA integrity_check;").fetchone()
+        cleaned = "".join((row[0] if row and row[0] else "").split())
+    finally:
+        conn.close()
+    sys.stdout.write(cleaned or "error")
+except Exception:
+    sys.stdout.write("error")
 PY
-    then
-        printf 'error'
-        return 0
-    fi
-    # Do not pipe through head: pipefail plus SIGPIPE makes a good check look failed.
-    result="$(sqlite3 -readonly "${db}" "PRAGMA integrity_check;" 2>/dev/null || true)"
-    result="${result%%$'\n'*}"
-    result="$(printf '%s' "${result}" | tr -d '[:space:]')"
+    )"
     printf '%s' "${result:-error}"
 }
 
@@ -1127,8 +2374,48 @@ ensure_fhs_layout() {
 
     if [[ "${DRY_RUN}" == false ]]; then
         if id -u aetherflow &>/dev/null; then
-            chown -R aetherflow:aetherflow "${DATA_DIR}"
-            chmod 0700 "${DATA_DIR}"
+            # Non-recursive FD-based ownership/mode on DATA_DIR itself (matching Rust
+            # apply_data_dir_ownership_and_mode in af-release/src/fs_security.rs) so root-owned
+            # security state under DATA_DIR (e.g. .self-update-jobs/, *.conf, *.json) is NEVER chowned.
+            python3 -I - "${DATA_DIR}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY' || log_fatal "Failed to secure DATA_DIR: ${DATA_DIR}"
+import os, pathlib, pwd, sys
+data_dir, confine_raw = sys.argv[1:3]
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+p = pathlib.PurePosixPath(os.path.abspath(data_dir))
+if ".." in p.parts:
+    raise SystemExit(f"Refusing traversal in DATA_DIR: {data_dir}")
+confine = pathlib.PurePosixPath(confine_raw.rstrip("/") or "/") if confine_raw else None
+if confine is not None:
+    rel_parts = p.relative_to(confine).parts
+    anchor = pathlib.Path(str(confine))
+else:
+    rel_parts = p.parts[1:]
+    anchor = pathlib.Path("/")
+cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+try:
+    for part in rel_parts:
+        try:
+            nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        except FileNotFoundError:
+            os.mkdir(part, 0o700, dir_fd=cur_fd)
+            nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt_fd
+    if os.geteuid() == 0:
+        af_pw = pwd.getpwnam("aetherflow")
+        os.fchown(cur_fd, af_pw.pw_uid, af_pw.pw_gid)
+    os.fchmod(cur_fd, 0o700)
+finally:
+    os.close(cur_fd)
+PY
+            if [[ ! -L "${ENV_DIR}" ]]; then
+                if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+                    chown root:aetherflow "${ENV_DIR}"
+                fi
+                chmod 0750 "${ENV_DIR}"
+            fi
             if [[ "${EUID:-$(id -u)}" -eq 0 && -z "${EFFECTIVE_RELEASE_ROOT:-}" ]]; then
                 local host_dir
                 for host_dir in /var/log/aetherflow /run/aetherflow; do
@@ -1176,7 +2463,7 @@ ensure_fhs_layout() {
     # that file is missing. Copying into DATA_DIR while the process uses another
     # path creates a divergent stale database (this host's /var/lib copy).
     local fhs_db="${CONFIG_DATA_DIR}/${SQLITE_DB}"
-    if [[ "${RESOLVED_DB_PATH}" == "${fhs_db}" && ! -f "${fhs_db}" ]]; then
+    if [[ "${RESOLVED_DB_PATH}" == "${fhs_db}" && ( ! -f "${fhs_db}" || -L "${fhs_db}" ) ]]; then
         local -a legacy_db_candidates=(
             "${LEGACY_OPT_ROOT}/backend/data/${SQLITE_DB}"
             "${LEGACY_OPT_ROOT}/backend/${SQLITE_DB}"
@@ -1198,16 +2485,7 @@ ensure_fhs_layout() {
                     break
                 fi
                 log_info "Migrating legacy SQLite database from ${legacy_db} to ${fhs_db}..."
-                mkdir -p "$(dirname "${fhs_db}")"
-                if command -v sqlite3 >/dev/null 2>&1; then
-                    sqlite_online_backup "${legacy_db}" "${fhs_db}"
-                else
-                    cp -pf "${legacy_db}" "${fhs_db}"
-                fi
-                if id -u aetherflow &>/dev/null; then
-                    chown aetherflow:aetherflow "${fhs_db}"
-                    chmod 0600 "${fhs_db}"
-                fi
+                atomic_publish_db_file "backup" "${legacy_db}" "${fhs_db}" || log_fatal "Failed to atomically migrate legacy SQLite database to ${fhs_db}"
                 break
             fi
         done
@@ -1234,9 +2512,140 @@ ensure_fhs_layout() {
         for legacy_env in "${legacy_env_candidates[@]}"; do
             if [[ -f "${legacy_env}" && ! -L "${legacy_env}" ]]; then
                 log_info "Migrating legacy environment secrets from ${legacy_env} to ${CONFIG_ENV_FILE}..."
-                mkdir -p "$(dirname "${CONFIG_ENV_FILE}")"
-                cp -pf "${legacy_env}" "${CONFIG_ENV_FILE}"
-                chmod 0600 "${CONFIG_ENV_FILE}"
+                if ! python3 -I - "${legacy_env}" "${CONFIG_ENV_FILE}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY'
+import errno, os, pathlib, pwd, stat, sys, uuid
+
+src_path, dst_path, confine_raw = sys.argv[1:4]
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+is_root = os.geteuid() == 0
+
+def walk_dir_nofollow(dir_str, create=False, mode=0o750):
+    p = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if not p.is_absolute() or ".." in p.parts:
+        raise SystemExit(f"Refusing invalid directory path: {dir_str}")
+    confine = pathlib.PurePosixPath(confine_raw.rstrip("/") or "/") if confine_raw else None
+    if confine is not None:
+        try:
+            rel_parts = p.relative_to(confine).parts
+            anchor = pathlib.Path(str(confine))
+        except ValueError:
+            raise SystemExit(f"Path {dir_str} escapes isolated root {confine}")
+        if create and not os.path.lexists(anchor):
+            os.makedirs(anchor, mode=0o755, exist_ok=True)
+    else:
+        rel_parts = p.parts[1:]
+        anchor = pathlib.Path("/")
+    cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    cur = anchor
+    try:
+        for part in rel_parts:
+            cur = cur / part
+            try:
+                nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise SystemExit(f"Missing directory: {cur}")
+                created = False
+                try:
+                    os.mkdir(part, mode, dir_fd=cur_fd)
+                    created = True
+                except FileExistsError as exists_err:
+                    _ = exists_err
+                nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+                if created:
+                    os.fchmod(nxt_fd, mode)
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+        return cur_fd
+    except BaseException:
+        os.close(cur_fd)
+        raise
+
+src_p = pathlib.PurePosixPath(os.path.abspath(src_path))
+dst_p = pathlib.PurePosixPath(os.path.abspath(dst_path))
+if len(src_p.parts) < 2 or len(dst_p.parts) < 2 or ".." in src_p.parts or ".." in dst_p.parts:
+    raise SystemExit("Invalid legacy env migration path")
+
+src_dir_fd = walk_dir_nofollow(str(src_p.parent), create=False)
+try:
+    src_fd = os.open(src_p.parts[-1], os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=src_dir_fd)
+finally:
+    os.close(src_dir_fd)
+
+try:
+    sst = os.fstat(src_fd)
+    if not stat.S_ISREG(sst.st_mode) or sst.st_nlink != 1:
+        raise SystemExit(f"Refusing non-regular or hardlinked legacy env source: {src_path}")
+    if sst.st_size > 2 * 1024 * 1024:
+        raise SystemExit(f"Refusing oversized legacy env source: {src_path}")
+    payload = bytearray()
+    while True:
+        chunk = os.read(src_fd, 65536)
+        if not chunk:
+            break
+        payload.extend(chunk)
+        if len(payload) > 2 * 1024 * 1024:
+            raise SystemExit(f"Refusing oversized legacy env source: {src_path}")
+finally:
+    os.close(src_fd)
+
+af_gid = None
+if is_root:
+    try:
+        af_gid = pwd.getpwnam("aetherflow").pw_gid
+    except KeyError:
+        af_gid = None
+
+dst_dir_fd = walk_dir_nofollow(str(dst_p.parent), create=True, mode=0o750)
+try:
+    os.fchmod(dst_dir_fd, 0o750)
+    if is_root and af_gid is not None:
+        os.fchown(dst_dir_fd, 0, af_gid)
+    leaf = dst_p.parts[-1]
+    try:
+        dst_existing = os.stat(leaf, dir_fd=dst_dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        dst_existing = None
+    if dst_existing is not None and not stat.S_ISREG(dst_existing.st_mode):
+        raise SystemExit(f"Refusing symlinked or non-regular destination: {dst_path}")
+    tmp_name = f".{leaf}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    tmp_fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=dst_dir_fd)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(tmp_fd, view)
+            if written <= 0:
+                raise OSError("short write migrating legacy env")
+            view = view[written:]
+        if is_root and af_gid is not None:
+            os.fchown(tmp_fd, 0, af_gid)
+            os.fchmod(tmp_fd, 0o640)
+        else:
+            os.fchmod(tmp_fd, 0o600)
+        os.fsync(tmp_fd)
+    except BaseException:
+        os.close(tmp_fd)
+        try:
+            os.unlink(tmp_name, dir_fd=dst_dir_fd)
+        except OSError as rm_err:
+            _ = rm_err
+        raise
+    os.close(tmp_fd)
+    os.replace(tmp_name, leaf, src_dir_fd=dst_dir_fd, dst_dir_fd=dst_dir_fd)
+    try:
+        os.fsync(dst_dir_fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.EBADF, errno.EROFS):
+            raise
+finally:
+    os.close(dst_dir_fd)
+PY
+                then
+                    log_fatal "Failed to safely migrate legacy environment file ${legacy_env} to ${CONFIG_ENV_FILE}"
+                fi
                 break
             fi
         done
@@ -1264,18 +2673,21 @@ github_https_curl() {
     local url="${!#}"
     shift
     local -a extra_args=("$@")
-    local hdr_file=""
+    local hdr_fd=""
     local gh_tok=""
     if gh_tok="$(resolve_github_token_for_url "${url}" 2>/dev/null)"; then
-        hdr_file="$(umask 0077; mktemp "${TMPDIR:-/tmp}/af-curl-hdr.XXXXXX")" || hdr_file=""
-        if [[ -n "${hdr_file}" ]]; then
-            printf 'Authorization: Bearer %s\n' "${gh_tok}" > "${hdr_file}"
-            extra_args=(-H "@${hdr_file}" "${extra_args[@]}")
+        if [[ "${gh_tok}" != *$'\n'* && "${gh_tok}" != *$'\r'* ]]; then
+            local esc_tok="${gh_tok//\\/\\\\}"
+            esc_tok="${esc_tok//\"/\\\"}"
+            exec {hdr_fd}< <(printf 'header = "Authorization: Bearer %s"\n' "${esc_tok}")
+            extra_args=(-K "/dev/fd/${hdr_fd}" "${extra_args[@]}")
         fi
     fi
     local rc=0
     curl --proto '=https' --proto-redir '=https' --max-filesize "${max_bytes}" "${extra_args[@]}" || rc=$?
-    [[ -n "${hdr_file}" ]] && rm -f "${hdr_file}"
+    if [[ -n "${hdr_fd}" ]]; then
+        exec {hdr_fd}<&- 2>/dev/null || true
+    fi
     return "${rc}"
 }
 
@@ -1358,24 +2770,73 @@ except Exception:
 validate_release_tarball() {
     local archive_path="$1"
     if command -v python3 >/dev/null 2>&1; then
-        if ! python3 - "${archive_path}" <<'PY'
-import pathlib, sys, tarfile
+        if ! python3 -I - "${archive_path}" <<'PY'
+import gzip, pathlib, sys, tarfile
 
 archive = sys.argv[1]
+MAX_ENTRY_BYTES = 512 * 1024 * 1024
+MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+MAX_STREAM_BYTES = MAX_TOTAL_BYTES + 64 * 1024 * 1024
+MAX_ENTRIES = 20000
+
+class BoundedReader:
+    def __init__(self, inner, limit):
+        self.inner = inner
+        self.limit = limit
+        self.read_bytes = 0
+
+    def read(self, size=-1):
+        data = self.inner.read(size)
+        self.read_bytes += len(data)
+        if self.read_bytes > self.limit:
+            raise ValueError(f"decompressed archive stream exceeded {self.limit} byte cap")
+        return data
+
 try:
-    with tarfile.open(archive, "r:*") as tf:
-        for member in tf.getmembers():
-            name = member.name or ""
-            if not (member.isfile() or member.isdir()):
-                sys.stderr.write(f"Rejected non-regular/non-directory tar entry: {name} (type={member.type!r})\n")
-                sys.exit(1)
-            if name.startswith("/") or name.startswith("\\"):
-                sys.stderr.write(f"Rejected absolute tar entry path: {name}\n")
-                sys.exit(1)
-            parts = pathlib.PurePosixPath(name).parts
-            if ".." in parts:
-                sys.stderr.write(f"Rejected path-traversal tar entry: {name}\n")
-                sys.exit(1)
+    with open(archive, "rb") as raw_fh:
+        magic = raw_fh.read(2)
+        raw_fh.seek(0)
+        if magic == b"\x1f\x8b":
+            gz_fh = gzip.GzipFile(fileobj=raw_fh, mode="rb")
+            stream = BoundedReader(gz_fh, MAX_STREAM_BYTES)
+        else:
+            gz_fh = None
+            stream = BoundedReader(raw_fh, MAX_STREAM_BYTES)
+        try:
+            entry_count = 0
+            total_bytes = 0
+            with tarfile.open(fileobj=stream, mode="r|") as tf:
+                for member in tf:
+                    entry_count += 1
+                    if entry_count > MAX_ENTRIES:
+                        sys.stderr.write(f"Rejected archive exceeding {MAX_ENTRIES} entries\n")
+                        sys.exit(1)
+                    name = member.name or ""
+                    if not (member.isfile() or member.isdir()):
+                        sys.stderr.write(f"Rejected non-regular/non-directory tar entry: {name} (type={member.type!r})\n")
+                        sys.exit(1)
+                    if name.startswith("/") or name.startswith("\\"):
+                        sys.stderr.write(f"Rejected absolute tar entry path: {name}\n")
+                        sys.exit(1)
+                    parts = pathlib.PurePosixPath(name).parts
+                    if ".." in parts:
+                        sys.stderr.write(f"Rejected path-traversal tar entry: {name}\n")
+                        sys.exit(1)
+                    norm_parts = [part for part in parts if part not in ("", ".")]
+                    if norm_parts and norm_parts[0] == "data-snapshot":
+                        sys.stderr.write(f"Rejected reserved data-snapshot tar entry: {name}\n")
+                        sys.exit(1)
+                    if member.isfile():
+                        if member.size < 0 or member.size > MAX_ENTRY_BYTES:
+                            sys.stderr.write(f"Rejected oversized tar entry {name} ({member.size} bytes)\n")
+                            sys.exit(1)
+                        total_bytes += member.size
+                        if total_bytes > MAX_TOTAL_BYTES:
+                            sys.stderr.write(f"Rejected archive exceeding {MAX_TOTAL_BYTES} byte cumulative cap\n")
+                            sys.exit(1)
+        finally:
+            if gz_fh is not None:
+                gz_fh.close()
 except SystemExit:
     raise
 except Exception as exc:
@@ -1383,7 +2844,7 @@ except Exception as exc:
     sys.exit(1)
 PY
         then
-            log_error "Archive security validation failed for ${archive_path} (links, special entries, or path traversal detected)."
+            log_error "Archive security validation failed for ${archive_path} (links, special entries, size caps, or path traversal detected)."
             return 1
         fi
         return 0
@@ -1452,13 +2913,13 @@ pull_prebuilt_artifact() {
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/af-release-XXXXXX")" || return 1
 
     log_info "Downloading pre-built release ${tag} (${ARTIFACT_NAME})..."
-    if ! github_https_curl 268435456 -fsSL --max-time 180 -o "${tmp_dir}/${ARTIFACT_NAME}" "${base_url}/${ARTIFACT_NAME}"; then
+    if ! github_https_curl 536870912 -fsSL --max-time 180 -o "${tmp_dir}/${ARTIFACT_NAME}" "${base_url}/${ARTIFACT_NAME}"; then
         rm -rf "${tmp_dir}"
         return 1
     fi
 
     log_info "Downloading SHA-256 manifest (${CHECKSUM_NAME})..."
-    if ! github_https_curl 1048576 -fsSL --max-time 30 -o "${tmp_dir}/${CHECKSUM_NAME}" "${base_url}/${CHECKSUM_NAME}"; then
+    if ! github_https_curl 4194304 -fsSL --max-time 30 -o "${tmp_dir}/${CHECKSUM_NAME}" "${base_url}/${CHECKSUM_NAME}"; then
         log_error "Missing SHA256SUMS manifest for release ${tag}. Refusing unverified binary."
         rm -rf "${tmp_dir}"
         return 1
@@ -1497,7 +2958,42 @@ pull_prebuilt_artifact() {
         fi
         local prov_out=""
         local prov_gh_token="${AF_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-${ENV_FILE_GITHUB_TOKEN:-}}}}"
-        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! prov_out="$(AF_GITHUB_TOKEN="${prov_gh_token}" python3 -I -B "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" 2>&1)"; then
+        if [[ ! -f "${SCRIPT_DIR}/verify-provenance.py" ]] || ! prov_out="$(AF_GITHUB_TOKEN="${prov_gh_token}" python3 -I -B -c '
+import os, signal, subprocess, sys
+script = sys.argv[1]
+args = sys.argv[2:]
+clean_env = {
+    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    "HOME": os.environ.get("HOME", "/root"),
+    "LANG": os.environ.get("LANG", "C.UTF-8"),
+}
+for k in ("SSL_CERT_FILE", "SSL_CERT_DIR", "AF_GITHUB_TOKEN", "AETHERFLOW_GITHUB_API_BASE"):
+    v = os.environ.get(k, "")
+    if v:
+        clean_env[k] = v
+proc = subprocess.Popen(
+    [sys.executable, "-I", "-B", script, *args],
+    env=clean_env,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+)
+try:
+    out, _ = proc.communicate(timeout=60)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError as exc:
+        _ = exc
+    out, _ = proc.communicate()
+    if out:
+        sys.stdout.buffer.write(out)
+    sys.stdout.write("\nProvenance verification timed out after 60s\n")
+    raise SystemExit(124)
+if out:
+    sys.stdout.buffer.write(out)
+raise SystemExit(proc.returncode)
+' "${SCRIPT_DIR}/verify-provenance.py" "${prov_args[@]}" 2>&1)"; then
             [[ -n "${prov_out}" ]] && log_warn "Provenance verifier output: ${prov_out}"
             log_error "Sigstore build provenance verification FAILED for ${ARTIFACT_NAME} (${tag}). Refusing unverified binary."
             rm -rf "${tmp_dir}"
@@ -1713,27 +3209,54 @@ build_from_source() {
         "${RELEASE_DIR}/rust-toolchain.toml" "${RELEASE_DIR}/packages/README.md"
 }
 
+resolve_dry_run_version_stamp() {
+    local candidate raw="" normalized=""
+    for candidate in \
+        "${CONFIG_REPO_DIR:-}/.version" \
+        "${SCRIPT_DIR}/../.version" \
+        "${SCRIPT_DIR}/.version" \
+        "${CURRENT_LINK:-}/.version" \
+        "${LEGACY_OPT_ROOT:-}/current/.version"; do
+        [[ -n "${candidate}" && -f "${candidate}" && ! -L "${candidate}" && -s "${candidate}" ]] || continue
+        raw="$(tr -d '[:space:]' < "${candidate}" 2>/dev/null || true)"
+        raw="${raw%-dryrun}"
+        if [[ "${raw}" =~ ^[vV]?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]]; then
+            normalized="${raw#V}"
+            normalized="${normalized#v}"
+            printf 'v%s-dryrun' "${normalized}"
+            return 0
+        fi
+    done
+    printf 'v4.0.1-dryrun'
+}
+
 simulate_offline_artifact() {
     log_info "[DRY-RUN] Offline mode: simulating artifact verification and extraction."
-    mkdir -p "${RELEASE_DIR}/deploy/systemd" "${RELEASE_DIR}/packages" "${RELEASE_DIR}/config" "${RELEASE_DIR}/bin" "${RELEASE_DIR}/web/dist" \
+    mkdir -p "${RELEASE_DIR}/deploy/systemd" "${RELEASE_DIR}/packages/system" "${RELEASE_DIR}/config" "${RELEASE_DIR}/bin" "${RELEASE_DIR}/web/dist" \
         "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks" "${RELEASE_DIR}/plugins/telemetry-inspector/frontend/dist"
-    printf '<!doctype html><title>AetherFlow dry run</title>\n' > "${RELEASE_DIR}/web/dist/index.html"
-    printf '\000asm\001\000\000\000' > "${RELEASE_DIR}/web/dist/app.wasm"
-    echo "#!/bin/bash" > "${RELEASE_DIR}/aetherflow-api"
-    echo "#!/bin/bash" > "${RELEASE_DIR}/bin/af"
-    echo "#!/bin/bash" > "${RELEASE_DIR}/bin/speedtest-backend"
-    echo "#!/bin/bash" > "${RELEASE_DIR}/bin/af-transcode"
+    printf '<!-- Offline dry-run placeholder; not a frontend. -->\n' > "${RELEASE_DIR}/web/dist/index.html"
+    : > "${RELEASE_DIR}/web/dist/dry-run-placeholder.wasm"
+    printf '#!/bin/bash\n# Offline dry-run placeholder; not a release binary.\n' > "${RELEASE_DIR}/aetherflow-api"
+    printf '#!/bin/bash\n# Offline dry-run placeholder; not a release binary.\n' > "${RELEASE_DIR}/bin/af"
+    printf '#!/bin/bash\n# Offline dry-run placeholder; not a release binary.\n' > "${RELEASE_DIR}/bin/speedtest-backend"
+    printf '#!/bin/bash\n# Offline dry-run placeholder; not a release binary.\n' > "${RELEASE_DIR}/bin/af-transcode"
+    printf '#!/bin/bash\n# Offline dry-run placeholder; not a package helper.\n' > "${RELEASE_DIR}/packages/common.sh"
+    printf '#!/bin/bash\n# Offline dry-run placeholder; not a certbot helper.\n' > "${RELEASE_DIR}/packages/system/af-certbot-sync"
+    printf '#!/bin/bash\n# Offline dry-run placeholder; not a sandbox helper.\n' > "${RELEASE_DIR}/packages/system/af-systemd-sandbox"
     printf '{"id":"telemetry-inspector","name":"Telemetry Inspector","version":"1.0.0","runtime_status":"managed"}\n' > "${RELEASE_DIR}/plugins/telemetry-inspector/plugin.manifest.json"
-    echo "#!/usr/bin/env bash" > "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
+    printf '#!/usr/bin/env bash\n# Offline dry-run placeholder; not a release binary.\n' > "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
     echo "# Offline dry-run placeholder" > "${RELEASE_DIR}/plugins/telemetry-inspector/backend/runtime.py"
-    printf '<!doctype html><title>Telemetry Inspector dry run</title>\n' > "${RELEASE_DIR}/plugins/telemetry-inspector/frontend/dist/index.html"
+    printf '<!-- Offline dry-run placeholder; not a plugin UI. -->\n' > "${RELEASE_DIR}/plugins/telemetry-inspector/frontend/dist/index.html"
     chmod +x \
         "${RELEASE_DIR}/aetherflow-api" \
         "${RELEASE_DIR}/bin/af" \
         "${RELEASE_DIR}/bin/speedtest-backend" \
         "${RELEASE_DIR}/bin/af-transcode" \
+        "${RELEASE_DIR}/packages/common.sh" \
+        "${RELEASE_DIR}/packages/system/af-certbot-sync" \
+        "${RELEASE_DIR}/packages/system/af-systemd-sandbox" \
         "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh"
-    echo "v4.0.0-dryrun" > "${RELEASE_DIR}/.version"
+    printf '%s\n' "$(resolve_dry_run_version_stamp)" > "${RELEASE_DIR}/.version"
     stage_running_release_manager
 }
 
@@ -1846,9 +3369,18 @@ prepare_release_permissions() {
     if [[ -f "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" && ! -L "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" ]]; then
         chmod 0755 "${RELEASE_DIR}/plugins/telemetry-inspector/backend/hooks/start.sh" || return 1
     fi
+    local pkg_exec_dir
+    for pkg_exec_dir in \
+        "${RELEASE_DIR}/packages/system" \
+        "${RELEASE_DIR}/packages/package/install" \
+        "${RELEASE_DIR}/packages/package/remove"; do
+        if [[ -d "${pkg_exec_dir}" && ! -L "${pkg_exec_dir}" ]]; then
+            find "${pkg_exec_dir}" -type f -exec chmod 0755 {} + || return 1
+        fi
+    done
     if [[ "${DRY_RUN}" == false ]]; then
         if [[ "${EUID}" -eq 0 ]] || [[ "${service_user}" != "$(id -un)" ]]; then
-            if ! runuser -u "${service_user}" -- sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api && { test ! -d web/dist || test -r web/dist/index.html; }' sh "${RELEASE_DIR}"; then
+            if ! runuser -u "${service_user}" -- /usr/bin/env -i PATH="/usr/local/bin:/usr/bin:/bin" LANG="C.UTF-8" /bin/sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api && { test ! -d web/dist || test -r web/dist/index.html; }' sh "${RELEASE_DIR}"; then
                 log_error "Release is inaccessible to service user ${service_user}. Refusing symlink swap."
                 return 1
             fi
@@ -1862,26 +3394,43 @@ prepare_release_permissions() {
     log_info "Release permissions normalized and service access verified."
 }
 
+has_python_sqlite3() {
+    python3 -I -c "import sqlite3" >/dev/null 2>&1
+}
+
+has_sqlite_snapshot_backend() {
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        has_python_sqlite3
+    else
+        command -v sqlite3 >/dev/null 2>&1
+    fi
+}
+
 state_snapshot() {
     log_info "=== STAGE 1.5: State Snapshot ==="
     if [[ -z "${RESOLVED_DB_PATH}" ]]; then
         resolve_db_path
     fi
 
+    if [[ -L "${DATA_DIR}" || -L "${RESOLVED_DB_PATH}" ]]; then
+        log_error "Refusing symlinked database or data directory path during snapshot."
+        return 1
+    fi
+
     local snapshot_db="${RESOLVED_DB_PATH}"
     if [[ "${DRY_RUN}" == true ]]; then
         local copy="${DATA_DIR}/${SQLITE_DB}"
-        mkdir -p "${DATA_DIR}"
-        if [[ -f "${RESOLVED_DB_PATH}" && "${RESOLVED_DB_PATH}" != "${copy}" ]]; then
-            if ! command -v sqlite3 >/dev/null 2>&1; then
+        install -d -m 0700 "${DATA_DIR}"
+        if [[ -f "${RESOLVED_DB_PATH}" && ! -L "${RESOLVED_DB_PATH}" && "${RESOLVED_DB_PATH}" != "${copy}" ]]; then
+            if ! has_sqlite_snapshot_backend; then
                 log_error "sqlite3 is required to copy the live database without a raw cp of a WAL file."
                 return 1
             fi
-            log_info "[DRY-RUN] Copying live database with sqlite3 --readonly .backup from ${RESOLVED_DB_PATH} (source: ${RESOLVED_DB_SOURCE}) into ${copy}"
+            log_info "[DRY-RUN] Copying live database with FD-isolated sqlite3 backup from ${RESOLVED_DB_PATH} (source: ${RESOLVED_DB_SOURCE}) into ${copy}"
             # state_snapshot runs under `||`, so errexit is off. A failed copy must
             # not fall through into the placeholder database.
-            if ! sqlite_online_backup "${RESOLVED_DB_PATH}" "${copy}"; then
-                rm -f "${copy}" "${copy}-wal" "${copy}-shm"
+            if ! atomic_publish_db_file "snapshot" "${RESOLVED_DB_PATH}" "${copy}"; then
+                rm -f "${copy}" "${copy}-wal" "${copy}-shm" "${copy}-journal"
                 log_error "[DRY-RUN] Failed to copy live database from ${RESOLVED_DB_PATH} (source: ${RESOLVED_DB_SOURCE})."
                 return 1
             fi
@@ -1890,14 +3439,21 @@ state_snapshot() {
         snapshot_db="${copy}"
     fi
 
+    if [[ -L "${snapshot_db}" ]]; then
+        log_error "Refusing symlinked database file during snapshot: ${snapshot_db}"
+        return 1
+    fi
+
     if [[ ! -f "${snapshot_db}" ]]; then
         if [[ "${DRY_RUN}" == true ]]; then
-            if ! command -v sqlite3 >/dev/null 2>&1; then
-                log_error "sqlite3 is required to create the dry-run placeholder database."
+            if ! has_python_sqlite3; then
+                log_error "python3 sqlite3 is required to create the dry-run placeholder database."
                 return 1
             fi
-            mkdir -p "$(dirname "${snapshot_db}")"
-            sqlite3 "${snapshot_db}" "CREATE TABLE IF NOT EXISTS _meta (key TEXT, value TEXT); INSERT INTO _meta VALUES ('version','dryrun');"
+            if ! atomic_publish_db_file "placeholder" "" "${snapshot_db}"; then
+                log_error "[DRY-RUN] Failed to stage and publish placeholder database at ${snapshot_db}."
+                return 1
+            fi
             log_info "[DRY-RUN] Created placeholder database at ${snapshot_db} because ${RESOLVED_DB_PATH} is absent."
         else
             log_warn "No database file at ${RESOLVED_DB_PATH}; skipping snapshot."
@@ -1906,26 +3462,28 @@ state_snapshot() {
         fi
     fi
 
-    if ! command -v sqlite3 >/dev/null 2>&1; then
+    if ! has_sqlite_snapshot_backend; then
         log_error "sqlite3 is required for a WAL-safe snapshot of ${snapshot_db}."
         return 1
     fi
 
     local snapshot_dir="${RELEASE_DIR}/data-snapshot"
-    mkdir -p "${snapshot_dir}" "${DATA_DIR}"
+    if [[ -L "${snapshot_dir}" ]]; then
+        log_error "Refusing symlinked snapshot directory: ${snapshot_dir}"
+        return 1
+    fi
+    install -d -m 0700 "${snapshot_dir}"
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        chown root:root "${snapshot_dir}"
+    fi
+    chmod 0700 "${snapshot_dir}"
     local bak_path="${snapshot_dir}/${SQLITE_DB}.bak"
-    local lock_file="${snapshot_dir}/.snapshot.lock"
 
     log_info "Executing SQLite online backup: ${snapshot_db} -> ${bak_path} (resolved ${RESOLVED_DB_PATH}, source: ${RESOLVED_DB_SOURCE})"
-    (
-        if ! flock -w "${SNAPSHOT_TIMEOUT}" 200; then
-            exit 1
-        fi
-        sqlite_online_backup "${snapshot_db}" "${bak_path}"
-    ) 200>"${lock_file}" || {
-        log_error "SQLite snapshot failed for ${snapshot_db}."
+    if ! atomic_publish_db_file "snapshot" "${snapshot_db}" "${bak_path}" ".snapshot.lock" "${SNAPSHOT_TIMEOUT}"; then
+        log_error "Snapshot integrity check FAILED for ${bak_path} (SQLite snapshot failed for ${snapshot_db}). Aborting before symlink swap."
         return 1
-    }
+    fi
 
     local integrity
     integrity="$(sqlite_integrity "${bak_path}")"
@@ -1935,12 +3493,12 @@ state_snapshot() {
     fi
     log_info "Snapshot integrity check PASSED: ${bak_path}"
 
-    if ! (
-        umask 077
-        cd "${snapshot_dir}" &&
-        sha256sum -- *.bak > MANIFEST.sha256 &&
-        [[ -s MANIFEST.sha256 ]]
-    ); then
+    local manifest_lines=""
+    if ! manifest_lines="$(cd "${snapshot_dir}" && sha256sum -- *.bak)" || [[ -z "${manifest_lines}" ]]; then
+        log_error "Failed to compute snapshot SHA-256 manifest in ${snapshot_dir}. Aborting before symlink swap."
+        return 1
+    fi
+    if ! write_atomic_private_file "${snapshot_dir}/MANIFEST.sha256" "0600" "${manifest_lines}"$'\n'; then
         log_error "Failed to write snapshot SHA-256 manifest in ${snapshot_dir}. Aborting before symlink swap."
         return 1
     fi
@@ -1952,20 +3510,481 @@ state_snapshot() {
 # STAGE 2: Atomic Symlink Swap
 ###############################################################################
 sync_legacy_package_paths() {
-    [[ "${DRY_RUN}" == true ]] && return 0
-    [[ -d "${CURRENT_LINK}/packages" ]] || return 0
-    if [[ -d "${LEGACY_OPT_ROOT}/packages" && ! "${CURRENT_LINK}/packages" -ef "${LEGACY_OPT_ROOT}/packages" ]]; then
-        rsync -a --delete --checksum "${CURRENT_LINK}/packages/" "${LEGACY_OPT_ROOT}/packages/"
+    local mode="sync"
+    if [[ "${1:-}" == "--preflight-only" ]]; then
+        mode="preflight"
+        shift
     fi
-    if [[ -d "${LEGACY_BIN_ROOT}/package" && -d "${CURRENT_LINK}/packages/package" && ! "${CURRENT_LINK}/packages/package" -ef "${LEGACY_BIN_ROOT}/package" ]]; then
-        rsync -a --delete --checksum "${CURRENT_LINK}/packages/package/" "${LEGACY_BIN_ROOT}/package/"
+    local src_root="${1:-${CURRENT_LINK:-}}"
+    [[ -n "${src_root}" && ( -d "${src_root}/packages" || -L "${src_root}/packages" ) ]] || return 0
+
+    local opt_packages_dir=""
+    local legacy_bin_root=""
+    local local_bin_dir=""
+    local sys_bin_dir=""
+    local confine_root=""
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        local dry_root="${DRY_RUN_ROOT:-/tmp/aetherflow-dryrun}"
+        dry_root="${dry_root%/}"
+        opt_packages_dir="${dry_root}/opt/AetherFlow/packages"
+        local_bin_dir="${dry_root}/usr/local/bin"
+        legacy_bin_root="${local_bin_dir}/AetherFlow"
+        sys_bin_dir="${dry_root}/usr/bin"
+        confine_root="${EFFECTIVE_RELEASE_ROOT:-${dry_root}}"
+    else
+        local opt_root="${LEGACY_OPT_ROOT:-}"
+        if [[ -z "${opt_root}" ]]; then
+            if [[ -n "${EFFECTIVE_RELEASE_ROOT:-}" ]]; then
+                opt_root="${EFFECTIVE_RELEASE_ROOT%/}/opt/AetherFlow"
+            else
+                opt_root="/opt/AetherFlow"
+            fi
+        fi
+        opt_packages_dir="${opt_root%/}/packages"
+
+        local_bin_dir="${CLI_BIN_DIR:-}"
+        if [[ -z "${local_bin_dir}" ]]; then
+            if [[ -n "${EFFECTIVE_RELEASE_ROOT:-}" ]]; then
+                local_bin_dir="${EFFECTIVE_RELEASE_ROOT%/}/usr/local/bin"
+            else
+                local_bin_dir="/usr/local/bin"
+            fi
+        fi
+        local_bin_dir="${local_bin_dir%/}"
+
+        legacy_bin_root="${LEGACY_BIN_ROOT:-}"
+        if [[ -z "${legacy_bin_root}" ]]; then
+            legacy_bin_root="${local_bin_dir}/AetherFlow"
+        fi
+        legacy_bin_root="${legacy_bin_root%/}"
+
+        sys_bin_dir="${SYS_BIN_DIR:-}"
+        if [[ -z "${sys_bin_dir}" ]]; then
+            if [[ -n "${EFFECTIVE_RELEASE_ROOT:-}" ]]; then
+                sys_bin_dir="${EFFECTIVE_RELEASE_ROOT%/}/usr/bin"
+            elif [[ "${local_bin_dir}" == */usr/local/bin && "${local_bin_dir}" != "/usr/local/bin" ]]; then
+                sys_bin_dir="${local_bin_dir%/usr/local/bin}/usr/bin"
+            else
+                sys_bin_dir="/usr/bin"
+            fi
+        fi
+        sys_bin_dir="${sys_bin_dir%/}"
+        confine_root="${EFFECTIVE_RELEASE_ROOT:-}"
     fi
-    if [[ -d "${LEGACY_BIN_ROOT}" && -f "${CURRENT_LINK}/packages/common.sh" && ! "${CURRENT_LINK}/packages/common.sh" -ef "${LEGACY_BIN_ROOT}/common.sh" ]]; then
-        cp -a "${CURRENT_LINK}/packages/common.sh" "${LEGACY_BIN_ROOT}/common.sh"
-    fi
-    if [[ -d "${LEGACY_BIN_ROOT}" && ! -L "${LEGACY_BIN_ROOT}/lib" && -d "${CURRENT_LINK}/packages/lib" && ! "${CURRENT_LINK}/packages/lib" -ef "${LEGACY_BIN_ROOT}/lib" ]]; then
-        mkdir -p "${LEGACY_BIN_ROOT}/lib"
-        rsync -a --delete --checksum "${CURRENT_LINK}/packages/lib/" "${LEGACY_BIN_ROOT}/lib/"
+
+    validate_path_within_isolated_root "LEGACY_OPT_ROOT/packages" "${opt_packages_dir}"
+    validate_path_within_isolated_root "LEGACY_BIN_ROOT" "${legacy_bin_root}"
+    validate_path_within_isolated_root "CLI_BIN_DIR" "${local_bin_dir}"
+    validate_path_within_isolated_root "SYS_BIN_DIR" "${sys_bin_dir}"
+
+    local sync_err=""
+    if ! sync_err="$(python3 -I - "${mode}" "${src_root}" "${opt_packages_dir}" "${legacy_bin_root}" "${local_bin_dir}" "${sys_bin_dir}" "${DRY_RUN:-false}" "${confine_root}" <<'PY' 2>&1
+import errno
+import os
+import pathlib
+import stat
+import sys
+import uuid
+
+(
+    mode,
+    src_root_raw,
+    opt_packages_raw,
+    legacy_bin_raw,
+    local_bin_raw,
+    sys_bin_raw,
+    dry_run_s,
+    confine_root_raw,
+) = sys.argv[1:]
+
+dry_run = dry_run_s == "true"
+is_root = os.geteuid() == 0
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+# Resolve CURRENT_LINK (the release slot symlink itself), then require packages/ inside
+# that slot to be a real directory with zero symlinks or special entries.
+resolved_slot = pathlib.Path(os.path.realpath(src_root_raw))
+src_packages = resolved_slot / "packages"
+try:
+    src_st = os.lstat(src_packages)
+except FileNotFoundError:
+    sys.exit(0)
+if stat.S_ISLNK(src_st.st_mode) or not stat.S_ISDIR(src_st.st_mode):
+    raise SystemExit(f"Refusing symlinked or non-directory release packages path: {src_packages}")
+
+# Collect relative directory and file inventory from src_packages without following symlinks.
+rel_dirs = []
+rel_files = {}
+
+def scan_source_dir(dir_fd, rel_prefix):
+    names = sorted(os.listdir(dir_fd))
+    for name in names:
+        if name in (".", "..") or name == "EGM.md":
+            continue
+        rel = f"{rel_prefix}/{name}" if rel_prefix else name
+        if rel in ("README.md", "system/af-heal"):
+            continue
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode):
+            raise SystemExit(f"Refusing symbolic link inside release packages tree: {src_packages / rel}")
+        if stat.S_ISDIR(st.st_mode):
+            rel_dirs.append(rel)
+            child_fd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=dir_fd)
+            try:
+                scan_source_dir(child_fd, rel)
+            finally:
+                os.close(child_fd)
+        elif stat.S_ISREG(st.st_mode):
+            file_fd = os.open(name, os.O_RDONLY | O_NOFOLLOW | O_CLOEXEC, dir_fd=dir_fd)
+            try:
+                fst = os.fstat(file_fd)
+                if not stat.S_ISREG(fst.st_mode):
+                    raise SystemExit(f"Refusing non-regular package file: {src_packages / rel}")
+                with os.fdopen(file_fd, "rb") as fh:
+                    file_fd = -1
+                    rel_files[rel] = fh.read()
+            finally:
+                if file_fd >= 0:
+                    os.close(file_fd)
+        else:
+            raise SystemExit(f"Refusing non-regular entry inside release packages tree: {src_packages / rel}")
+
+src_fd = os.open(str(src_packages), os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+try:
+    scan_source_dir(src_fd, "")
+finally:
+    os.close(src_fd)
+
+if not rel_files and not rel_dirs:
+    sys.exit(0)
+
+confine_root = pathlib.PurePosixPath(confine_root_raw.rstrip("/") or "/") if confine_root_raw else None
+
+def verify_no_symlink_ancestors(target_str, expect_regular_leaf=False):
+    p = pathlib.PurePosixPath(target_str)
+    if not p.is_absolute() or ".." in p.parts:
+        raise SystemExit(f"Refusing non-normalized helper sync target: {target_str}")
+    if confine_root is not None:
+        try:
+            rel_parts = p.relative_to(confine_root).parts
+        except ValueError:
+            raise SystemExit(f"Target {target_str} escapes isolated root {confine_root}")
+        cur = pathlib.Path(str(confine_root))
+        try:
+            rst = os.lstat(cur)
+        except FileNotFoundError:
+            rst = None
+        if rst is not None and stat.S_ISLNK(rst.st_mode):
+            raise SystemExit(f"Refusing symlinked isolated root directory: {cur}")
+        for idx, part in enumerate(rel_parts):
+            cur = cur / part
+            is_leaf = idx == len(rel_parts) - 1
+            try:
+                st = os.lstat(cur)
+            except FileNotFoundError:
+                break
+            if is_leaf and expect_regular_leaf:
+                if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+                    raise SystemExit(f"Refusing directory at helper binary path: {cur}")
+            else:
+                if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                    raise SystemExit(f"Refusing symlinked or non-directory helper path: {cur}")
+    else:
+        cur = pathlib.Path("/")
+        for idx, part in enumerate(p.parts[1:]):
+            cur = cur / part
+            is_leaf = idx == len(p.parts) - 2
+            try:
+                st = os.lstat(cur)
+            except FileNotFoundError:
+                break
+            if is_leaf and expect_regular_leaf:
+                if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+                    raise SystemExit(f"Refusing directory at helper binary path: {cur}")
+            else:
+                if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                    raise SystemExit(f"Refusing symlinked or non-directory helper path: {cur}")
+
+def can_manage_target(target_str):
+    if dry_run or confine_root is not None or is_root:
+        return True
+    probe = pathlib.Path(target_str)
+    while not os.path.exists(probe) and probe.parent != probe:
+        probe = probe.parent
+    return os.access(probe, os.W_OK | os.X_OK)
+
+def check_existing_subtree_no_symlink_dirs(root_str):
+    if not os.path.lexists(root_str):
+        return
+    st = os.lstat(root_str)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise SystemExit(f"Refusing symlinked or non-directory package sync root: {root_str}")
+    dir_fd = os.open(root_str, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    try:
+        for rel_d in rel_dirs:
+            cur_fd = os.dup(dir_fd)
+            try:
+                for comp in rel_d.split("/"):
+                    try:
+                        cst = os.stat(comp, dir_fd=cur_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        break
+                    if stat.S_ISLNK(cst.st_mode):
+                        raise SystemExit(f"Refusing symlinked package subdirectory: {root_str}/{rel_d}")
+                    if not stat.S_ISDIR(cst.st_mode):
+                        break
+                    nxt_fd = os.open(comp, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+                    os.close(cur_fd)
+                    cur_fd = nxt_fd
+            finally:
+                os.close(cur_fd)
+    finally:
+        os.close(dir_fd)
+
+manage_opt = can_manage_target(opt_packages_raw)
+manage_legacy_bin = can_manage_target(legacy_bin_raw)
+manage_local_bin = can_manage_target(local_bin_raw)
+manage_sys_bin = can_manage_target(sys_bin_raw)
+
+if manage_opt:
+    verify_no_symlink_ancestors(opt_packages_raw, expect_regular_leaf=False)
+    check_existing_subtree_no_symlink_dirs(opt_packages_raw)
+if manage_legacy_bin:
+    verify_no_symlink_ancestors(legacy_bin_raw, expect_regular_leaf=False)
+    check_existing_subtree_no_symlink_dirs(legacy_bin_raw)
+if manage_local_bin and "system/af-certbot-sync" in rel_files:
+    verify_no_symlink_ancestors(local_bin_raw, expect_regular_leaf=False)
+    verify_no_symlink_ancestors(f"{local_bin_raw}/af-certbot-sync", expect_regular_leaf=True)
+if manage_sys_bin and ("system/af-certbot-sync" in rel_files or "system/af-systemd-sandbox" in rel_files):
+    verify_no_symlink_ancestors(sys_bin_raw, expect_regular_leaf=False)
+    if "system/af-certbot-sync" in rel_files:
+        verify_no_symlink_ancestors(f"{sys_bin_raw}/af-certbot-sync", expect_regular_leaf=True)
+    if "system/af-systemd-sandbox" in rel_files:
+        verify_no_symlink_ancestors(f"{sys_bin_raw}/af-systemd-sandbox", expect_regular_leaf=True)
+
+if mode == "preflight":
+    sys.exit(0)
+
+def fsync_dir_best_effort(dir_fd):
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.EBADF, errno.EROFS):
+            raise
+
+def ensure_dir_nofollow(target_str, set_managed_perms):
+    verify_no_symlink_ancestors(target_str, expect_regular_leaf=False)
+    p = pathlib.PurePosixPath(target_str)
+    if confine_root is not None:
+        anchor = pathlib.Path(str(confine_root))
+        rel_parts = p.relative_to(confine_root).parts
+        if not os.path.lexists(anchor):
+            os.makedirs(anchor, mode=0o755, exist_ok=True)
+    else:
+        anchor = pathlib.Path("/")
+        rel_parts = p.parts[1:]
+    cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    cur = anchor
+    try:
+        for part in rel_parts:
+            cur = cur / part
+            try:
+                nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=cur_fd)
+                except FileExistsError as exists_err:
+                    _ = exists_err
+                nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            except OSError as exc:
+                raise SystemExit(f"Refusing symlinked or non-directory helper path {cur}: {exc}")
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+        fst = os.fstat(cur_fd)
+        if not stat.S_ISDIR(fst.st_mode):
+            raise SystemExit(f"Opened helper directory is not a directory: {target_str}")
+        if set_managed_perms:
+            if is_root:
+                os.fchown(cur_fd, 0, 0)
+            os.fchmod(cur_fd, 0o755)
+        return cur_fd
+    except BaseException:
+        os.close(cur_fd)
+        raise
+
+def remove_tree_at(parent_fd, name):
+    st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+        child_fd = os.open(name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=parent_fd)
+        try:
+            for child in os.listdir(child_fd):
+                if child not in (".", ".."):
+                    remove_tree_at(child_fd, child)
+        finally:
+            os.close(child_fd)
+        os.rmdir(name, dir_fd=parent_fd)
+    else:
+        os.unlink(name, dir_fd=parent_fd)
+
+def atomic_write_regular_in_dir(dir_fd, entry_name, payload, allow_dir_replace=False):
+    try:
+        existing = os.stat(entry_name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and stat.S_ISDIR(existing.st_mode) and not stat.S_ISLNK(existing.st_mode):
+        if allow_dir_replace:
+            remove_tree_at(dir_fd, entry_name)
+        else:
+            raise SystemExit(f"Refusing to overwrite directory at helper binary path: {entry_name}")
+
+    tmp_name = f".af-sync.{entry_name}.{os.getpid()}.{uuid.uuid4().hex}"
+    tmp_fd = os.open(
+        tmp_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+        0o600,
+        dir_fd=dir_fd,
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(tmp_fd, view)
+            if written <= 0:
+                raise OSError("short write during atomic helper sync")
+            view = view[written:]
+        if is_root:
+            os.fchown(tmp_fd, 0, 0)
+        os.fchmod(tmp_fd, 0o755)
+        os.fsync(tmp_fd)
+    except BaseException:
+        os.close(tmp_fd)
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except OSError as cleanup_err:
+            if cleanup_err.errno != errno.ENOENT:
+                sys.stderr.write(f"warning: failed to clean up temp helper {tmp_name}: {cleanup_err}\n")
+        raise
+    os.close(tmp_fd)
+    try:
+        os.replace(tmp_name, entry_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except OSError as cleanup_err:
+            if cleanup_err.errno != errno.ENOENT:
+                sys.stderr.write(f"warning: failed to clean up temp helper {tmp_name}: {cleanup_err}\n")
+        raise
+    verify_st = os.stat(entry_name, dir_fd=dir_fd, follow_symlinks=False)
+    if stat.S_ISLNK(verify_st.st_mode) or not stat.S_ISREG(verify_st.st_mode):
+        raise SystemExit(f"Post-sync verification failed for regular file {entry_name}")
+    fsync_dir_best_effort(dir_fd)
+
+def sync_managed_packages_tree(dest_root_str):
+    if os.path.lexists(dest_root_str):
+        dst_st = os.lstat(dest_root_str)
+        if os.path.samestat(src_st, dst_st):
+            return
+    root_fd = ensure_dir_nofollow(dest_root_str, set_managed_perms=True)
+    dir_fds = {"": root_fd}
+    try:
+        for rel_d in rel_dirs:
+            parent_rel, _, leaf = rel_d.rpartition("/")
+            parent_fd = dir_fds[parent_rel]
+            try:
+                est = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                if stat.S_ISLNK(est.st_mode):
+                    raise SystemExit(f"Refusing symlinked package directory: {dest_root_str}/{rel_d}")
+                if not stat.S_ISDIR(est.st_mode):
+                    os.unlink(leaf, dir_fd=parent_fd)
+                    os.mkdir(leaf, 0o755, dir_fd=parent_fd)
+            except FileNotFoundError:
+                os.mkdir(leaf, 0o755, dir_fd=parent_fd)
+            child_fd = os.open(leaf, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=parent_fd)
+            if is_root:
+                os.fchown(child_fd, 0, 0)
+            os.fchmod(child_fd, 0o755)
+            dir_fds[rel_d] = child_fd
+
+        for rel_f, payload in rel_files.items():
+            parent_rel, _, leaf = rel_f.rpartition("/")
+            parent_fd = dir_fds[parent_rel]
+            atomic_write_regular_in_dir(parent_fd, leaf, payload, allow_dir_replace=True)
+
+        expected_children = {rel_d: set() for rel_d in ["", *rel_dirs]}
+        for rel_d in rel_dirs:
+            parent_rel, _, leaf = rel_d.rpartition("/")
+            expected_children[parent_rel].add(leaf)
+        for rel_f in rel_files:
+            parent_rel, _, leaf = rel_f.rpartition("/")
+            expected_children[parent_rel].add(leaf)
+
+        for rel_d in reversed(["", *rel_dirs]):
+            dfd = dir_fds[rel_d]
+            keep = expected_children[rel_d]
+            for existing_name in os.listdir(dfd):
+                if existing_name in (".", "..") or existing_name in keep:
+                    continue
+                remove_tree_at(dfd, existing_name)
+            fsync_dir_best_effort(dfd)
+    finally:
+        for dfd in reversed(list(dir_fds.values())):
+            os.close(dfd)
+
+if manage_opt:
+    sync_managed_packages_tree(opt_packages_raw)
+if manage_legacy_bin:
+    sync_managed_packages_tree(legacy_bin_raw)
+
+if manage_local_bin and "system/af-certbot-sync" in rel_files:
+    lbin_fd = ensure_dir_nofollow(local_bin_raw, set_managed_perms=False)
+    try:
+        atomic_write_regular_in_dir(
+            lbin_fd,
+            "af-certbot-sync",
+            rel_files["system/af-certbot-sync"],
+            allow_dir_replace=False,
+        )
+    finally:
+        os.close(lbin_fd)
+
+if manage_sys_bin:
+    if "system/af-certbot-sync" in rel_files or "system/af-systemd-sandbox" in rel_files or os.path.lexists(f"{sys_bin_raw}/af-heal"):
+        if os.path.lexists(sys_bin_raw) or "system/af-certbot-sync" in rel_files or "system/af-systemd-sandbox" in rel_files:
+            sbin_fd = ensure_dir_nofollow(sys_bin_raw, set_managed_perms=False)
+            try:
+                if "system/af-certbot-sync" in rel_files:
+                    atomic_write_regular_in_dir(
+                        sbin_fd,
+                        "af-certbot-sync",
+                        rel_files["system/af-certbot-sync"],
+                        allow_dir_replace=False,
+                    )
+                if "system/af-systemd-sandbox" in rel_files:
+                    atomic_write_regular_in_dir(
+                        sbin_fd,
+                        "af-systemd-sandbox",
+                        rel_files["system/af-systemd-sandbox"],
+                        allow_dir_replace=False,
+                    )
+                try:
+                    heal_st = os.stat("af-heal", dir_fd=sbin_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    heal_st = None
+                if heal_st is not None and (not stat.S_ISDIR(heal_st.st_mode) or stat.S_ISLNK(heal_st.st_mode)):
+                    os.unlink("af-heal", dir_fd=sbin_fd)
+                    fsync_dir_best_effort(sbin_fd)
+            finally:
+                os.close(sbin_fd)
+PY
+)"; then
+        if declare -F log_error >/dev/null 2>&1; then
+            log_error "Failed to atomically sync package and system helpers: ${sync_err}"
+        else
+            printf '[ERROR] Failed to atomically sync package and system helpers: %s\n' "${sync_err}" >&2
+        fi
+        return 1
     fi
 }
 
@@ -1984,13 +4003,31 @@ sync_cli_entrypoints() {
     if [[ "${DRY_RUN}" == false && -z "${EFFECTIVE_RELEASE_ROOT}" && "${EUID}" -ne 0 && ! -w "${bin_dir}" ]]; then
         return 0
     fi
-    mkdir -p "${bin_dir}" 2>/dev/null || return 0
-    if [[ -x "${CURRENT_LINK}/bin/af" || -x "${CURRENT_LINK}/af" ]]; then
+    if [[ -L "${bin_dir}" ]]; then
+        log_error "Refusing symlinked CLI bin directory: ${bin_dir}"
+        return 1
+    fi
+    if ! mkdir -p "${bin_dir}"; then
+        log_error "Failed to create CLI bin directory: ${bin_dir}"
+        return 1
+    fi
+    local af_target=""
+    if [[ -x "${CURRENT_LINK}/bin/af" ]]; then
+        af_target="${CURRENT_LINK}/bin/af"
+    elif [[ -x "${CURRENT_LINK}/af" ]]; then
+        af_target="${CURRENT_LINK}/af"
+    fi
+    if [[ -n "${af_target}" ]]; then
         if [[ ! -e "${bin_dir}/af" || -L "${bin_dir}/af" ]]; then
-            if [[ -x "${CURRENT_LINK}/bin/af" ]]; then
-                ln -sfn "${CURRENT_LINK}/bin/af" "${bin_dir}/af" 2>/dev/null || true
-            else
-                ln -sfn "${CURRENT_LINK}/af" "${bin_dir}/af" 2>/dev/null || true
+            local tmp_af_link="${bin_dir}/.af.tmp.$$.${RANDOM}"
+            if ! ln -s "${af_target}" "${tmp_af_link}"; then
+                log_error "Failed to stage CLI symlink at ${tmp_af_link}"
+                return 1
+            fi
+            if ! mv -Tf "${tmp_af_link}" "${bin_dir}/af"; then
+                rm -f "${tmp_af_link}" 2>/dev/null || true
+                log_error "Failed to atomically install CLI symlink at ${bin_dir}/af"
+                return 1
             fi
         fi
     fi
@@ -1999,18 +4036,20 @@ sync_cli_entrypoints() {
 symlink_swap() {
     log_info "=== STAGE 2: Atomic Symlink Swap ==="
 
+    sync_legacy_package_paths --preflight-only "${RELEASE_DIR}" || return 1
+
     if [[ -L "${CURRENT_LINK}" ]]; then
         local previous_target
         previous_target="$(readlink -f "${CURRENT_LINK}")"
-        echo "${previous_target}" > "${RELEASES_DIR}/.previous_release"
+        write_atomic_private_file "${RELEASES_DIR}/.previous_release" "0644" "${previous_target}"$'\n' || return 1
         log_info "Previous release recorded: ${previous_target}"
     fi
 
-    local tmp_link="${CURRENT_LINK}.tmp.${EPOCH}"
+    local tmp_link="${CURRENT_LINK}.tmp.${EPOCH}.$$.${RANDOM}"
     ln -s "${RELEASE_DIR}" "${tmp_link}"
     mv -Tf "${tmp_link}" "${CURRENT_LINK}"
-    sync_cli_entrypoints
-    sync_legacy_package_paths
+    sync_cli_entrypoints || return 1
+    sync_legacy_package_paths || return 1
 
     log_info "Symlink updated atomically: ${CURRENT_LINK} -> ${RELEASE_DIR}"
 }
@@ -2188,7 +4227,7 @@ restart_systemd_units() {
 parse_health_status() {
     local response="$1"
     if command -v python3 >/dev/null 2>&1; then
-        printf '%s' "${response}" | python3 -c '
+        printf '%s' "${response}" | python3 -I -c '
 import json, sys
 raw = sys.stdin.read().strip()
 if not raw:
@@ -2294,7 +4333,7 @@ stop_database_services() {
 }
 
 verify_restore_snapshot_digest() {
-    python3 - "${1}" "${SQLITE_DB}.bak" <<'PY'
+    python3 -I - "${1}" "${SQLITE_DB}.bak" <<'PY'
 import hashlib
 import os
 import stat
@@ -2345,16 +4384,20 @@ state_restore() {
         return 0
     fi
 
-    [[ ! -f "${db_path}" && ! -f "${bak_path}" ]] && return 0
+    [[ ! -e "${db_path}" && ! -L "${db_path}" && ! -f "${bak_path}" ]] && return 0
 
-    if ! command -v sqlite3 >/dev/null 2>&1; then
-        log_error "sqlite3 is absent; cannot verify integrity for ${db_path}."
+    if ! has_python_sqlite3; then
+        log_error "python3 sqlite3 is absent; cannot verify integrity for ${db_path}."
         return 1
     fi
 
     local integrity="missing"
-    if [[ -f "${db_path}" ]]; then
+    if [[ -L "${db_path}" ]]; then
+        integrity="error"
+    elif [[ -f "${db_path}" ]]; then
         integrity="$(sqlite_integrity "${db_path}")"
+    elif [[ -e "${db_path}" ]]; then
+        integrity="error"
     fi
     if [[ "${integrity}" == "ok" ]]; then
         log_info "Database integrity check PASSED (${db_path})."
@@ -2362,7 +4405,7 @@ state_restore() {
     fi
 
     log "CRITICAL" "DATABASE CORRUPTION DETECTED (${integrity}) at ${db_path} — Restoring snapshot..."
-    if [[ ! -f "${bak_path}" ]]; then
+    if [[ ! -f "${bak_path}" || -L "${bak_path}" ]]; then
         log_error "No snapshot available at ${bak_path}."
         return 1
     fi
@@ -2379,33 +4422,38 @@ state_restore() {
     fi
 
     stop_database_services "${db_path}" || return 1
-    rm -f "${db_path}-wal" "${db_path}-shm" || return 1
-    if [[ -f "${db_path}" ]]; then
-        mv "${db_path}" "${db_path}.corrupted.$(date +%s)" || return 1
+    if [[ -f "${db_path}" && ! -L "${db_path}" ]]; then
+        local post_stop_integrity
+        post_stop_integrity="$(sqlite_integrity "${db_path}")"
+        if [[ "${post_stop_integrity}" == "ok" ]]; then
+            log_info "Quiesced database integrity check PASSED (${db_path}); skipping snapshot overwrite."
+            return 0
+        fi
     fi
-    cp -pf "${bak_path}" "${db_path}" || return 1
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]] && id -u aetherflow >/dev/null 2>&1; then
-        chown aetherflow:aetherflow "${db_path}" || return 1
-    fi
-    chmod 0600 "${db_path}" || return 1
+    atomic_publish_db_file "restore" "${bak_path}" "${db_path}" || return 1
     log "CRITICAL" "Database RESTORED to ${db_path} from verified snapshot: ${bak_path}"
 }
 
 rollback() {
     local snapshot_release="${1:-}"
     log_error "=== STAGE 4: ROLLBACK INITIATED ==="
-    save_recovery_state "stage4_rollback"
     local prev_file="${RELEASES_DIR}/.previous_release"
     if [[ ! -f "${prev_file}" && -n "${RECOVERY_PREVIOUS_RELEASE}" && -d "${RECOVERY_PREVIOUS_RELEASE}" && ! -L "${prev_file}" ]]; then
-        printf '%s\n' "${RECOVERY_PREVIOUS_RELEASE}" > "${prev_file}"
+        write_atomic_private_file "${prev_file}" "0644" "${RECOVERY_PREVIOUS_RELEASE}"$'\n' || log_fatal "Failed to persist ${prev_file}."
+    fi
+    if [[ -L "${prev_file}" ]]; then
+        save_recovery_state "stage4_rollback"
+        log_fatal "Refusing symlinked previous release record at ${prev_file}."
     fi
     if [[ ! -f "${prev_file}" ]]; then
+        save_recovery_state "stage4_rollback"
         log_fatal "No previous release record found at ${prev_file}."
     fi
 
     local previous_target
     previous_target="$(cat "${prev_file}")"
     if [[ ! -d "${previous_target}" ]]; then
+        save_recovery_state "stage4_rollback"
         log_fatal "Previous release directory missing: ${previous_target}."
     fi
 
@@ -2413,17 +4461,31 @@ rollback() {
     if [[ -L "${CURRENT_LINK}" ]]; then
         current_before_rollback="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
     fi
+    local prev_canon
+    prev_canon="$(readlink -f "${previous_target}" 2>/dev/null || printf '%s' "${previous_target}")"
+    if [[ -z "${RECOVERY_CANDIDATE_RELEASE}" && -n "${current_before_rollback}" && "${current_before_rollback}" != "${prev_canon}" ]]; then
+        RECOVERY_CANDIDATE_RELEASE="${current_before_rollback}"
+    fi
+    RECOVERY_PREVIOUS_RELEASE="${previous_target}"
+    save_recovery_state "stage4_rollback"
 
-    local tmp_link="${CURRENT_LINK}.rollback.${EPOCH}"
+    local tmp_link="${CURRENT_LINK}.rollback.${EPOCH}.$$.${RANDOM}"
     ln -s "${previous_target}" "${tmp_link}"
     mv -Tf "${tmp_link}" "${CURRENT_LINK}"
-    sync_cli_entrypoints
-    sync_legacy_package_paths
+    ROLLBACK_POST_SWAP_ACTIVE=true
+    save_recovery_state "stage4_rollback"
+    local cli_sync_failed=0 helper_sync_failed=0
+    if ! sync_cli_entrypoints; then
+        cli_sync_failed=1
+        log_error "Rollback CLI entrypoint sync failed; continuing database recovery and health probe."
+    fi
+    if ! sync_legacy_package_paths; then
+        helper_sync_failed=1
+        log_error "Rollback package/helper sync failed; continuing database recovery and health probe."
+    fi
     log_info "Symlink reverted: ${CURRENT_LINK} -> ${previous_target}"
 
     if [[ -z "${snapshot_release}" ]]; then
-        local prev_canon
-        prev_canon="$(readlink -f "${previous_target}" 2>/dev/null || printf '%s' "${previous_target}")"
         if [[ -n "${INFERRED_POST_SWAP_CANDIDATE}" && -d "${INFERRED_POST_SWAP_CANDIDATE}/data-snapshot" ]]; then
             snapshot_release="${INFERRED_POST_SWAP_CANDIDATE}"
         elif [[ -n "${current_before_rollback}" && "${current_before_rollback}" != "${prev_canon}" && -d "${current_before_rollback}/data-snapshot" ]]; then
@@ -2445,6 +4507,9 @@ rollback() {
         if ! health_probe; then
             log_fatal "Health probe failed after rollback to ${previous_target}."
         fi
+    fi
+    if [[ "${cli_sync_failed}" -ne 0 || "${helper_sync_failed}" -ne 0 ]]; then
+        log_fatal "Rollback reverted symlink and restored service health, but entrypoint/helper sync failed (cli=${cli_sync_failed}, helpers=${helper_sync_failed})."
     fi
     log_error "=== ROLLBACK COMPLETE: Reverted to ${previous_target} ==="
     RECOVERY_PREVIOUS_RELEASE="${previous_target}"
@@ -2523,79 +4588,341 @@ migrate_systemd() {
 check_package_lifecycle_reservations() {
     [[ "${DRY_RUN}" != true ]] || return 0
     resolve_db_path_quiet
-    if ! python3 - "${RESOLVED_DB_PATH}" "${COMMAND}" <<'PY'
-import datetime, fcntl, os, pathlib, sqlite3, stat, sys, uuid
-database, command = pathlib.Path(sys.argv[1]), sys.argv[2]
-if not database.exists():
-    sys.exit(0)
-with database.open("rb") as source:
-    header = source.read(16)
-if not header:
-    sys.exit(0)
-if header != b"SQLite format 3\0":
-    sys.exit(0 if command == "rollback" else "Cannot verify application lifecycle journal: invalid SQLite header")
-try:
-    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=5)
-    try:
-        table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs'").fetchone()
-        if not table:
-            sys.exit(0)
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(package_lifecycle_jobs)")}
-        stale = []
-        held_leases = []
+    if ! python3 -I - "${RESOLVED_DB_PATH}" "${COMMAND}" "${EFFECTIVE_RELEASE_ROOT:-}" <<'PY'
+import datetime, fcntl, os, pathlib, sqlite3, stat, sys, time, uuid
+
+database = pathlib.Path(sys.argv[1])
+command = sys.argv[2]
+confine_root_raw = sys.argv[3] if len(sys.argv) > 3 else ""
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+MAX_SCRATCH_BYTES = 2 * 1024 * 1024 * 1024
+is_root = os.geteuid() == 0
+
+def open_dir_nofollow(dir_str):
+    p = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if ".." in p.parts:
+        raise OSError(f"parent traversal in path: {dir_str}")
+    confine = pathlib.PurePosixPath(confine_root_raw.rstrip("/") or "/") if confine_root_raw else None
+    if confine is not None:
         try:
-            if "owner_id" in columns:
-                for package, job, owner in connection.execute("SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')").fetchall():
-                    lease = None
-                    try:
-                        uuid.UUID(owner)
-                        lease_path = database.with_suffix(".lifecycle-owners") / owner
-                        descriptor = os.open(lease_path, os.O_RDONLY | os.O_NOFOLLOW)
-                        lease = os.fdopen(descriptor, "rb")
-                        if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
-                            lease.close()
-                            continue
-                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        held_leases.append(lease)
-                        stale.append((package, job, owner))
-                    except (OSError, ValueError):
-                        if lease is not None:
-                            lease.close()
-                        continue
-            if stale:
-                rw = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5)
-                try:
-                    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                    for package, job, owner in stale:
-                        rw.execute(
-                            "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
-                            (now, package, job, owner),
-                        )
-                    rw.commit()
-                    active = rw.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
-                finally:
-                    rw.close()
-            else:
-                active = connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
-        finally:
-            for held in held_leases:
-                try:
-                    held.close()
-                except OSError:
-                    pass
-        if active:
-            sys.exit("Application lifecycle orchestration is active or its owner is unknown")
+            rel_parts = p.relative_to(confine).parts
+            anchor = pathlib.Path(str(confine))
+        except ValueError:
+            rel_parts = p.parts[1:]
+            anchor = pathlib.Path("/")
+    else:
+        rel_parts = p.parts[1:]
+        anchor = pathlib.Path("/")
+    cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    try:
+        for part in rel_parts:
+            nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+        return cur_fd
+    except Exception:
+        os.close(cur_fd)
+        raise
+
+def is_trusted_root_path_dir(dir_str, allow_sticky):
+    dp = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if not dp.is_absolute() or ".." in dp.parts:
+        return False
+    cur_p = pathlib.Path("/")
+    for part in dp.parts:
+        cur_p = pathlib.Path("/") if part == "/" else cur_p / part
+        try:
+            cst = os.lstat(cur_p)
+        except OSError:
+            return False
+        if stat.S_ISLNK(cst.st_mode) or not stat.S_ISDIR(cst.st_mode) or cst.st_uid != 0:
+            return False
+        writable = (cst.st_mode & 0o022) != 0
+        sticky = (cst.st_mode & getattr(stat, "S_ISVTX", 0o1000)) != 0
+        if writable and not (allow_sticky and sticky):
+            return False
+    return True
+
+def copy_fd(in_fd, out_dir_fd, out_name, remaining_cap):
+    out_fd = os.open(out_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600, dir_fd=out_dir_fd)
+    copied = 0
+    tail8 = b""
+    try:
+        while True:
+            chunk = os.read(in_fd, 65536)
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > remaining_cap:
+                raise OSError("lifecycle scratch copy cap exceeded")
+            tail8 = (tail8 + chunk)[-8:]
+            view = memoryview(chunk)
+            while view:
+                w = os.write(out_fd, view)
+                if w <= 0:
+                    raise OSError("short write")
+                view = view[w:]
+        if out_name.endswith("-journal") and copied >= 16 and tail8 == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7":
+            raise OSError("forbidden SQLite super-journal trailer")
+        return remaining_cap - copied
     finally:
-        connection.close()
-except sqlite3.DatabaseError as error:
-    code = getattr(error, "sqlite_errorcode", None)
-    # Python 3.10 has neither sqlite_errorcode nor the SQLITE_* constants.
-    corrupt = (code is not None and (code & 255) in (11, 26)) or (
-        code is None and str(error) in ("database disk image is malformed", "file is not a database")
-    )
-    if command == "rollback" and corrupt:
-        sys.exit(0)
-    sys.exit(f"Cannot verify application lifecycle journal: {error}")
+        os.close(out_fd)
+
+def create_root_scratch(min_free=16 * 1024 * 1024):
+    sc_name = f".af-root-lc.{os.getpid()}.{uuid.uuid4().hex}"
+    for cand in ("/var/tmp", "/tmp", "/run"):
+        if not is_trusted_root_path_dir(cand, allow_sticky=True):
+            continue
+        cand_fd = -1
+        try:
+            cand_fd = os.open(cand, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            vfs = os.fstatvfs(cand_fd)
+            avail = vfs.f_bavail * (vfs.f_frsize or vfs.f_bsize)
+            if avail < min_free:
+                os.close(cand_fd)
+                continue
+            os.mkdir(sc_name, 0o700, dir_fd=cand_fd)
+            sc_fd = os.open(sc_name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cand_fd)
+            if not stat.S_ISDIR(os.fstat(sc_fd).st_mode) or os.fstat(sc_fd).st_uid != 0:
+                os.close(sc_fd)
+                os.rmdir(sc_name, dir_fd=cand_fd)
+                os.close(cand_fd)
+                continue
+            os.fchmod(sc_fd, 0o700)
+            return cand_fd, sc_fd, sc_name, os.path.join(cand, sc_name)
+        except OSError:
+            if cand_fd >= 0:
+                os.close(cand_fd)
+    raise SystemExit("Cannot verify application lifecycle journal: failed to create root scratch dir")
+
+def open_hardened_sqlite(target, *, uri=False, timeout=5):
+    conn = sqlite3.connect(target, uri=uri, timeout=timeout)
+    try:
+        conn.execute("PRAGMA trusted_schema = OFF;")
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+def close_fds(fds):
+    for fd_c in fds:
+        if fd_c >= 0:
+            os.close(fd_c)
+
+def open_validated_db_and_sidecars(parent_fd, leaf):
+    db_fd = os.open(leaf, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+    wal_fd = -1
+    jrn_fd = -1
+    try:
+        st = os.fstat(db_fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise OSError("lifecycle database must be an exclusive regular non-symlink file")
+        total_sz = st.st_size
+        for suffix in ("-wal", "-shm", "-journal"):
+            try:
+                sc_fd = os.open(leaf + suffix, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+            except FileNotFoundError:
+                continue
+            sc_st = os.fstat(sc_fd)
+            if not stat.S_ISREG(sc_st.st_mode) or sc_st.st_nlink != 1:
+                os.close(sc_fd)
+                raise OSError(f"lifecycle database sidecar {suffix} must be an exclusive regular file")
+            if suffix == "-wal":
+                wal_fd = sc_fd
+                total_sz += sc_st.st_size
+            elif suffix == "-journal":
+                if sc_st.st_size >= 16:
+                    os.lseek(sc_fd, -8, os.SEEK_END)
+                    jtail = os.read(sc_fd, 8)
+                    os.lseek(sc_fd, 0, os.SEEK_SET)
+                    if jtail == b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7":
+                        os.close(sc_fd)
+                        raise OSError("lifecycle database -journal contains forbidden super-journal trailer")
+                jrn_fd = sc_fd
+                total_sz += sc_st.st_size
+            else:
+                os.close(sc_fd)
+        return db_fd, wal_fd, jrn_fd, total_sz
+    except Exception:
+        for fd_c in (db_fd, wal_fd, jrn_fd):
+            if fd_c >= 0:
+                os.close(fd_c)
+        raise
+
+db_abs = os.path.abspath(str(database))
+parent_str = os.path.dirname(db_abs)
+leaf_name = os.path.basename(db_abs)
+try:
+    parent_fd = open_dir_nofollow(parent_str)
+except FileNotFoundError:
+    sys.exit(0)
+except OSError as exc:
+    sys.exit(0 if command == "rollback" else f"Cannot verify application lifecycle journal: {exc}")
+
+def db_files_root_owned_safe(pfd, lname):
+    for sfx in ("", "-wal", "-shm", "-journal"):
+        try:
+            fst = os.stat(lname + sfx, dir_fd=pfd, follow_symlinks=False)
+        except FileNotFoundError:
+            fst = None
+        if fst is not None and (fst.st_uid != 0 or (fst.st_mode & 0o022) != 0):
+            return False
+    return True
+
+use_scratch = is_root and (
+    not is_trusted_root_path_dir(parent_str, allow_sticky=False)
+    or not db_files_root_owned_safe(parent_fd, leaf_name)
+)
+attempts = 3 if use_scratch else 1
+last_db_error = None
+
+try:
+    for attempt in range(attempts):
+        sc_tuple = None
+        db_fd = wal_fd = jrn_fd = -1
+        try:
+            try:
+                db_fd, wal_fd, jrn_fd, total_sz = open_validated_db_and_sidecars(parent_fd, leaf_name)
+            except FileNotFoundError:
+                sys.exit(0)
+            except OSError as exc:
+                sys.exit(0 if command == "rollback" else f"Cannot verify application lifecycle journal: {exc}")
+            try:
+                header = os.read(db_fd, 16)
+                if not header:
+                    sys.exit(0)
+                if header != b"SQLite format 3\x00":
+                    sys.exit(0 if command == "rollback" else "Cannot verify application lifecycle journal: invalid SQLite header")
+
+                if use_scratch:
+                    if total_sz > MAX_SCRATCH_BYTES:
+                        sys.exit(f"Cannot verify application lifecycle journal: database exceeds {MAX_SCRATCH_BYTES} byte cap")
+                    sc_tuple = create_root_scratch(total_sz * 2 + 16 * 1024 * 1024)
+                    sc_base_fd, sc_fd, sc_name, sc_path = sc_tuple
+                    os.lseek(db_fd, 0, os.SEEK_SET)
+                    rem_cap = copy_fd(db_fd, sc_fd, "inspect.sqlite", MAX_SCRATCH_BYTES)
+                    if wal_fd >= 0:
+                        rem_cap = copy_fd(wal_fd, sc_fd, "inspect.sqlite-wal", rem_cap)
+                    if jrn_fd >= 0:
+                        copy_fd(jrn_fd, sc_fd, "inspect.sqlite-journal", rem_cap)
+                    inspect_target = os.path.join(sc_path, "inspect.sqlite")
+                else:
+                    inspect_target = db_abs
+            finally:
+                for fd_c in (db_fd, wal_fd, jrn_fd):
+                    if fd_c >= 0:
+                        os.close(fd_c)
+                db_fd = wal_fd = jrn_fd = -1
+
+            if use_scratch:
+                connection = open_hardened_sqlite(inspect_target, timeout=5)
+            else:
+                connection = open_hardened_sqlite(pathlib.Path(inspect_target).as_uri() + "?mode=ro", uri=True, timeout=5)
+            try:
+                table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs'").fetchone()
+                if not table:
+                    sys.exit(0)
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(package_lifecycle_jobs)")}
+                stale = []
+                held_leases = []
+                owners_dir_name = pathlib.Path(leaf_name).with_suffix(".lifecycle-owners").name
+                owners_fd = -1
+                try:
+                    owners_fd = os.open(owners_dir_name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=parent_fd)
+                except OSError:
+                    owners_fd = -1
+                try:
+                    if "owner_id" in columns and owners_fd >= 0:
+                        for package, job, owner in connection.execute("SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')").fetchall():
+                            lease = None
+                            try:
+                                uuid.UUID(owner)
+                                descriptor = os.open(owner, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=owners_fd)
+                                lease = os.fdopen(descriptor, "rb")
+                                lst = os.fstat(lease.fileno())
+                                if not stat.S_ISREG(lst.st_mode) or lst.st_nlink != 1:
+                                    lease.close()
+                                    continue
+                                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                held_leases.append(lease)
+                                stale.append((package, job, owner))
+                            except (OSError, ValueError, TypeError):
+                                if lease is not None:
+                                    lease.close()
+                                continue
+                    if stale:
+                        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        if use_scratch:
+                            # Never reopen live /var/lib/aetherflow/aetherflow.sqlite RW as root:
+                            # reconcile stale rows strictly on the isolated scratch replica.
+                            connection.executemany(
+                                "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
+                                [(now, package, job, owner) for package, job, owner in stale],
+                            )
+                            connection.commit()
+                            active = connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+                        else:
+                            rw_fds = open_validated_db_and_sidecars(parent_fd, leaf_name)
+                            close_fds(rw_fds[:3])
+                            rw = open_hardened_sqlite(pathlib.Path(db_abs).as_uri() + "?mode=rw", uri=True, timeout=5)
+                            try:
+                                rw.executemany(
+                                    "UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
+                                    [(now, package, job, owner) for package, job, owner in stale],
+                                )
+                                rw.commit()
+                                active = rw.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+                            finally:
+                                rw.close()
+                    else:
+                        active = connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone()
+                finally:
+                    if owners_fd >= 0:
+                        os.close(owners_fd)
+                    for held in held_leases:
+                        try:
+                            held.close()
+                        except OSError:
+                            _ = held
+                if active:
+                    sys.exit("Application lifecycle orchestration is active or its owner is unknown")
+                sys.exit(0)
+            finally:
+                connection.close()
+        except sqlite3.DatabaseError as error:
+            last_db_error = error
+            if attempt + 1 < attempts:
+                time.sleep(0.025)
+                continue
+        finally:
+            if sc_tuple is not None:
+                sc_base_fd, sc_fd, sc_name, _ = sc_tuple
+                for leftover in ("inspect.sqlite", "inspect.sqlite-wal", "inspect.sqlite-shm", "inspect.sqlite-journal"):
+                    try:
+                        os.unlink(leftover, dir_fd=sc_fd)
+                    except FileNotFoundError:
+                        _ = leftover
+                os.close(sc_fd)
+                try:
+                    os.rmdir(sc_name, dir_fd=sc_base_fd)
+                except OSError:
+                    _ = sc_name
+                os.close(sc_base_fd)
+
+    if last_db_error is not None:
+        code = getattr(last_db_error, "sqlite_errorcode", None)
+        # Python 3.10 has neither sqlite_errorcode nor the SQLITE_* constants.
+        corrupt = (code is not None and (code & 255) in (11, 26)) or (
+            code is None and str(last_db_error) in ("database disk image is malformed", "file is not a database")
+        )
+        if command == "rollback" and corrupt:
+            sys.exit(0)
+        sys.exit(f"Cannot verify application lifecycle journal: {last_db_error}")
+finally:
+    os.close(parent_fd)
 PY
     then
         log_fatal "Application lifecycle admission is unavailable; release was not started."
@@ -2604,7 +4931,7 @@ PY
 
 guard_and_init_recovery_state() {
     local parsed=""
-    if ! parsed="$(python3 - "${RELEASES_DIR}" "${CURRENT_LINK}" "${COMMAND}" "${CHANNEL:-stable}" "${DRY_RUN:-false}" "${AETHERFLOW_UPDATE_OPERATION_ID:-}" <<'PY'
+    if ! parsed="$(python3 -I - "${RELEASES_DIR}" "${CURRENT_LINK}" "${COMMAND}" "${CHANNEL:-stable}" "${DRY_RUN:-false}" "${AETHERFLOW_UPDATE_OPERATION_ID:-}" <<'PY'
 import datetime, json, os, pathlib, shutil, stat, sys, uuid
 
 releases_dir_s, current_link_s, cmd, channel, dry_run_s, env_op_id = sys.argv[1:]
@@ -2654,9 +4981,14 @@ if state_file.exists():
     is_unfinished = phase not in ("complete", "completed", "failed")
     post_swap_deploy = (
         is_unfinished
-        and ex_cmd in ("", "deploy")
         and not ex_dry
-        and phase in ("stage2_symlink_swap", "stage3_health_probe", "stage4_rollback")
+        and (
+            phase == "stage4_rollback"
+            or (
+                ex_cmd in ("", "deploy")
+                and phase in ("stage2_symlink_swap", "stage3_health_probe")
+            )
+        )
     )
 
     if post_swap_deploy:
@@ -2673,9 +5005,31 @@ if state_file.exists():
             if prev_file.is_symlink():
                 sys.stderr.write(f"Refusing symlinked .previous_release: {prev_file}\n")
                 raise SystemExit(1)
-            tmp_prev = releases_dir / f".previous_release.tmp.{os.getpid()}.{uuid.uuid4().hex}"
-            tmp_prev.write_text(ex_prev + "\n", encoding="utf-8")
-            os.replace(str(tmp_prev), str(prev_file))
+            tmp_prev_name = f".previous_release.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+            rel_dfd = os.open(str(releases_dir), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+            try:
+                tfd = os.open(tmp_prev_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), 0o644, dir_fd=rel_dfd)
+                try:
+                    payload = (ex_prev + "\n").encode("utf-8")
+                    view = memoryview(payload)
+                    while view:
+                        w = os.write(tfd, view)
+                        if w <= 0:
+                            raise OSError("short write restoring .previous_release")
+                        view = view[w:]
+                    os.fchmod(tfd, 0o644)
+                    os.fsync(tfd)
+                except BaseException:
+                    os.close(tfd)
+                    try:
+                        os.unlink(tmp_prev_name, dir_fd=rel_dfd)
+                    except OSError as rm_err:
+                        _ = rm_err
+                    raise
+                os.close(tfd)
+                os.replace(tmp_prev_name, ".previous_release", src_dir_fd=rel_dfd, dst_dir_fd=rel_dfd)
+            finally:
+                os.close(rel_dfd)
             rec_prev = ex_prev
         ex_cand = existing.get("candidate_release")
         if isinstance(ex_cand, str) and ex_cand:
@@ -2733,6 +5087,253 @@ PY
     } <<< "${parsed}"
 }
 
+AF_LOCK_COPROC_PID=""
+AF_LOCK_COPROC_IN_FD=""
+AF_LOCK_COPROC_OUT_FD=""
+
+_start_fd_lock_coproc() {
+    if [[ -n "${AF_LOCK_COPROC_PID:-}" ]]; then
+        return 0
+    fi
+    local py_lock_holder=""
+    IFS= read -r -d '' py_lock_holder <<'PY' || true
+import ctypes, errno, fcntl, json, os, pathlib, pwd, select, signal, stat, sys, time
+
+confine_root_raw = sys.argv[1] if len(sys.argv) > 1 else ""
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+is_root = os.geteuid() == 0
+initial_ppid = os.getppid()
+
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+# Ensure the lock holder exits immediately if the parent shell receives SIGKILL.
+try:
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    libc.prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG = 1
+except OSError:
+    _ = initial_ppid
+if os.getppid() != initial_ppid:
+    sys.exit(0)
+
+def open_or_create_dir_nofollow(dir_str, create_mode):
+    p = pathlib.PurePosixPath(os.path.abspath(dir_str))
+    if ".." in p.parts:
+        raise OSError(f"parent traversal in lock path: {dir_str}")
+    confine = pathlib.PurePosixPath(confine_root_raw.rstrip("/") or "/") if confine_root_raw else None
+    if confine is not None:
+        try:
+            rel_parts = p.relative_to(confine).parts
+            anchor = pathlib.Path(str(confine))
+        except ValueError:
+            raise OSError(f"lock path escapes isolated root {confine}: {dir_str}")
+        if not os.path.lexists(anchor):
+            os.makedirs(anchor, mode=0o755, exist_ok=True)
+    else:
+        rel_parts = p.parts[1:]
+        anchor = pathlib.Path("/")
+    cur_fd = os.open(str(anchor), os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    try:
+        for part in rel_parts:
+            created_now = False
+            try:
+                nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, create_mode, dir_fd=cur_fd)
+                    created_now = True
+                except FileExistsError:
+                    created_now = False
+                nxt_fd = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, dir_fd=cur_fd)
+            if created_now:
+                os.fchmod(nxt_fd, create_mode)
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+        return cur_fd
+    except Exception:
+        os.close(cur_fd)
+        raise
+
+def resolve_target_owner(parent_fd):
+    uid_env = os.environ.get("AETHERFLOW_SERVICE_UID", "").strip()
+    gid_env = os.environ.get("AETHERFLOW_SERVICE_GID", "").strip()
+    if uid_env.isdigit() and gid_env.isdigit():
+        return int(uid_env), int(gid_env)
+    pst = os.fstat(parent_fd)
+    if pst.st_uid != 0 and (pst.st_mode & getattr(stat, "S_ISVTX", 0o1000)) == 0:
+        return pst.st_uid, pst.st_gid
+    svc_user = os.environ.get("AETHERFLOW_SERVICE_USER", "").strip() or "aetherflow"
+    try:
+        pw = pwd.getpwnam(svc_user)
+        return (int(uid_env) if uid_env.isdigit() else pw.pw_uid, int(gid_env) if gid_env.isdigit() else pw.pw_gid)
+    except KeyError:
+        return None
+
+def acquire_one_lock(lock_path, timeout_s, shared_mode, is_runtime_anchor):
+    abs_p = os.path.abspath(lock_path)
+    parent_str = os.path.dirname(abs_p)
+    leaf_name = os.path.basename(abs_p)
+    if not leaf_name or leaf_name in (".", ".."):
+        raise OSError(f"invalid lock filename: {lock_path}")
+    dir_mode = 0o750 if shared_mode else 0o755
+    file_mode = 0o660 if shared_mode else 0o600
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+
+    while True:
+        parent_fd = open_or_create_dir_nofollow(parent_str, dir_mode)
+        lock_fd = -1
+        try:
+            parent_st = os.fstat(parent_fd)
+            target_owner = resolve_target_owner(parent_fd) if (is_root and shared_mode) else None
+            if is_root and is_runtime_anchor:
+                if target_owner is not None:
+                    os.fchown(parent_fd, 0, target_owner[1])
+                os.fchmod(parent_fd, 0o750)
+            created_fresh = False
+            try:
+                lock_fd = os.open(leaf_name, os.O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+            except FileNotFoundError:
+                try:
+                    lock_fd = os.open(leaf_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, file_mode, dir_fd=parent_fd)
+                    created_fresh = True
+                except FileExistsError:
+                    try:
+                        lock_fd = os.open(leaf_name, os.O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        os.close(parent_fd)
+                        parent_fd = -1
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError(f"Could not acquire lock {lock_path} within {timeout_s}s")
+                        time.sleep(0.05)
+                        continue
+            st = os.fstat(lock_fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise OSError(f"lockfile is not a regular file: {lock_path}")
+            if st.st_nlink != 1:
+                raise OSError(f"lockfile must not have multiple hard links: {lock_path}")
+            if shared_mode:
+                if is_root:
+                    if not is_runtime_anchor and parent_st.st_uid != 0 and not created_fresh:
+                        expected_uid = target_owner[0] if target_owner is not None else parent_st.st_uid
+                        if st.st_uid == 0 or st.st_uid != expected_uid:
+                            raise OSError(f"refusing to chown pre-existing file (uid={st.st_uid}) at maintenance lock path inside non-root directory (uid={parent_st.st_uid}): {lock_path}")
+                    if target_owner is not None:
+                        desired_uid = 0 if is_runtime_anchor else target_owner[0]
+                        os.fchown(lock_fd, desired_uid, target_owner[1])
+                    os.fchmod(lock_fd, 0o660)
+                elif st.st_uid == os.geteuid() and (st.st_mode & 0o777) != 0o660:
+                    os.fchmod(lock_fd, 0o660)
+            elif is_root or st.st_uid == os.geteuid():
+                if (st.st_mode & 0o777) != 0o600:
+                    os.fchmod(lock_fd, 0o600)
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Could not acquire lock {lock_path} within {timeout_s}s")
+                    time.sleep(0.05)
+            # Post-flock verification: confirm our locked inode is still the live regular entry.
+            held_st = os.fstat(lock_fd)
+            try:
+                live_st = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                os.close(lock_fd)
+                os.close(parent_fd)
+                lock_fd = parent_fd = -1
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Lockfile {lock_path} unlinked during acquisition")
+                time.sleep(0.05)
+                continue
+            if (
+                not stat.S_ISREG(live_st.st_mode)
+                or held_st.st_nlink != 1
+                or live_st.st_nlink != 1
+                or (held_st.st_dev, held_st.st_ino) != (live_st.st_dev, live_st.st_ino)
+            ):
+                os.close(lock_fd)
+                os.close(parent_fd)
+                lock_fd = parent_fd = -1
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Lockfile {lock_path} identity changed during acquisition")
+                time.sleep(0.05)
+                continue
+            return parent_fd, lock_fd
+        except BaseException:
+            if lock_fd >= 0:
+                os.close(lock_fd)
+            if parent_fd >= 0:
+                os.close(parent_fd)
+            raise
+
+held_locks = []
+stdin_fd = sys.stdin.fileno()
+buf = b""
+try:
+    while True:
+        ready, _, _ = select.select([stdin_fd], [], [], 0.5)
+        if os.getppid() != initial_ppid:
+            break
+        if not ready:
+            continue
+        chunk = os.read(stdin_fd, 4096)
+        if not chunk:
+            break
+        buf += chunk
+        while b"\n" in buf:
+            raw_line, buf = buf.split(b"\n", 1)
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line)
+                pair = acquire_one_lock(
+                    req["path"],
+                    req["timeout"],
+                    bool(req.get("shared", False)),
+                    bool(req.get("runtime_anchor", False)),
+                )
+                held_locks.append(pair)
+                sys.stdout.write("LOCKED\n")
+                sys.stdout.flush()
+            except Exception as exc:
+                sys.stdout.write("ERR:" + str(exc).replace("\n", " ") + "\n")
+                sys.stdout.flush()
+                raise SystemExit(1)
+finally:
+    for pfd, lfd in reversed(held_locks):
+        os.close(lfd)
+        os.close(pfd)
+PY
+    coproc AF_LOCK_COPROC {
+        exec python3 -I -u -c "${py_lock_holder}" "${EFFECTIVE_RELEASE_ROOT:-}"
+    }
+    AF_LOCK_COPROC_PID="${AF_LOCK_COPROC_PID:-$!}"
+    AF_LOCK_COPROC_OUT_FD="${AF_LOCK_COPROC[0]}"
+    AF_LOCK_COPROC_IN_FD="${AF_LOCK_COPROC[1]}"
+}
+
+acquire_fd_lock_coproc() {
+    local _label="$1"
+    local lock_path="$2"
+    local timeout_s="$3"
+    local shared_flag="${4:-false}"
+    local runtime_anchor_flag="${5:-false}"
+    _start_fd_lock_coproc
+    local req_json
+    req_json="$(python3 -I -c 'import json, sys; print(json.dumps({"path": sys.argv[1], "timeout": float(sys.argv[2]), "shared": sys.argv[3] == "true", "runtime_anchor": sys.argv[4] == "true"}))' "${lock_path}" "${timeout_s}" "${shared_flag}" "${runtime_anchor_flag}")"
+    printf '%s\n' "${req_json}" >&"${AF_LOCK_COPROC_IN_FD}"
+    local reply=""
+    if ! IFS= read -r reply <&"${AF_LOCK_COPROC_OUT_FD}"; then
+        reply="ERR:lock holder terminated unexpectedly"
+    fi
+    if [[ "${reply}" != "LOCKED" ]]; then
+        log_fatal "Could not acquire ${_label} (${lock_path}): ${reply#ERR:}"
+    fi
+}
+
 acquire_release_lock() {
     local shared_db_lock="${AETHERFLOW_MAINTENANCE_LOCK_PATH:-}"
     if [[ -z "${shared_db_lock}" ]]; then
@@ -2744,7 +5345,14 @@ acquire_release_lock() {
             db_parent="$(dirname "${RESOLVED_DB_PATH}")"
             if [[ -z "${EFFECTIVE_RELEASE_ROOT}" && "${db_parent%/}" == "/var/lib/aetherflow" ]]; then
                 shared_db_lock="/run/aetherflow/.snapshot.lock"
-            elif [[ -n "${EFFECTIVE_RELEASE_ROOT}" && "${db_parent%/}" == "${EFFECTIVE_RELEASE_ROOT}/var/lib/aetherflow" && -d "${EFFECTIVE_RELEASE_ROOT}/run/aetherflow" ]]; then
+            elif [[ -n "${EFFECTIVE_RELEASE_ROOT}" && "${db_parent%/}" == "${EFFECTIVE_RELEASE_ROOT}/var/lib/aetherflow" ]] && {
+                [[ -d "${EFFECTIVE_RELEASE_ROOT}/run/aetherflow" ]] || python3 -I - "${EFFECTIVE_RELEASE_ROOT}" "${db_parent}" <<'PY' >/dev/null 2>&1
+import os, sys
+root_st = os.lstat(sys.argv[1])
+var_st = os.lstat(sys.argv[2])
+sys.exit(0 if (root_st.st_uid == 0 and var_st.st_uid != 0) else 1)
+PY
+            }; then
                 shared_db_lock="${EFFECTIVE_RELEASE_ROOT}/run/aetherflow/.snapshot.lock"
             else
                 shared_db_lock="${db_parent}/.snapshot.lock"
@@ -2758,75 +5366,16 @@ acquire_release_lock() {
     fi
     validate_path_within_isolated_root "AETHERFLOW_MAINTENANCE_LOCK_PATH" "${shared_db_lock}"
 
-    local shared_lock_dir
+    local shared_lock_dir is_runtime_anchor=false
     shared_lock_dir="$(dirname "${shared_db_lock}")"
-    if [[ -L "${shared_lock_dir}" ]]; then
-        log_fatal "Maintenance lock parent directory is a symbolic link: ${shared_lock_dir}"
-    fi
-    mkdir -p "${shared_lock_dir}"
-    if [[ "${EUID}" -eq 0 && ( "${shared_lock_dir%/}" == "/run/aetherflow" || ( -n "${EFFECTIVE_RELEASE_ROOT}" && "${shared_lock_dir%/}" == "${EFFECTIVE_RELEASE_ROOT}/run/aetherflow" ) ) ]]; then
-        local runtime_svc_user="${AETHERFLOW_SERVICE_USER:-aetherflow}"
-        if [[ -n "${AETHERFLOW_SERVICE_GID:-}" ]]; then
-            chown --no-dereference "0:${AETHERFLOW_SERVICE_GID}" "${shared_lock_dir}" 2>/dev/null || true
-        elif id -u "${runtime_svc_user}" >/dev/null 2>&1; then
-            local runtime_svc_gid
-            runtime_svc_gid="$(id -gn "${runtime_svc_user}" 2>/dev/null || echo "${runtime_svc_user}")"
-            chown --no-dereference "root:${runtime_svc_gid}" "${shared_lock_dir}" 2>/dev/null || true
-        fi
-        chmod 0750 "${shared_lock_dir}" 2>/dev/null || true
-    fi
-    if [[ -L "${shared_db_lock}" ]]; then
-        log_fatal "Maintenance lockfile is a symbolic link: ${shared_db_lock}"
-    fi
-    if [[ -e "${shared_db_lock}" && ! -f "${shared_db_lock}" ]]; then
-        log_fatal "Maintenance lockfile exists and is not a regular file: ${shared_db_lock}"
+    if [[ "${shared_lock_dir%/}" == "/run/aetherflow" || ( -n "${EFFECTIVE_RELEASE_ROOT}" && "${shared_lock_dir%/}" == "${EFFECTIVE_RELEASE_ROOT}/run/aetherflow" ) ]]; then
+        is_runtime_anchor=true
     fi
 
-    if [[ ! -e "${shared_db_lock}" ]]; then
-        (
-            umask 0007
-            set -o noclobber
-            : > "${shared_db_lock}"
-        ) || log_fatal "Could not initialize maintenance lockfile: ${shared_db_lock}"
-    fi
-
-    if [[ -L "${shared_db_lock}" || ! -f "${shared_db_lock}" ]]; then
-        log_fatal "Maintenance lockfile failed post-create regular-file check: ${shared_db_lock}"
-    fi
-
-    if [[ "${EUID}" -eq 0 ]]; then
-        local dir_uid dir_gid dir_mode svc_user="${AETHERFLOW_SERVICE_USER:-aetherflow}"
-        dir_uid="$(stat -c '%u' "${shared_lock_dir}" 2>/dev/null || echo 0)"
-        dir_gid="$(stat -c '%g' "${shared_lock_dir}" 2>/dev/null || echo 0)"
-        dir_mode="$(stat -c '%a' "${shared_lock_dir}" 2>/dev/null || echo 0755)"
-        if [[ "${dir_uid}" != "0" && "${#dir_mode}" -lt 4 ]]; then
-            chown --no-dereference "${dir_uid}:${dir_gid}" "${shared_db_lock}" 2>/dev/null || true
-        elif [[ -n "${AETHERFLOW_SERVICE_UID:-}" && -n "${AETHERFLOW_SERVICE_GID:-}" ]]; then
-            chown --no-dereference "0:${AETHERFLOW_SERVICE_GID}" "${shared_db_lock}" 2>/dev/null || true
-        elif id -u "${svc_user}" >/dev/null 2>&1; then
-            local svc_gid
-            svc_gid="$(id -gn "${svc_user}" 2>/dev/null || echo "${svc_user}")"
-            chown --no-dereference "root:${svc_gid}" "${shared_db_lock}" 2>/dev/null || true
-        fi
-        chmod 0660 "${shared_db_lock}" 2>/dev/null || true
-    else
-        chmod 0660 "${shared_db_lock}" 2>/dev/null || true
-    fi
-
-    exec 199<"${shared_db_lock}"
-    if ! flock -w "${SNAPSHOT_TIMEOUT}" 199; then
-        log_fatal "Could not acquire maintenance lock ${shared_db_lock} within ${SNAPSHOT_TIMEOUT}s."
-    fi
+    acquire_fd_lock_coproc "maintenance lock" "${shared_db_lock}" "${SNAPSHOT_TIMEOUT}" "true" "${is_runtime_anchor}"
     check_package_lifecycle_reservations
-    mkdir -p "${RELEASES_DIR}"
     local release_lock="${RELEASES_DIR}/.release.lock"
-    if [[ -L "${release_lock}" ]]; then
-        log_fatal "Release lockfile is a symbolic link: ${release_lock}"
-    fi
-    exec 201>"${release_lock}"
-    if ! flock -w "${SNAPSHOT_TIMEOUT}" 201; then
-        log_fatal "Could not acquire release lock ${release_lock} within ${SNAPSHOT_TIMEOUT}s."
-    fi
+    acquire_fd_lock_coproc "release lock" "${release_lock}" "${SNAPSHOT_TIMEOUT}" "false" "false"
     guard_and_init_recovery_state
 }
 
@@ -2853,8 +5402,29 @@ case "${COMMAND}" in
         else
             RECOVERY_PREVIOUS_RELEASE="${PRIOR_PREVIOUS_RELEASE}"
         fi
+        restore_prior_previous_release() {
+            local prior_prev="$1"
+            if [[ -n "${prior_prev}" && -d "${prior_prev}" ]]; then
+                local reverted_canon prior_canon
+                reverted_canon="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
+                prior_canon="$(readlink -f "${prior_prev}" 2>/dev/null || printf '%s' "${prior_prev}")"
+                if [[ "${prior_canon}" != "${reverted_canon}" && ! -L "${RELEASES_DIR}/.previous_release" ]]; then
+                    write_atomic_private_file "${RELEASES_DIR}/.previous_release" "0644" "${prior_prev}"$'\n' || true
+                fi
+            fi
+        }
         save_recovery_state "stage2_symlink_swap"
-        symlink_swap
+        if ! symlink_swap; then
+            if [[ -L "${CURRENT_LINK}" && "$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)" == "$(readlink -f "${RELEASE_DIR}" 2>/dev/null || true)" && -f "${RELEASES_DIR}/.previous_release" ]]; then
+                RECOVERY_FROM_UNFINISHED_POST_SWAP=true
+                save_recovery_state "stage4_rollback" "${LAST_LOG_ERROR:-Post-swap helper sync failed}"
+                rollback "${RELEASE_DIR}"
+                restore_prior_previous_release "${PRIOR_PREVIOUS_RELEASE}"
+                exit 2
+            fi
+            save_recovery_state "failed" "${LAST_LOG_ERROR:-Stage 2 symlink or helper sync preflight failed}"
+            exit 4
+        fi
         if [[ -f "${RELEASES_DIR}/.previous_release" ]]; then
             RECOVERY_PREVIOUS_RELEASE="$(cat "${RELEASES_DIR}/.previous_release")"
         fi
@@ -2863,13 +5433,7 @@ case "${COMMAND}" in
             RECOVERY_FROM_UNFINISHED_POST_SWAP=true
             save_recovery_state "stage4_rollback" "${LAST_LOG_ERROR:-Health probe failed}"
             rollback "${RELEASE_DIR}"
-            if [[ -n "${PRIOR_PREVIOUS_RELEASE}" && -d "${PRIOR_PREVIOUS_RELEASE}" ]]; then
-                REVERTED_CANON="$(readlink -f "${CURRENT_LINK}" 2>/dev/null || true)"
-                PRIOR_CANON="$(readlink -f "${PRIOR_PREVIOUS_RELEASE}" 2>/dev/null || printf '%s' "${PRIOR_PREVIOUS_RELEASE}")"
-                if [[ "${PRIOR_CANON}" != "${REVERTED_CANON}" && ! -L "${RELEASES_DIR}/.previous_release" ]]; then
-                    printf '%s\n' "${PRIOR_PREVIOUS_RELEASE}" > "${RELEASES_DIR}/.previous_release"
-                fi
-            fi
+            restore_prior_previous_release "${PRIOR_PREVIOUS_RELEASE}"
             exit 2
         fi
         save_recovery_state "complete"

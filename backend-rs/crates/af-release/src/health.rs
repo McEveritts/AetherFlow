@@ -306,7 +306,7 @@ pub fn install_packaged_unit_if_missing(
         // Keep installed unit untouched so custom ReadWritePaths are preserved
         return Ok(false);
     }
-    crate::fs_security::atomic_copy_file_with_mode(src_unit, &dest, 0o644, None)?;
+    crate::fs_security::atomic_copy_file_root_owned(src_unit, &dest, 0o644)?;
     Ok(true)
 }
 

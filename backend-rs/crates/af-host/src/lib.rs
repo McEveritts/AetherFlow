@@ -52,22 +52,75 @@ pub use manifest::{
     MIN_SUPPORTED_MANIFEST_SCHEMA_VERSION, SUPPORTED_APP_MAJOR_VERSION,
 };
 
-/// Resolves the running host application version dynamically from a sibling `.version`
-/// metadata file next to the current executable when it parses as a valid semver triplet,
-/// falling back to `concat!("v", env!("CARGO_PKG_VERSION"))`.
-pub fn default_host_app_version() -> String {
-    if let Ok(exe) = std::env::current_exe() {
-        let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
-        if let Some(parent) = canonical.parent() {
-            if let Ok(raw) = std::fs::read_to_string(parent.join(".version")) {
-                let candidate = raw.trim();
-                if !candidate.is_empty() && parse_semver_triplet(candidate).is_ok() {
-                    return candidate.to_string();
-                }
+static DEFAULT_HOST_APP_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn resolve_host_app_version_in_dir(dir: Option<&std::path::Path>) -> String {
+    if let Some(parent) = dir {
+        if let Ok(raw) = std::fs::read_to_string(parent.join(".version")) {
+            let candidate = raw.trim();
+            if !candidate.is_empty() && parse_semver_triplet(candidate).is_ok() {
+                let normalized = candidate.trim_start_matches(['v', 'V']);
+                return format!("v{normalized}");
             }
         }
     }
     concat!("v", env!("CARGO_PKG_VERSION")).to_string()
+}
+
+/// Resolves the running host application version dynamically from a sibling `.version`
+/// metadata file next to the current executable when it parses as a valid semver triplet,
+/// falling back to `concat!("v", env!("CARGO_PKG_VERSION"))`, and caches it once per process
+/// via `OnceLock`.
+///
+/// NOTE: `af-host` and `af-release` are sibling base crates (`af-host/Cargo.toml` does not
+/// depend on `af-release`), so `af-host` mirrors `af_release::runtime::runtime_identity()`'s
+/// `.version`-then-`CARGO_PKG_VERSION` resolution and process-wide caching without introducing
+/// a cross-layer crate dependency.
+pub fn default_host_app_version() -> String {
+    DEFAULT_HOST_APP_VERSION
+        .get_or_init(|| {
+            let dir = std::env::current_exe().ok().and_then(|exe| {
+                let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
+                canonical.parent().map(std::path::Path::to_path_buf)
+            });
+            resolve_host_app_version_in_dir(dir.as_deref())
+        })
+        .clone()
+}
+
+#[cfg(test)]
+mod default_version_tests {
+    use super::*;
+
+    #[test]
+    fn default_host_app_version_resolves_semver_and_is_cached() {
+        let dir = std::env::temp_dir().join(format!("af-host-ver-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".version"), "v9.8.7\n").unwrap();
+        assert_eq!(resolve_host_app_version_in_dir(Some(&dir)), "v9.8.7");
+
+        std::fs::write(dir.join(".version"), "9.8.7\n").unwrap();
+        assert_eq!(resolve_host_app_version_in_dir(Some(&dir)), "v9.8.7");
+
+        std::fs::write(dir.join(".version"), "V9.8.7\n").unwrap();
+        assert_eq!(resolve_host_app_version_in_dir(Some(&dir)), "v9.8.7");
+
+        std::fs::write(dir.join(".version"), "9.8.7-rc.1\n").unwrap();
+        assert_eq!(resolve_host_app_version_in_dir(Some(&dir)), "v9.8.7-rc.1");
+
+        std::fs::write(dir.join(".version"), "not-a-semver\n").unwrap();
+        assert_eq!(
+            resolve_host_app_version_in_dir(Some(&dir)),
+            concat!("v", env!("CARGO_PKG_VERSION"))
+        );
+
+        let first = default_host_app_version();
+        let second = default_host_app_version();
+        assert_eq!(first, second);
+        assert!(parse_semver_triplet(&first).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 pub use restore::{
     execute_destructive_restore, execute_staged_restore, plan_restore_from_manifest,

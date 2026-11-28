@@ -2,7 +2,7 @@ use crate::auth::{self, ActiveSubject, AuthUser, SessionClaims};
 use af_models::APP_LAUNCH_EXCHANGE_PATH;
 use af_runner::package_executor::{requires_external_app_auth, GATEWAY_APP_HEADER};
 use axum::body::to_bytes;
-use axum::extract::{Extension, Request};
+use axum::extract::{ConnectInfo, Extension, Request};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
@@ -11,6 +11,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -57,10 +58,22 @@ fn user_agent(headers: &HeaderMap) -> &str {
     header_str(headers, "user-agent").unwrap_or_default()
 }
 
-fn matches_client(headers: &HeaderMap, fingerprint: &str) -> bool {
+/// TCP peer address recorded by `into_make_service_with_connect_info`, if present.
+fn connect_info_peer_ip(extensions: &axum::http::Extensions) -> Option<IpAddr> {
+    extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip())
+}
+
+/// Binds legacy `ip|ua` fingerprints to the client IP resolved through
+/// `extract_client_ip_for_peer` (`SEC-09`): forwarded headers are honoured only when the TCP peer
+/// is a trusted proxy. When the peer address is unavailable (`authenticated_admin`, called with
+/// headers only) the request has already been normalised by the outermost
+/// `normalize_peer_forwarding_middleware` in `main.rs`, which strips spoofed forwarding headers.
+fn matches_client(headers: &HeaderMap, peer_ip: Option<IpAddr>, fingerprint: &str) -> bool {
     auth::matches_client_fingerprint(
         fingerprint,
-        &crate::ws::extract_client_ip(headers),
+        &crate::ws::extract_client_ip_for_peer(headers, peer_ip),
         user_agent(headers),
     )
 }
@@ -194,13 +207,20 @@ fn invalid_session() -> Response {
 
 pub(crate) async fn issue(
     Extension(user): Extension<AuthUser>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Json(req): Json<LaunchRequest>,
 ) -> Response {
-    auth::blocking_response(move || no_store(issue_blocking(user, headers, req))).await
+    let peer_ip = connect_info.map(|ConnectInfo(addr)| addr.ip());
+    auth::blocking_response(move || no_store(issue_blocking(user, headers, peer_ip, req))).await
 }
 
-fn issue_blocking(user: AuthUser, headers: HeaderMap, req: LaunchRequest) -> Response {
+fn issue_blocking(
+    user: AuthUser,
+    headers: HeaderMap,
+    peer_ip: Option<IpAddr>,
+    req: LaunchRequest,
+) -> Response {
     let Some(destination) = eligible_destination(&req) else {
         return Json(serde_json::json!({})).into_response();
     };
@@ -218,7 +238,7 @@ fn issue_blocking(user: AuthUser, headers: HeaderMap, req: LaunchRequest) -> Res
         .filter(|claims| {
             claims.user_id == user.user_id
                 && claims.jti == user.jti
-                && matches_client(&headers, &claims.cfp)
+                && matches_client(&headers, peer_ip, &claims.cfp)
         })
     else {
         return invalid_session();
@@ -328,13 +348,26 @@ pub(crate) async fn redeem(req: Request, app: String, origin: Option<String>) ->
         return no_store(StatusCode::BAD_REQUEST.into_response());
     };
     let ticket = String::from_utf8_lossy(ticket).into_owned();
+    let peer_ip = connect_info_peer_ip(&parts.extensions);
     auth::blocking_response(move || {
-        no_store(redeem_blocking(&ticket, &parts.headers, &app, &origin))
+        no_store(redeem_blocking(
+            &ticket,
+            &parts.headers,
+            peer_ip,
+            &app,
+            &origin,
+        ))
     })
     .await
 }
 
-fn redeem_blocking(ticket: &str, headers: &HeaderMap, app: &str, origin: &str) -> Response {
+fn redeem_blocking(
+    ticket: &str,
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    app: &str,
+    origin: &str,
+) -> Response {
     let entry = LAUNCH_TICKETS.lock().ok().and_then(|mut pending| {
         let entry = pending.get(ticket)?;
         if entry.expires_at <= Instant::now() {
@@ -344,7 +377,7 @@ fn redeem_blocking(ticket: &str, headers: &HeaderMap, app: &str, origin: &str) -
         if entry.session.app != app
             || entry.session.aud != origin
             || Some(entry.dashboard_origin.as_str()) != header_str(headers, "origin")
-            || !matches_client(headers, &entry.session.cfp)
+            || !matches_client(headers, peer_ip, &entry.session.cfp)
         {
             return None;
         }
@@ -426,7 +459,7 @@ pub(crate) fn authenticated_admin(headers: &HeaderMap, app: &str, origin: &str) 
     )
     .ok()?
     .claims;
-    if claims.app != app || !matches_client(headers, &claims.cfp) {
+    if claims.app != app || !matches_client(headers, None, &claims.cfp) {
         return None;
     }
     live_admin(claims.user_id, &claims.jti, claims.ver, claims.exp).map(|subject| subject.username)

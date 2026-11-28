@@ -539,8 +539,8 @@ fn test_wave22_semver_prerelease_provenance_and_numeric() {
     assert!(is_newer_version_scalar_for_source(num39, num40, ""));
     assert!(!is_newer_version_scalar_for_source(num40, num39, ""));
 
-    // is_git_commit_sha rejects pure decimal strings of length 40
-    assert!(!is_git_commit_sha(
+    // is_git_commit_sha matches af_release::lifecycle::is_hex_commit (40-char hex strings or >=7 chars with [a-fA-F])
+    assert!(is_git_commit_sha(
         "1234567890123456789012345678901234567890"
     ));
     assert!(is_git_commit_sha(

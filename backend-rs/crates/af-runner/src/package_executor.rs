@@ -38,7 +38,6 @@
 #[path = "teardown_regressions.rs"]
 mod teardown_regressions;
 
-use crate::legacy_stream_output::BoundedLines;
 use crate::package_lifecycle::snapshot_policy::{
     configured_max_snapshot_bytes, ensure_snapshot_free_space, snapshot_filesystem_capacity,
     SnapshotBudget, SNAPSHOT_RESERVE_BYTES,
@@ -92,7 +91,6 @@ pub(crate) use apache_ingress::{
     update_legacy_apache_vhost, RunnerBlueprintConfigChanges,
 };
 
-pub(crate) use command_env::terminate_child_process_group;
 pub use command_env::*;
 
 pub use declarative_recipes::*;
@@ -109,8 +107,7 @@ use helpers::{
     add_missing_rclone_env_aliases, append_log_line, apply_sandbox_in_root_with_journal,
     escape_systemd_env_quoted, extract_binaries_from_targz, format_znc_major_minor,
     interpolate_template, is_downgrade_allowed, is_semver_strictly_greater, merge_ini_settings,
-    step_progress_meta, trigger_certbot_sync_best_effort, update_preserved_rclone_env_pass,
-    update_preserved_template_port,
+    step_progress_meta, update_preserved_rclone_env_pass, update_preserved_template_port,
 };
 pub(crate) use helpers::{
     ensure_package_sandbox_dropin_under_root_with_journal, package_request_deletes_data,

@@ -1,7 +1,8 @@
 use super::revocation::{
-    evict_rotation_grace_for_family, oidc_session_tag, resolve_current_session_jti,
-    resolve_latest_grace_token, revoke_session_family_in_tx, RotatedTokenGraceEntry,
-    MIN_REVOCATION_TTL, ROTATED_SESSION_SUCCESSOR, ROTATED_TOKEN_GRACE, ROTATED_TOKEN_GRACE_WINDOW,
+    evict_rotation_grace_for_family, insert_rotation_grace, insert_session_successor,
+    oidc_session_tag, resolve_current_session_jti, resolve_latest_grace_token,
+    revoke_session_family_in_tx, RotatedTokenGraceEntry, MIN_REVOCATION_TTL,
+    ROTATED_SESSION_SUCCESSOR_TTL, ROTATED_TOKEN_GRACE, ROTATED_TOKEN_GRACE_WINDOW,
 };
 use super::tokens::{
     api_error, blocking_response, column_exists, create_session_jwt_in_conn, decode_session_claims,
@@ -11,12 +12,13 @@ use super::tokens::{
     SubjectStatusError, SESSION_COOKIE_MAX_AGE,
 };
 use crate::ws::{build_set_cookie, extract_client_ip, extract_cookie};
+use af_models::secret_zeroize::SecretString;
 use axum::extract::{Path, Request};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub async fn logout(req: Request) -> Response {
     blocking_response(move || logout_blocking(req)).await
@@ -314,7 +316,7 @@ fn refresh_session_for_peer_blocking(
                 if !successor_revoked && successor_active {
                     let cookie = build_set_cookie(
                         "aetherflow_session",
-                        &latest_token,
+                        latest_token.expose_secret(),
                         SESSION_COOKIE_MAX_AGE,
                         "Lax",
                         secure_cookie_enabled(),
@@ -322,7 +324,7 @@ fn refresh_session_for_peer_blocking(
                     );
                     let mut resp = Json(serde_json::json!({
                         "status": "success",
-                        "token": latest_token,
+                        "token": latest_token.expose_secret(),
                         "expires_at": latest_exp,
                         "user": { "id": subj.user_id, "username": subj.username, "role": subj.role }
                     }))
@@ -488,6 +490,8 @@ fn refresh_session_for_peer_blocking(
             "Failed to rotate token",
         );
     };
+    // The successor JWT is a bearer credential: keep every server-held copy zeroize-on-drop.
+    let new_token = SecretString::new(new_token);
 
     if af_db::record_revoked_token_lineage_in_tx(&tx, &claims.jti, &family_id, subj.user_id)
         .is_err()
@@ -522,35 +526,30 @@ fn refresh_session_for_peer_blocking(
     }
 
     // Populate revocation cache and rotation grace BEFORE releasing `conn` so serialized concurrent racers see the exact successor.
+    // Both inserts prune expired entries and enforce the 4096-entry cap (`SEC-01`).
     af_db::cache_revoked_token(&claims.jti, MIN_REVOCATION_TTL);
-    if let Ok(mut succ) = ROTATED_SESSION_SUCCESSOR.lock() {
-        succ.insert(
-            claims.jti.clone(),
-            (
-                new_claims.jti.clone(),
-                Instant::now() + Duration::from_secs(86400),
-            ),
-        );
-    }
-    if let Ok(mut grace) = ROTATED_TOKEN_GRACE.lock() {
-        grace.insert(
-            claims.jti.clone(),
-            RotatedTokenGraceEntry {
-                user_id: subj.user_id,
-                family_id,
-                successor_jti: new_claims.jti.clone(),
-                new_token: new_token.clone(),
-                successor_exp: new_claims.exp,
-                strict_fp: caller_strict_fp,
-                expires_at: Instant::now() + ROTATED_TOKEN_GRACE_WINDOW,
-            },
-        );
-    }
+    insert_session_successor(
+        claims.jti.clone(),
+        new_claims.jti.clone(),
+        Instant::now() + ROTATED_SESSION_SUCCESSOR_TTL,
+    );
+    insert_rotation_grace(
+        claims.jti.clone(),
+        RotatedTokenGraceEntry {
+            user_id: subj.user_id,
+            family_id,
+            successor_jti: new_claims.jti.clone(),
+            new_token: new_token.clone(),
+            successor_exp: new_claims.exp,
+            strict_fp: caller_strict_fp,
+            expires_at: Instant::now() + ROTATED_TOKEN_GRACE_WINDOW,
+        },
+    );
     drop(conn);
 
     let cookie = build_set_cookie(
         "aetherflow_session",
-        &new_token,
+        new_token.expose_secret(),
         SESSION_COOKIE_MAX_AGE,
         "Lax",
         secure_cookie_enabled(),
@@ -558,7 +557,7 @@ fn refresh_session_for_peer_blocking(
     );
     let mut resp = Json(serde_json::json!({
         "status": "success",
-        "token": new_token,
+        "token": new_token.expose_secret(),
         "expires_at": new_claims.exp,
         "user": { "id": subj.user_id, "username": subj.username, "role": subj.role }
     }))

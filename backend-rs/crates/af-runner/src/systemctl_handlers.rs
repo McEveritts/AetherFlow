@@ -412,8 +412,11 @@ pub(crate) async fn handle_systemctl(
                 )
             }
         }
-        match _launch_owner.directory_identity() {
-            Ok((device, inode)) => args.extend([device.to_string(), inode.to_string()]),
+        let receipt_directory_identity = match _launch_owner.directory_identity() {
+            Ok((device, inode)) => {
+                args.extend([device.to_string(), inode.to_string()]);
+                (device, inode)
+            }
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -424,20 +427,20 @@ pub(crate) async fn handle_systemctl(
                     }),
                 )
             }
-        }
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            Command::new("systemd-run")
-                .args(args)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
-        if let Ok(Ok(output)) = &result {
+        };
+        let mut cmd = Command::new("systemd-run");
+        cmd.args(args);
+        let result = crate::bounded_command::output(cmd, Duration::from_secs(10), 256 * 1024).await;
+        if let Ok(output) = &result {
             if output.status.success() {
                 let mut running = initial.clone();
                 running.status = "running".into();
-                let observed = match job_receipts::compare_exchange(&path, &initial, &running) {
+                let observed = match job_receipts::compare_exchange_pinned(
+                    &path,
+                    &initial,
+                    &running,
+                    Some(receipt_directory_identity),
+                ) {
                     Ok(observed) => observed,
                     Err(error) => {
                         return (
@@ -478,7 +481,8 @@ pub(crate) async fn handle_systemctl(
             }
         }
         let error = format!("Could not schedule core restart: {:?}", result);
-        if result.is_ok() {
+        let is_timeout = matches!(&result, Err(err) if err.kind() == std::io::ErrorKind::TimedOut);
+        if !is_timeout {
             let failure = SelfUpdateJobStatus {
                 status: "failed".into(),
                 completed: true,
@@ -487,7 +491,12 @@ pub(crate) async fn handle_systemctl(
                 error: error.clone(),
                 exit_code: Some(1),
             };
-            let _ = job_receipts::compare_exchange(&path, &initial, &failure);
+            let _ = job_receipts::compare_exchange_pinned(
+                &path,
+                &initial,
+                &failure,
+                Some(receipt_directory_identity),
+            );
         }
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -560,7 +569,23 @@ pub(crate) async fn handle_systemctl(
     }
 }
 
-pub(crate) async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
+pub(crate) async fn handle_package(
+    peer_cred: Option<axum::Extension<crate::RunnerPeerCred>>,
+    Json(req): Json<PackageRunnerRequest>,
+) -> Response {
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() == 0 }
+        && req.lifecycle_job_id.trim().is_empty()
+        && peer_cred.as_ref().is_some_and(|cred| cred.0.uid != 0)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            "unprivileged runner peers must supply an admitted lifecycle_job_id",
+        )
+            .into_response();
+    }
+    #[cfg(not(unix))]
+    let _ = peer_cred;
     if !matches!(
         req.action.as_str(),
         "install" | "reinstall" | "remove" | "update"

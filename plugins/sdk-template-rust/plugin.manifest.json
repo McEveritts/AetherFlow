@@ -5,7 +5,7 @@
   "sdk": "rust",
   "contract_version": "v1",
   "runtime_status": "managed",
-  "description": "Sandboxed Rust companion plugin scaffold for AetherFlow v4.0.0 with short-lived scoped plugin tokens and capability bridge.",
+  "description": "Sandboxed Rust companion plugin scaffold for AetherFlow v4.0.1 with short-lived scoped plugin tokens and capability bridge.",
   "author": "Community Developer",
   "permissions": [
     "marketplace:read",

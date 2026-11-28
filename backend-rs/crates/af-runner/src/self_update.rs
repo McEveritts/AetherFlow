@@ -139,7 +139,6 @@ pub(crate) async fn spawn_self_update_transient_unit(
     };
 
     let mut cmd = Command::new(&systemd_run);
-    cmd.kill_on_drop(true);
     cmd.arg(format!("--unit={}", unit_name))
         .arg("--collect")
         .arg("--no-block")
@@ -187,8 +186,8 @@ pub(crate) async fn spawn_self_update_transient_unit(
         cmd.arg(arg_val);
     }
 
-    match tokio::time::timeout(Duration::from_secs(15), cmd.output()).await {
-        Ok(Ok(out)) => {
+    match bounded_command::output(cmd, Duration::from_secs(15), 256 * 1024).await {
+        Ok(out) => {
             let combined = format!(
                 "{}{}",
                 String::from_utf8_lossy(&out.stdout),
@@ -208,18 +207,18 @@ pub(crate) async fn spawn_self_update_transient_unit(
                 ))
             }
         }
-        Ok(Err(err)) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "failed to launch transient systemd unit '{}': {}",
-                unit_name, err
-            ),
-        )),
-        Err(_) => Err((
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => Err((
             StatusCode::GATEWAY_TIMEOUT,
             format!(
                 "systemd-run timed out while launching transient unit '{}'",
                 unit_name
+            ),
+        )),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "failed to launch transient systemd unit '{}': {}",
+                unit_name, err
             ),
         )),
     }
@@ -399,7 +398,8 @@ pub async fn execute_self_update_request(
                 validated.channel.as_str(),
             );
             let job_status_path = cfg_jobs_dir.join(format!("{}.json", unit_name));
-            let job_conf_path = cfg_jobs_dir.join(format!("{}.conf", unit_name));
+            let job_conf_name = format!("{}.conf", unit_name);
+            let job_conf_path = cfg_jobs_dir.join(&job_conf_name);
             let _launch_owner = match job_receipts::begin_launch(&job_status_path) {
                 Ok(owner) => owner,
                 Err(error) => {
@@ -414,7 +414,9 @@ pub async fn execute_self_update_request(
                 }
             };
 
-            if let Err(err) = cfg.write_protected_config_file(&job_conf_path) {
+            if let Err(err) = _launch_owner
+                .write_protected_config_file(std::ffi::OsStr::new(&job_conf_name), &cfg)
+            {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     RunnerResponse {
@@ -434,7 +436,8 @@ pub async fn execute_self_update_request(
             };
             if let Err(err) = write_self_update_job_status_atomic(&job_status_path, &initial_status)
             {
-                let _ = fs::remove_file(&job_conf_path);
+                let _ = _launch_owner
+                    .remove_regular_file_if_present(std::ffi::OsStr::new(&job_conf_name));
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     RunnerResponse {
@@ -464,12 +467,31 @@ pub async fn execute_self_update_request(
                 unit_name.clone(),
             ]);
 
+            let (dir_dev, dir_ino) = match _launch_owner.directory_identity() {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let _ = _launch_owner
+                        .remove_regular_file_if_present(std::ffi::OsStr::new(&job_conf_name));
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        RunnerResponse {
+                            success: false,
+                            output: String::new(),
+                            error: format!(
+                                "Cannot pin self-update receipt directory identity: {error}"
+                            ),
+                        },
+                    );
+                }
+            };
             let mut extra_envs = vec![
                 (
                     "AETHERFLOW_SELF_UPDATE_STATUS_FILE",
                     job_status_path.to_string_lossy().into_owned(),
                 ),
                 ("AETHERFLOW_SELF_UPDATE_JOB_UNIT", unit_name.clone()),
+                ("AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV", dir_dev.to_string()),
+                ("AETHERFLOW_SELF_UPDATE_DIRECTORY_INO", dir_ino.to_string()),
                 (
                     "AETHERFLOW_RELEASE_CONF",
                     job_conf_path.to_string_lossy().into_owned(),
@@ -500,10 +522,11 @@ pub async fn execute_self_update_request(
                 Ok(_) => {
                     let mut admitted = initial_status.clone();
                     admitted.status = "running".into();
-                    let observed = match job_receipts::compare_exchange(
+                    let observed = match job_receipts::compare_exchange_pinned(
                         &job_status_path,
                         &initial_status,
                         &admitted,
+                        Some((dir_dev, dir_ino)),
                     ) {
                         Ok(observed) => observed,
                         Err(error) => {
@@ -532,12 +555,14 @@ pub async fn execute_self_update_request(
                             error: err_msg.clone(),
                             exit_code: Some(1),
                         };
-                        let _ = job_receipts::compare_exchange(
+                        let _ = job_receipts::compare_exchange_pinned(
                             &job_status_path,
                             &initial_status,
                             &failed_receipt,
+                            Some((dir_dev, dir_ino)),
                         );
-                        let _ = fs::remove_file(&job_conf_path);
+                        let _ = _launch_owner
+                            .remove_regular_file_if_present(std::ffi::OsStr::new(&job_conf_name));
                     }
                     return (
                         code,
@@ -590,7 +615,8 @@ pub async fn execute_self_update_request(
     if background {
         let unit_name = build_self_update_transient_unit_name(&cmd_name, &channel_str);
         let job_status_path = cfg_jobs_dir.join(format!("{}.json", unit_name));
-        let job_conf_path = cfg_jobs_dir.join(format!("{}.conf", unit_name));
+        let job_conf_name = format!("{}.conf", unit_name);
+        let job_conf_path = cfg_jobs_dir.join(&job_conf_name);
         let _launch_owner = match job_receipts::begin_launch(&job_status_path) {
             Ok(owner) => owner,
             Err(error) => {
@@ -605,7 +631,9 @@ pub async fn execute_self_update_request(
             }
         };
 
-        if let Err(err) = cfg.write_protected_config_file(&job_conf_path) {
+        if let Err(err) =
+            _launch_owner.write_protected_config_file(std::ffi::OsStr::new(&job_conf_name), &cfg)
+        {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 RunnerResponse {
@@ -624,7 +652,8 @@ pub async fn execute_self_update_request(
             exit_code: None,
         };
         if let Err(err) = write_self_update_job_status_atomic(&job_status_path, &initial_status) {
-            let _ = fs::remove_file(&job_conf_path);
+            let _ =
+                _launch_owner.remove_regular_file_if_present(std::ffi::OsStr::new(&job_conf_name));
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 RunnerResponse {
@@ -638,6 +667,8 @@ pub async fn execute_self_update_request(
         let receipt_directory_identity = match _launch_owner.directory_identity() {
             Ok(identity) => identity,
             Err(error) => {
+                let _ = _launch_owner
+                    .remove_regular_file_if_present(std::ffi::OsStr::new(&job_conf_name));
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     RunnerResponse {
@@ -716,10 +747,11 @@ pub async fn execute_self_update_request(
             Ok(_) => {
                 let mut admitted = initial_status.clone();
                 admitted.status = "running".into();
-                let observed = match job_receipts::compare_exchange(
+                let observed = match job_receipts::compare_exchange_pinned(
                     &job_status_path,
                     &initial_status,
                     &admitted,
+                    Some(receipt_directory_identity),
                 ) {
                     Ok(observed) => observed,
                     Err(error) => {
@@ -748,12 +780,14 @@ pub async fn execute_self_update_request(
                         error: err_msg.clone(),
                         exit_code: Some(1),
                     };
-                    let _ = job_receipts::compare_exchange(
+                    let _ = job_receipts::compare_exchange_pinned(
                         &job_status_path,
                         &initial_status,
                         &failed_receipt,
+                        Some(receipt_directory_identity),
                     );
-                    let _ = fs::remove_file(&job_conf_path);
+                    let _ = _launch_owner
+                        .remove_regular_file_if_present(std::ffi::OsStr::new(&job_conf_name));
                 }
                 (
                     code,
@@ -767,8 +801,32 @@ pub async fn execute_self_update_request(
         }
     } else {
         let _guard = BACKUP_MUTEX.lock().await;
-        let sync_conf_path = cfg_jobs_dir.join(format!("sync-{}.conf", std::process::id()));
-        if let Err(err) = cfg.write_protected_config_file(&sync_conf_path) {
+        let sync_dir =
+            match job_receipts::ReceiptDirectory::open_confined(&cfg_jobs_dir, true, 0o700)
+                .and_then(|dir| {
+                    dir.verify_root_owner()?;
+                    Ok(dir)
+                }) {
+                Ok(dir) => dir,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        RunnerResponse {
+                            success: false,
+                            output: String::new(),
+                            error: format!(
+                                "failed to open confined self-update jobs directory: {}",
+                                err
+                            ),
+                        },
+                    );
+                }
+            };
+        let sync_conf_name = format!("sync-{}.conf", std::process::id());
+        let sync_conf_path = cfg_jobs_dir.join(&sync_conf_name);
+        if let Err(err) =
+            sync_dir.write_protected_config_file(std::ffi::OsStr::new(&sync_conf_name), &cfg)
+        {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 RunnerResponse {
@@ -793,8 +851,8 @@ pub async fn execute_self_update_request(
         cmd.env("AETHERFLOW_DB_PATH", &cfg_db_path);
         cmd.env("AETHERFLOW_BACKUP_DIR", &cfg_backup_dir);
 
-        let res = cmd.output().await;
-        let _ = fs::remove_file(&sync_conf_path);
+        let res = bounded_command::output(cmd, Duration::from_secs(900), 4 * 1024 * 1024).await;
+        let _ = sync_dir.remove_regular_file_if_present(std::ffi::OsStr::new(&sync_conf_name));
         match res {
             Ok(out) => {
                 let combined = format!(
@@ -865,6 +923,9 @@ pub(crate) async fn discover_system_update(
     let dir = resolve_self_update_jobs_dir_for_cfg(cfg)?;
     match job_receipts::ReceiptDirectory::open_existing(&dir) {
         Ok(Some(directory)) => {
+            directory
+                .verify_root_owner()
+                .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
             let names = directory
                 .names()
                 .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
@@ -971,13 +1032,11 @@ pub(crate) async fn acquire_package_maintenance_guard(
         .map_err(|(_, e)| anyhow::anyhow!(e))?;
     anyhow::ensure!(status.completed, LifecycleBusy);
     let database = af_release::config::try_resolve_db_path(&cfg, None)?.path;
-    if database.exists() {
-        let conn = rusqlite::Connection::open_with_flags(
-            &database,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
+    if af_release::fs_security::validate_sqlite_file_and_sidecars_nofollow(&database)?.is_some() {
+        let (conn, is_scratch) =
+            af_release::fs_security::open_sqlite_isolated_for_reconcile(&database)?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        af_release::lifecycle::reconcile_jobs(&conn, &database)?;
+        af_release::lifecycle::reconcile_jobs_with_options(&conn, &database, !is_scratch)?;
         match target {
             af_release::lifecycle::ReservationTarget::Package(package) => {
                 let units = package_lifecycle::package_service_units(package)?;
@@ -1036,15 +1095,13 @@ pub(crate) async fn acquire_owned_lifecycle_snapshot_guard(
     anyhow::ensure!(status.completed, LifecycleBusy);
     let database = af_release::config::try_resolve_db_path(&cfg, None)?.path;
     anyhow::ensure!(
-        database.exists(),
+        af_release::fs_security::validate_sqlite_file_and_sidecars_nofollow(&database)?.is_some(),
         "Lifecycle reservation database is missing"
     );
-    let conn = rusqlite::Connection::open_with_flags(
-        &database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-    )?;
+    let (conn, is_scratch) =
+        af_release::fs_security::open_sqlite_isolated_for_reconcile(&database)?;
     conn.busy_timeout(Duration::from_secs(5))?;
-    af_release::lifecycle::reconcile_jobs(&conn, &database)?;
+    af_release::lifecycle::reconcile_jobs_with_options(&conn, &database, !is_scratch)?;
     let units = package_lifecycle::package_service_units(package)?;
     af_release::lifecycle::check_package_reservation(&conn, package, &units, job_id, None)
         .map_err(|error| error.context(LifecycleBusy))?;
@@ -1111,6 +1168,9 @@ pub(crate) async fn query_self_update_job_at(
             format!("self-update job '{valid_unit}' not found"),
         )
     })?;
+    directory
+        .verify_root_owner()
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
     query_self_update_job_in(valid_unit, status_path, &directory).await
 }
 
@@ -1162,18 +1222,14 @@ pub(crate) async fn query_self_update_job_in(
             .filter(|val| !val.is_empty());
         if cfg!(target_os = "linux") && (!custom_systemd_run || systemctl_bin.is_some()) {
             let ctl_prog = systemctl_bin.as_deref().unwrap_or("systemctl");
-            if let Ok(Ok(out)) = tokio::time::timeout(
-                Duration::from_secs(5),
-                Command::new(ctl_prog)
-                    .args([
-                        "show",
-                        "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus",
-                        valid_unit,
-                    ])
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
+            let mut ctl_cmd = Command::new(ctl_prog);
+            ctl_cmd.args([
+                "show",
+                "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus",
+                valid_unit,
+            ]);
+            if let Ok(out) =
+                bounded_command::output(ctl_cmd, Duration::from_secs(5), 64 * 1024).await
             {
                 {
                     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1277,21 +1333,20 @@ pub(crate) async fn core_restart_timer_pending(
     unit: &str,
 ) -> Result<bool, (StatusCode, String)> {
     let timer = format!("{}.timer", unit.trim_end_matches(".service"));
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        Command::new(program)
-            .args(["show", "--property=LoadState,ActiveState,SubState", &timer])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Core restart timer query timed out".into(),
-        )
-    })?
-    .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let mut timer_cmd = Command::new(program);
+    timer_cmd.args(["show", "--property=LoadState,ActiveState,SubState", &timer]);
+    let output = bounded_command::output(timer_cmd, Duration::from_secs(5), 64 * 1024)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Core restart timer query timed out".into(),
+                )
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, error.to_string())
+            }
+        })?;
     let text = String::from_utf8_lossy(&output.stdout);
     let load = text
         .lines()

@@ -71,9 +71,13 @@ fn offline_frontend_placeholders_are_not_deployable_assets() {
     let release = root.join("release");
     let cfg = ReleaseConfig::for_root(&root);
 
+    let expected_dryrun_version = format!(
+        "{}-dryrun",
+        crate::runtime::runtime_identity().version.trim()
+    );
     assert_eq!(
         simulate_offline_artifact(&release, &cfg).unwrap(),
-        "v4.0.0-dryrun"
+        expected_dryrun_version
     );
     let err = validate_external_frontend_assets(&release)
         .expect_err("dry-run assets must not qualify as a deployable frontend");

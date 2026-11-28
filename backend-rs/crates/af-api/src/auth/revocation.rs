@@ -1,4 +1,5 @@
 use super::tokens::{column_exists, decode_session_claims, table_exists};
+use af_models::secret_zeroize::SecretString;
 use chrono::Utc;
 use once_cell::sync::Lazy;
 use rusqlite::{params, OptionalExtension};
@@ -9,16 +10,40 @@ use std::time::{Duration, Instant};
 
 pub(super) const MIN_REVOCATION_TTL: Duration = Duration::from_secs(8160);
 pub(super) const ROTATED_TOKEN_GRACE_WINDOW: Duration = Duration::from_secs(10);
+/// Lifetime of a `ROTATED_SESSION_SUCCESSOR` hop (`old_jti -> successor_jti`).
+pub(super) const ROTATED_SESSION_SUCCESSOR_TTL: Duration = Duration::from_secs(86400);
+/// Hard cap on entries held by each in-memory rotation map (`SEC-01`). When an insert would
+/// exceed the cap after pruning expired entries, the entry with the earliest expiry is evicted.
+pub(crate) const ROTATION_STATE_MAX_ENTRIES: usize = 4096;
+/// Period of the background idle sweep that prunes expired rotation state (`SEC-01`).
+pub(crate) const ROTATION_STATE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Short-lived (10 s) record of a rotated session JWT.
+///
+/// `new_token` is the freshly minted successor JWT. It is a bearer credential, so it is held in a
+/// zeroize-on-drop [`SecretString`] (full `0..capacity` wipe) and is redacted from `Debug`.
 #[derive(Clone)]
 pub(super) struct RotatedTokenGraceEntry {
     pub(super) user_id: i64,
     pub(super) family_id: String,
     pub(super) successor_jti: String,
-    pub(super) new_token: String,
+    pub(super) new_token: SecretString,
     pub(super) successor_exp: i64,
     pub(super) strict_fp: String,
     pub(super) expires_at: Instant,
+}
+
+impl std::fmt::Debug for RotatedTokenGraceEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotatedTokenGraceEntry")
+            .field("user_id", &self.user_id)
+            .field("family_id", &self.family_id)
+            .field("successor_jti", &self.successor_jti)
+            .field("new_token", &self.new_token)
+            .field("successor_exp", &self.successor_exp)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 
 pub(super) static ROTATED_TOKEN_GRACE: Lazy<Mutex<HashMap<String, RotatedTokenGraceEntry>>> =
@@ -26,6 +51,136 @@ pub(super) static ROTATED_TOKEN_GRACE: Lazy<Mutex<HashMap<String, RotatedTokenGr
 
 pub(super) static ROTATED_SESSION_SUCCESSOR: Lazy<Mutex<HashMap<String, (String, Instant)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Prunes expired entries, then (if `key` is new and the map is at `cap`) evicts entries with the
+/// earliest expiry until one slot is free. Never evicts the entry being replaced.
+fn prune_and_reserve_slot<V>(
+    map: &mut HashMap<String, V>,
+    key: &str,
+    now: Instant,
+    cap: usize,
+    expires_at: impl Fn(&V) -> Instant,
+) {
+    map.retain(|_, v| expires_at(v) > now);
+    if map.contains_key(key) {
+        return;
+    }
+    while map.len() >= cap.max(1) {
+        let Some(victim) = map
+            .iter()
+            .min_by_key(|(_, v)| expires_at(v))
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        map.remove(&victim);
+    }
+}
+
+fn insert_rotation_grace_into(
+    map: &mut HashMap<String, RotatedTokenGraceEntry>,
+    old_jti: String,
+    entry: RotatedTokenGraceEntry,
+    now: Instant,
+    cap: usize,
+) {
+    prune_and_reserve_slot(map, &old_jti, now, cap, |e| e.expires_at);
+    map.insert(old_jti, entry);
+}
+
+fn insert_session_successor_into(
+    map: &mut HashMap<String, (String, Instant)>,
+    old_jti: String,
+    successor_jti: String,
+    expires_at: Instant,
+    now: Instant,
+    cap: usize,
+) {
+    prune_and_reserve_slot(map, &old_jti, now, cap, |(_, exp)| *exp);
+    map.insert(old_jti, (successor_jti, expires_at));
+}
+
+/// Records a rotated-token grace entry, pruning expired entries on every insert and enforcing
+/// [`ROTATION_STATE_MAX_ENTRIES`] with earliest-expiry eviction.
+pub(super) fn insert_rotation_grace(old_jti: String, entry: RotatedTokenGraceEntry) {
+    if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
+        insert_rotation_grace_into(
+            &mut map,
+            old_jti,
+            entry,
+            Instant::now(),
+            ROTATION_STATE_MAX_ENTRIES,
+        );
+    }
+}
+
+/// Records an `old_jti -> successor_jti` hop with the same prune/cap policy as
+/// [`insert_rotation_grace`].
+pub(super) fn insert_session_successor(
+    old_jti: String,
+    successor_jti: String,
+    expires_at: Instant,
+) {
+    if let Ok(mut map) = ROTATED_SESSION_SUCCESSOR.lock() {
+        insert_session_successor_into(
+            &mut map,
+            old_jti,
+            successor_jti,
+            expires_at,
+            Instant::now(),
+            ROTATION_STATE_MAX_ENTRIES,
+        );
+    }
+}
+
+/// Removes every expired entry from both in-memory rotation maps. Returns
+/// `(grace_removed, successor_removed)`. Dropping a grace entry zeroizes its successor token.
+pub fn sweep_expired_rotation_state() -> (usize, usize) {
+    let now = Instant::now();
+    let grace_removed = ROTATED_TOKEN_GRACE.lock().map_or(0, |mut map| {
+        let before = map.len();
+        map.retain(|_, e| e.expires_at > now);
+        before - map.len()
+    });
+    let successor_removed = ROTATED_SESSION_SUCCESSOR.lock().map_or(0, |mut map| {
+        let before = map.len();
+        map.retain(|_, (_, exp)| *exp > now);
+        before - map.len()
+    });
+    (grace_removed, successor_removed)
+}
+
+/// Spawns the 60 s idle sweep of expired rotation state. The task exits promptly once `shutdown`
+/// observes `true` (or its sender is dropped), so callers can await the handle during graceful
+/// shutdown.
+pub fn spawn_rotation_state_sweeper(
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ROTATION_STATE_SWEEP_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Consume the immediate first tick; inserts already prune on the hot path.
+        interval.tick().await;
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            tokio::select! {
+                _ = interval.tick() => {
+                    let (grace, successor) = sweep_expired_rotation_state();
+                    if grace + successor > 0 {
+                        tracing::debug!(grace, successor, "swept expired session rotation state");
+                    }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
 
 pub(crate) fn oidc_session_tag(family_id: &str) -> String {
     let mut hasher = Sha256::new();
@@ -87,7 +242,7 @@ pub(crate) fn resolve_current_session_jti(jti: &str) -> String {
         return jti.to_string();
     };
     let now = Instant::now();
-    if map.len() > 4096 {
+    if map.len() > ROTATION_STATE_MAX_ENTRIES {
         map.retain(|_, (_, exp)| *exp > now);
     }
     let mut current = jti.to_string();
@@ -112,7 +267,7 @@ pub(super) fn resolve_latest_grace_token(
     jti: &str,
     user_id: i64,
     caller_strict_fp: Option<&str>,
-) -> Option<(RotatedTokenGraceEntry, String, i64, String)> {
+) -> Option<(RotatedTokenGraceEntry, SecretString, i64, String)> {
     let grace = check_rotation_grace(jti).filter(|g| g.user_id == user_id)?;
     if let Some(fp) = caller_strict_fp.filter(|s| !s.is_empty()) {
         if !grace.strict_fp.is_empty() && grace.strict_fp != fp {
@@ -158,7 +313,7 @@ pub(super) fn resolve_latest_grace_token(
         return None;
     }
     if latest_exp <= 0 {
-        latest_exp = decode_session_claims(&latest_token, true)
+        latest_exp = decode_session_claims(latest_token.expose_secret(), true)
             .map(|c| c.exp)
             .unwrap_or_else(|_| Utc::now().timestamp() + 900);
     }
@@ -496,4 +651,213 @@ pub(super) fn revoke_session_family_in_tx(
     }
 
     Ok((family_id, jtis_to_revoke))
+}
+
+#[cfg(test)]
+mod rotation_state_tests {
+    use super::*;
+
+    fn grace_entry(token: &str, expires_at: Instant) -> RotatedTokenGraceEntry {
+        RotatedTokenGraceEntry {
+            user_id: 7,
+            family_id: "fam".to_string(),
+            successor_jti: "succ".to_string(),
+            new_token: SecretString::from(token),
+            successor_exp: 0,
+            strict_fp: String::new(),
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn grace_insert_prunes_expired_entries() {
+        let now = Instant::now();
+        let mut map = HashMap::new();
+        map.insert(
+            "expired-a".to_string(),
+            grace_entry("tok-a", now - Duration::from_secs(1)),
+        );
+        map.insert("expired-b".to_string(), grace_entry("tok-b", now));
+        map.insert(
+            "live".to_string(),
+            grace_entry("tok-live", now + Duration::from_secs(5)),
+        );
+        insert_rotation_grace_into(
+            &mut map,
+            "fresh".to_string(),
+            grace_entry("tok-fresh", now + ROTATED_TOKEN_GRACE_WINDOW),
+            now,
+            ROTATION_STATE_MAX_ENTRIES,
+        );
+        let mut keys: Vec<_> = map.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["fresh".to_string(), "live".to_string()]);
+    }
+
+    #[test]
+    fn successor_insert_prunes_expired_entries() {
+        let now = Instant::now();
+        let mut map = HashMap::new();
+        map.insert(
+            "old".to_string(),
+            ("next".to_string(), now - Duration::from_millis(1)),
+        );
+        insert_session_successor_into(
+            &mut map,
+            "a".to_string(),
+            "b".to_string(),
+            now + ROTATED_SESSION_SUCCESSOR_TTL,
+            now,
+            ROTATION_STATE_MAX_ENTRIES,
+        );
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("a").map(|(n, _)| n.as_str()), Some("b"));
+    }
+
+    #[test]
+    fn grace_cap_evicts_earliest_expiry_at_4096_entries() {
+        assert_eq!(ROTATION_STATE_MAX_ENTRIES, 4096);
+        let now = Instant::now();
+        let mut map = HashMap::new();
+        for i in 0..ROTATION_STATE_MAX_ENTRIES {
+            // Entry 17 expires first; every other entry expires later.
+            let ttl = if i == 17 { 1 } else { 100 + i as u64 };
+            map.insert(
+                format!("jti-{i}"),
+                grace_entry("t", now + Duration::from_secs(ttl)),
+            );
+        }
+        insert_rotation_grace_into(
+            &mut map,
+            "jti-new".to_string(),
+            grace_entry("t", now + Duration::from_secs(10_000)),
+            now,
+            ROTATION_STATE_MAX_ENTRIES,
+        );
+        assert_eq!(map.len(), ROTATION_STATE_MAX_ENTRIES);
+        assert!(map.contains_key("jti-new"));
+        assert!(
+            !map.contains_key("jti-17"),
+            "earliest-expiry entry must be evicted"
+        );
+        assert!(map.contains_key("jti-0") && map.contains_key("jti-4095"));
+
+        // Replacing an existing key at the cap must not evict anything else.
+        insert_rotation_grace_into(
+            &mut map,
+            "jti-0".to_string(),
+            grace_entry("t2", now + Duration::from_secs(1)),
+            now,
+            ROTATION_STATE_MAX_ENTRIES,
+        );
+        assert_eq!(map.len(), ROTATION_STATE_MAX_ENTRIES);
+        assert_eq!(map["jti-0"].new_token.expose_secret(), "t2");
+    }
+
+    #[test]
+    fn successor_cap_evicts_earliest_expiry_and_never_exceeds_4096() {
+        let now = Instant::now();
+        let mut map = HashMap::new();
+        for i in 0..(ROTATION_STATE_MAX_ENTRIES + 50) {
+            insert_session_successor_into(
+                &mut map,
+                format!("old-{i}"),
+                format!("new-{i}"),
+                now + Duration::from_secs(1_000 + i as u64),
+                now,
+                ROTATION_STATE_MAX_ENTRIES,
+            );
+            assert!(map.len() <= ROTATION_STATE_MAX_ENTRIES);
+        }
+        assert_eq!(map.len(), ROTATION_STATE_MAX_ENTRIES);
+        for i in 0..50 {
+            assert!(
+                !map.contains_key(&format!("old-{i}")),
+                "old-{i} must be evicted"
+            );
+        }
+        assert!(map.contains_key(&format!("old-{}", ROTATION_STATE_MAX_ENTRIES + 49)));
+    }
+
+    #[test]
+    fn grace_entry_token_is_secret_string_and_redacted_in_debug() {
+        let token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl";
+        let entry = grace_entry(token, Instant::now() + ROTATED_TOKEN_GRACE_WINDOW);
+        let rendered = format!("{entry:?}");
+        assert!(!rendered.contains(token), "{rendered}");
+        assert!(!rendered.contains("c2lnbmF0dXJl"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        assert_eq!(entry.new_token.expose_secret(), token);
+
+        // The successor token buffer is wiped in place on zeroize/drop (full-capacity
+        // volatile wipe is unit-tested inside `af_models::secret_zeroize`).
+        let mut owned = String::with_capacity(256);
+        owned.push_str(token);
+        let ptr = owned.as_ptr();
+        let mut secret = SecretString::new(owned);
+        assert_eq!(
+            secret.expose_secret().as_ptr(),
+            ptr,
+            "wrapping must not copy"
+        );
+        secret.zeroize();
+        assert!(secret.is_empty());
+        assert_eq!(secret.expose_secret(), "");
+    }
+
+    #[test]
+    fn sweep_removes_only_expired_global_state() {
+        let now = Instant::now();
+        let expired_jti = format!("sweep-expired-{}", uuid::Uuid::new_v4());
+        let live_jti = format!("sweep-live-{}", uuid::Uuid::new_v4());
+        {
+            let mut grace = ROTATED_TOKEN_GRACE.lock().unwrap();
+            grace.insert(
+                expired_jti.clone(),
+                grace_entry("x", now - Duration::from_secs(1)),
+            );
+            grace.insert(
+                live_jti.clone(),
+                grace_entry("y", now + Duration::from_secs(30)),
+            );
+            let mut succ = ROTATED_SESSION_SUCCESSOR.lock().unwrap();
+            succ.insert(
+                expired_jti.clone(),
+                ("n".to_string(), now - Duration::from_secs(1)),
+            );
+            succ.insert(
+                live_jti.clone(),
+                ("n".to_string(), now + Duration::from_secs(30)),
+            );
+        }
+        let (grace_removed, successor_removed) = sweep_expired_rotation_state();
+        assert!(grace_removed >= 1 && successor_removed >= 1);
+        let grace = ROTATED_TOKEN_GRACE.lock().unwrap();
+        assert!(!grace.contains_key(&expired_jti) && grace.contains_key(&live_jti));
+        drop(grace);
+        let succ = ROTATED_SESSION_SUCCESSOR.lock().unwrap();
+        assert!(!succ.contains_key(&expired_jti) && succ.contains_key(&live_jti));
+        drop(succ);
+        ROTATED_TOKEN_GRACE.lock().unwrap().remove(&live_jti);
+        ROTATED_SESSION_SUCCESSOR.lock().unwrap().remove(&live_jti);
+    }
+
+    #[tokio::test]
+    async fn sweeper_task_exits_on_shutdown_signal() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = spawn_rotation_state_sweeper(rx);
+        tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("sweeper must stop promptly on shutdown")
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = spawn_rotation_state_sweeper(rx);
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("sweeper must stop when the shutdown sender is dropped")
+            .unwrap();
+    }
 }

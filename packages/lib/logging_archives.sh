@@ -36,7 +36,7 @@ af_prepare_logfile_path() {
     else
         mkdir -p -m 0750 -- "$parent_dir" || return 1
     fi
-    python3 - "$target" "$parent_dir" <<'PYEOF'
+    python3 -I - "$target" "$parent_dir" <<'PYEOF'
 import fcntl, grp, os, stat, sys
 
 target, parent_dir = sys.argv[1], sys.argv[2]
@@ -53,7 +53,7 @@ if os.geteuid() == 0 and (parent_dir == "/var/log/aetherflow" or parent_dir.ends
         os.chown(parent_dir, 0, target_gid)
     if stat.S_IMODE(parent_st.st_mode) != 0o750:
         os.chmod(parent_dir, 0o750)
-flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 fd = os.open(target, flags, 0o640)
 try:
     # Intentional LOCK_SH + O_APPEND: blocks deploy/log-retention.py's LOCK_EX
@@ -112,7 +112,7 @@ log() {
     [[ "$target" != "/dev/null" ]] || return 0
     local line
     line="$(printf '[%s] %s\n' "$(timestamp)" "$*")"
-    python3 - "$target" "$line" <<'PYEOF'
+    python3 -I - "$target" "$line" <<'PYEOF'
 import fcntl, os, stat, sys
 
 target, line = sys.argv[1], sys.argv[2]
@@ -121,7 +121,7 @@ parent_st = os.lstat(parent_dir)
 if stat.S_ISLNK(parent_st.st_mode) or not stat.S_ISDIR(parent_st.st_mode):
     sys.stderr.write(f"Refusing unsafe logfile target: {target}\n")
     raise SystemExit(1)
-flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 try:
     fd = os.open(target, flags, 0o640)
 except OSError:
@@ -167,7 +167,7 @@ af_logged() {
         _flock_bin="/usr/bin/flock"
     fi
     local _out_r="" _meta=""
-    exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+    exec {_out_r}< <(python3 -I - "$target" <<'PYEOF'
 import fcntl, grp, os, select, stat, sys
 
 target = sys.argv[1]
@@ -178,7 +178,7 @@ pst = os.lstat(parent_dir)
 if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
     sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
     raise SystemExit(1)
-flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NONBLOCK", 0)
 try:
     fd = os.open(target, flags, 0o640)
 except OSError:
@@ -252,7 +252,7 @@ af_logged_stderr() {
         _flock_bin="/usr/bin/flock"
     fi
     local _out_r="" _meta=""
-    exec {_out_r}< <(python3 - "$target" <<'PYEOF'
+    exec {_out_r}< <(python3 -I - "$target" <<'PYEOF'
 import fcntl, grp, os, select, stat, sys
 
 target = sys.argv[1]
@@ -263,7 +263,7 @@ pst = os.lstat(parent_dir)
 if stat.S_ISLNK(pst.st_mode) or not stat.S_ISDIR(pst.st_mode):
     sys.stderr.write(f"Refusing unsafe logfile path: {target}\n")
     raise SystemExit(1)
-flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NONBLOCK", 0)
 try:
     fd = os.open(target, flags, 0o640)
 except OSError:
@@ -389,7 +389,7 @@ af_validate_tar_archive() {
         fi
         return 1
     fi
-    python3 - "$archive_path" "$allow_intra_symlinks" "$strip_components" <<'PYEOF'
+    python3 -I - "$archive_path" "$allow_intra_symlinks" "$strip_components" <<'PYEOF'
 import pathlib, sys, tarfile
 
 archive = sys.argv[1]
@@ -517,7 +517,7 @@ af_extract_zip_archive() {
         print_error "Unsafe ZIP archive or staging directory"
         return 1
     }
-    python3 - "$archive_path" "$destination" <<'PYEOF'
+    python3 -I - "$archive_path" "$destination" <<'PYEOF'
 from pathlib import Path
 import shutil, stat, sys, zipfile
 

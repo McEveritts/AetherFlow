@@ -42,6 +42,7 @@ use super::{
 use crate::auth::AuthUser;
 use crate::ws::{extract_client_ip_for_peer, PeerIp};
 use af_db::peers::{self as db_peers, AccessMap, PeerGrant, PeerLink, PeerReceivedGrant};
+use af_models::secret_zeroize::{SecretBytes, SecretString};
 use af_runner::{PeerCredentialSecret, PeerCredentialSlot, PeerNetworkError, PeerNetworkRequest};
 use axum::body::Bytes;
 use axum::extract::connect_info::ConnectInfo;
@@ -114,24 +115,11 @@ pub(crate) struct CommittedGrantRevocation {
     pub(crate) revoked_user_jtis: Vec<(i64, Vec<String>)>,
 }
 
-fn zeroize_string(secret: &mut String) {
-    // SAFETY: Replacing every byte with `0` keeps UTF-8 valid (`\0` is valid UTF-8).
-    let bytes = unsafe { secret.as_bytes_mut() };
-    for b in bytes.iter_mut() {
-        // SAFETY: volatile write prevents dead-store elimination.
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-    secret.clear();
-}
-
-fn zeroize_vec(buf: &mut Vec<u8>) {
-    for b in buf.iter_mut() {
-        // SAFETY: volatile write prevents dead-store elimination.
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-    buf.clear();
+/// Moves a transient plaintext secret out of `secret` into the shared zeroize-on-drop
+/// [`SecretString`] and drops it immediately, wiping the full `0..capacity` allocation (`SEC-05`;
+/// no crate-local zeroize wrapper, which previously wiped only `0..len`).
+fn wipe_string(secret: &mut String) {
+    drop(SecretString::new(std::mem::take(secret)));
 }
 
 fn format_access_summary(access: &AccessMap) -> String {
@@ -764,11 +752,13 @@ async fn put_peer_grant_inner(
     drop(raw_grant_token);
 
     let serialize_res = serde_json::to_vec(&delivery_payload);
-    zeroize_string(&mut delivery_payload.token);
+    wipe_string(&mut delivery_payload.token);
     drop(delivery_payload);
 
-    let mut payload_bytes = match serialize_res {
-        Ok(b) => b,
+    // The serialized payload embeds the raw grant token: hold it in `SecretBytes` so it is
+    // wiped (full capacity) on every exit path, including early returns below.
+    let payload_bytes = match serialize_res {
+        Ok(b) => SecretBytes::new(b),
         Err(err) => {
             clear_aborted_grant_op(runtime, &link.id, generation, &op_id).await;
             return Err(PeerError::internal(
@@ -785,11 +775,11 @@ async fn put_peer_grant_inner(
             &link.tunnel_ip,
             "/peer/v1/grant-token",
             Some(&held_link_token),
-            Some(payload_bytes.clone()),
+            Some(payload_bytes.expose_secret().to_vec()),
             runtime.tunnel_request_timeout,
         )
         .await;
-    zeroize_vec(&mut payload_bytes);
+    drop(payload_bytes);
     drop(held_link_token);
 
     let (status, resp_body, _rtt) = match send_res {
@@ -1521,7 +1511,7 @@ async fn write_grant_token_verified(
             Ok(())
         });
     if let PeerNetworkRequest::WriteCredential { ref mut value, .. } = write_req {
-        zeroize_string(value);
+        wipe_string(value);
     }
     write_res
 }

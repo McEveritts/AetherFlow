@@ -768,15 +768,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             return Err(final_err);
         }
 
-        // Commit rollback journal ONLY after all steps, sandboxing, and lockfile persistence succeeded
+        // Commit rollback journal ONLY after all steps, sandboxing, and lockfile persistence succeeded.
+        // Do NOT call trigger_certbot_sync_best_effort() here: post-commit coordination in
+        // job_runner.rs / coordinator.rs triggers certbot sync once after aetherflow-ext-<app>.conf
+        // is written, avoiding premature CERTBOT_SYNC_LOCK contention.
         journal.commit();
-        if matches!(
-            action,
-            PackageAction::Install | PackageAction::Reinstall | PackageAction::Update
-        ) && self.env_cfg.fs_root.is_none()
-        {
-            trigger_certbot_sync_best_effort();
-        }
 
         let done_msg = match action {
             PackageAction::Install => format!("{} installed successfully.", recipe.label),
@@ -915,5 +911,97 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 state.combined_output()
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_certbot_parity_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct RecordingRunner {
+        commands: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run_command<'a>(
+            &'a self,
+            program: &'a str,
+            _args: &'a [String],
+            _env_vars: &'a [(String, String)],
+            _cancel: &'a CancellationToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.commands.lock().unwrap().push(program.to_string());
+            Box::pin(async {
+                Ok(CommandOutput {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_reserved_recipe_commits_without_premature_certbot_sync() {
+        let root = std::env::temp_dir().join(format!("af-recipe-certbot-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        env_cfg.lifecycle_job_id = "recipe-certbot-test".into();
+        env_cfg.app_port = 8989;
+        let runner = RecordingRunner::default();
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg, runner.clone());
+        let recipe = DeclarativePackageRecipe {
+            package_id: "sonarr".into(),
+            label: "Sonarr".into(),
+            default_port: 8989,
+            service_name: String::new(),
+            lock_file: "/install/.sonarr.lock".into(),
+            apply_systemd_sandbox: false,
+            install_steps: vec![DeclarativeStep::EnsureDirectories {
+                paths: vec!["/opt/sonarr".into()],
+                mode: 0o755,
+                owner: None,
+                group: None,
+                progress_pct: 50,
+                description: "Create app directory".into(),
+            }],
+            update_steps: Vec::new(),
+            remove_steps: Vec::new(),
+        };
+        let mut events = Vec::new();
+        let outcome = executor
+            .execute_reserved_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |ev| events.push(ev),
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.lock_present);
+        assert!(!outcome.rollback_performed);
+        assert_eq!(outcome.completed_steps, outcome.total_steps);
+        assert!(root.join("install/.sonarr.lock").is_file());
+        assert!(root.join("opt/sonarr").is_dir());
+        assert!(
+            runner
+                .commands
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|prog| !prog.contains("certbot")),
+            "execute_reserved_recipe must defer certbot sync to post-commit coordination"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

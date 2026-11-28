@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::Path, time::Duration};
 
@@ -19,15 +19,50 @@ pub fn inject_arr_download_client_routes(
     routes: &HashMap<String, String>,
     target_port: i32,
 ) -> Result<usize, String> {
-    if !db_path.is_file() || routes.is_empty() {
+    if routes.is_empty() {
         return Ok(0);
     }
+    match std::fs::symlink_metadata(db_path) {
+        Ok(meta) if !meta.file_type().is_symlink() && meta.is_file() => {}
+        _ => return Ok(0),
+    }
 
-    let mut conn = Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|e| format!("failed to open *arr DB {}: {}", db_path.display(), e))?;
+    // Pre-resolve download-client runtime ports at effective credentials BEFORE dropping thread
+    // fsuid to the `*arr` DB owner so sibling service-owned configs (e.g. 0750 deluge:deluge)
+    // remain readable.
+    let client_ports = DownloadClientPorts {
+        transmission: crate::extract_app_runtime_meta_local("transmission").configured_port,
+        deluge: crate::extract_app_runtime_meta_local("deluge").configured_port,
+        sabnzbd: crate::extract_app_runtime_meta_local("sabnzbd").configured_port,
+        nzbget: crate::extract_app_runtime_meta_local("nzbget").configured_port,
+    };
+
+    let mut result_count: Result<usize, String> = Ok(0);
+    af_release::fs_security::with_path_owner_fsuid(db_path, || {
+        result_count =
+            inject_arr_download_client_routes_inner(db_path, routes, target_port, client_ports);
+        Ok(())
+    })
+    .map_err(|err| format!("failed to scope *arr DB owner credentials: {err}"))?;
+    result_count
+}
+
+#[derive(Clone, Copy)]
+struct DownloadClientPorts {
+    transmission: i32,
+    deluge: i32,
+    sabnzbd: i32,
+    nzbget: i32,
+}
+
+fn inject_arr_download_client_routes_inner(
+    db_path: &Path,
+    routes: &HashMap<String, String>,
+    target_port: i32,
+    client_ports: DownloadClientPorts,
+) -> Result<usize, String> {
+    let mut conn = af_release::fs_security::open_sqlite_nofollow_hardened(db_path, true)
+        .map_err(|e| format!("failed to open *arr DB {}: {}", db_path.display(), e))?;
     conn.busy_timeout(Duration::from_millis(2500))
         .map_err(|err| err.to_string())?;
     let tx = conn
@@ -85,34 +120,29 @@ pub fn inject_arr_download_client_routes(
                 let impl_lower = implementation.trim().to_ascii_lowercase();
                 let (new_host, desired_port) = match impl_lower.as_str() {
                     "transmission" => ("transmission.aether.local".to_string(), {
-                        let p =
-                            crate::extract_app_runtime_meta_local("transmission").configured_port;
-                        if p > 0 {
-                            p
+                        if client_ports.transmission > 0 {
+                            client_ports.transmission
                         } else {
                             existing_port
                         }
                     }),
                     "deluge" => ("deluge.aether.local".to_string(), {
-                        let p = crate::extract_app_runtime_meta_local("deluge").configured_port;
-                        if p > 0 {
-                            p
+                        if client_ports.deluge > 0 {
+                            client_ports.deluge
                         } else {
                             existing_port
                         }
                     }),
                     "sabnzbd" => ("sabnzbd.aether.local".to_string(), {
-                        let p = crate::extract_app_runtime_meta_local("sabnzbd").configured_port;
-                        if p > 0 {
-                            p
+                        if client_ports.sabnzbd > 0 {
+                            client_ports.sabnzbd
                         } else {
                             existing_port
                         }
                     }),
                     "nzbget" => ("nzbget.aether.local".to_string(), {
-                        let p = crate::extract_app_runtime_meta_local("nzbget").configured_port;
-                        if p > 0 {
-                            p
+                        if client_ports.nzbget > 0 {
+                            client_ports.nzbget
                         } else {
                             existing_port
                         }
