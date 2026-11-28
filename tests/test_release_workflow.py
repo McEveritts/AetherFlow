@@ -887,6 +887,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("default: 'nightly'", workflow)
         self.assertIn('VERSION="${VERSION_STAMP}"', step_script("Package Release Tarball & SHA-256 Manifest"))
 
+    def test_pat_created_nightly_prerelease_tags_do_not_retrigger_the_pipeline(self):
+        workflow = WORKFLOW.read_text()
+        tags = workflow.split("    tags:\n", 1)[1].split("  workflow_dispatch:\n", 1)[0]
+        patterns = [line.strip()[2:].strip("'\"") for line in tags.splitlines() if line.strip().startswith("- ")]
+        self.assertEqual(patterns, ["v*", "!v*-nightly.*"])
+        self.assertIn("GH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}", workflow)
+
     def test_bootstrap_archive_excludes_dev_files_and_retains_runtime_build_sources(self):
         repo_root = WORKFLOW.parents[2]
         script = step_script("Build and Package Standalone Rust LibreSpeed Archives")

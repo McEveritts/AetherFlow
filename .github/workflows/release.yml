@@ -7,6 +7,11 @@ on:
       - Nightly
     tags:
       - 'v*'
+      # Nightly prereleases create their own v<version>-nightly.<run>.<attempt> tag through the
+      # McEveritts RELEASE_PUBLISH_TOKEN. Unlike GITHUB_TOKEN, PAT-created tags trigger workflows,
+      # so without this exclusion every nightly publish re-ran the whole pipeline for its own tag
+      # and failed with "a release with the same tag name already exists".
+      - '!v*-nightly.*'
   workflow_dispatch:
     inputs:
       channel:
