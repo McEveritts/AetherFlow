@@ -51,8 +51,10 @@ def run_git(cwd: Path, *args: str) -> str:
         **os.environ,
         "GIT_AUTHOR_NAME": "AetherFlow Test",
         "GIT_AUTHOR_EMAIL": "test@aetherflow.invalid",
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
         "GIT_COMMITTER_NAME": "AetherFlow Test",
         "GIT_COMMITTER_EMAIL": "test@aetherflow.invalid",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
     }
     res = subprocess.run(
         [REAL_GIT, *args],
@@ -74,7 +76,15 @@ import pathlib
 import subprocess
 import sys
 
-root = pathlib.Path(os.environ["AF_TEST_ROOT"])
+DEFAULT_ROOT = "__AF_TEST_ROOT__"
+DEFAULT_REAL_GIT = "__AF_REAL_GIT__"
+DEFAULT_REAL_PYTHON3 = "__AF_REAL_PYTHON3__"
+root = pathlib.Path(os.environ.get("AF_TEST_ROOT") or DEFAULT_ROOT)
+_env_file = root / ".af-test-env.json"
+_snapshot = json.loads(_env_file.read_text(encoding="utf-8")) if _env_file.exists() else {}
+def _test_env(key, default=""):
+    return os.environ.get(key, _snapshot.get(key, default))
+
 cmd = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 
@@ -82,8 +92,8 @@ with (root / "commands.jsonl").open("a", encoding="utf-8") as log:
     log.write(json.dumps([cmd, *args]) + "\n")
 
 if cmd == "git":
-    real_git = os.environ["AF_REAL_GIT"]
-    fault = os.environ.get("AF_GIT_FAULT", "")
+    real_git = _test_env("AF_REAL_GIT", DEFAULT_REAL_GIT)
+    fault = _test_env("AF_GIT_FAULT", "")
     if fault == "head_mismatch" and "rev-parse" in args and any("HEAD" in a for a in args):
         print("0000000000000000000000000000000000000000")
         sys.exit(0)
@@ -207,14 +217,14 @@ if cmd == "python3":
             encoding="utf-8",
         )
         py_bin.chmod(0o755)
-        (bin_dir / "python3").symlink_to(py_bin)
+        (bin_dir / "python3").symlink_to("python")
         pip_bin = bin_dir / "pip"
         pip_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         pip_bin.chmod(0o755)
         sys.exit(0)
-    if args == ["-"] and os.environ.get("AF_SEED_USER"):
+    if args == ["-"] and _test_env("AF_SEED_USER"):
         sys.exit(0)
-    python = os.environ["AF_REAL_PYTHON3"]
+    python = _test_env("AF_REAL_PYTHON3", DEFAULT_REAL_PYTHON3)
     os.execv(python, [python, *args])
 
 if cmd == "su":
@@ -232,7 +242,7 @@ if cmd == "runuser":
             while inner and (inner[0].startswith("-") or "=" in inner[0]):
                 inner = inner[1:]
         if inner and inner[0] == "git":
-            real_git = os.environ["AF_REAL_GIT"]
+            real_git = _test_env("AF_REAL_GIT", DEFAULT_REAL_GIT)
             sys.exit(subprocess.run([real_git, *inner[1:]]).returncode)
         if inner and inner[0] == "cp":
             sys.exit(subprocess.run(["/bin/cp", *inner[1:]]).returncode)
@@ -413,7 +423,13 @@ class HardeningFixture:
             "sleep",
         )
         py_dispatch = self.root / "mock-bin/_dispatch.py"
-        py_dispatch.write_text(MOCK_BIN, encoding="utf-8")
+        rendered_mock = (
+            MOCK_BIN
+            .replace("__AF_TEST_ROOT__", str(self.root))
+            .replace("__AF_REAL_GIT__", REAL_GIT)
+            .replace("__AF_REAL_PYTHON3__", REAL_PYTHON3)
+        )
+        py_dispatch.write_text(rendered_mock, encoding="utf-8")
         py_dispatch.chmod(0o755)
         for cmd in py_mock_cmds:
             p = self.root / "mock-bin" / cmd
@@ -581,6 +597,13 @@ af_cleanup_job_scratch() { :; }
                 else:
                     env[k] = v
 
+        (self.root / ".af-test-env.json").write_text(
+            json.dumps({
+                k: v for k, v in env.items()
+                if k.startswith(("AF_TEST_", "AF_MOCK_")) or k in ("AF_REAL_GIT", "AF_REAL_PYTHON3", "AF_GIT_FAULT", "AF_SEED_USER")
+            }),
+            encoding="utf-8",
+        )
         return subprocess.run(
             ["/bin/bash", str(staged)],
             env=env,

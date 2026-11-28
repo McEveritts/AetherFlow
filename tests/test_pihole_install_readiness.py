@@ -185,8 +185,9 @@ touch "$AF_FIXTURE_ROOT/active-pihole-FTL.service"
                 "python3",
                 "        if 'Local DNS lookup probe failed' in program:\n            sys.exit(0)\n",
                 """        if 'Local DNS lookup probe failed' in program:
+            pos_args = arguments[arguments.index('-') + 1:] if '-' in arguments else arguments[1:]
             with (root / 'probe-order.log').open('a') as fh:
-                fh.write('dns:' + ','.join(arguments[1:]) + '\\n')
+                fh.write('dns:' + ','.join(pos_args) + '\\n')
             sys.exit(0)
 """,
             )

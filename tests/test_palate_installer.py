@@ -22,15 +22,43 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 
-root = Path(os.environ['TEST_ROOT'])
+DEFAULT_ROOT = '__TEST_ROOT__'
+REAL_PYTHON3 = '__REAL_PYTHON3__'
+root = Path(os.environ.get('TEST_ROOT') or DEFAULT_ROOT)
+_env_file = root / '.af-test-env.json'
+_snapshot = json.loads(_env_file.read_text()) if _env_file.exists() else {}
+def _test_env(key, default=''):
+    return os.environ.get(key, _snapshot.get(key, default))
+
 command = Path(sys.argv[0]).name
 args = sys.argv[1:]
-failure = os.environ.get('TEST_FAILURE', '')
+failure = _test_env('TEST_FAILURE', '')
+if command == 'python3':
+    if '-' in args and os.geteuid() != 0:
+        program = sys.stdin.read()
+        if 'pwd.getpwnam("af-palate")' in program:
+            shim = (
+                'import os as _af_os, pwd as _af_pwd\n'
+                'if _af_os.geteuid() != 0:\n'
+                '    _af_orig_getpwnam = _af_pwd.getpwnam\n'
+                '    def _af_getpwnam(name):\n'
+                '        try:\n'
+                '            return _af_orig_getpwnam(name)\n'
+                '        except KeyError:\n'
+                '            return _af_pwd.getpwuid(_af_os.geteuid())\n'
+                '    _af_pwd.getpwnam = _af_getpwnam\n'
+                '    _af_os.chown = lambda *a, **kw: None\n'
+                '    _af_os.fchown = lambda *a, **kw: None\n'
+            )
+            program = shim + program
+        sys.exit(subprocess.run([REAL_PYTHON3, *args], input=program, text=True).returncode)
+    os.execv(REAL_PYTHON3, [REAL_PYTHON3, *args])
 with (root / 'commands').open('a') as log:
     log.write(command + ' ' + ' '.join(args) + '\n')
-if command in ('apt-get', 'chown', 'id', 'useradd'):
+if command in ('apt-get', 'chown', 'id', 'useradd', 'pkill'):
     pass
 elif command == 'install':
     path = Path(args[-1])
@@ -38,7 +66,25 @@ elif command == 'install':
     path.chmod(int(args[args.index('-m') + 1], 8))
 elif command == 'runuser':
     command_args = args[args.index('--') + 1:]
-    os.execvp(command_args[0], command_args)
+    exec_env = dict(os.environ)
+    if command_args and command_args[0] == 'env':
+        idx = 1
+        if idx < len(command_args) and command_args[idx] == '-i':
+            exec_env = {}
+            idx += 1
+        while idx < len(command_args) and '=' in command_args[idx] and not command_args[idx].startswith('-'):
+            key, val = command_args[idx].split('=', 1)
+            exec_env[key] = val
+            idx += 1
+        command_args = command_args[idx:]
+    mock_bin = str(root / 'mock-bin')
+    current_path = exec_env.get('PATH', '/usr/local/bin:/usr/bin:/bin')
+    path_parts = [p for p in current_path.split(os.pathsep) if p]
+    if mock_bin not in path_parts:
+        insert_at = 1 if path_parts and path_parts[0].startswith(str(root)) else 0
+        path_parts.insert(insert_at, mock_bin)
+    exec_env['PATH'] = os.pathsep.join(path_parts)
+    os.execvpe(command_args[0], command_args, exec_env)
 elif command == 'psql':
     if 'SHOW port' in args:
         print('5432')
@@ -49,7 +95,7 @@ elif command == 'pg_dump':
     print('database-backup')
 elif command == 'git':
     if 'ls-remote' in args:
-        print('a' * 40 + '\trefs/tags/' + os.environ.get('TEST_TAG', 'v1.5.23'))
+        print('a' * 40 + '\trefs/tags/' + _test_env('TEST_TAG', 'v1.5.23'))
     elif 'rev-parse' in args:
         print('a' * 40)
     elif 'clone' in args:
@@ -70,7 +116,7 @@ elif command == 'npm':
         sys.exit(1)
     if action == 'build':
         if (root / 'opt/palate').exists():
-            assert (root / 'running').exists(), 'service stopped before build completed'
+            assert not (root / 'running').exists(), 'service must be quiesced before unprivileged build'
         Path('.next/cache').mkdir(parents=True)
         Path('.next/BUILD_ID').write_text('production-build')
 elif command == 'curl':
@@ -131,16 +177,21 @@ purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
         with common.open("a") as output:
             helpers = common_functions("safe_config_python", "validate_config_paths", "write_config_file", "set_config_value", "node_build", "write_app_version", "git_stage_exact_revision", "backup_postgresql_database", "restore_postgresql_database", "safe_rm_rf", "stop_systemd_unit", "systemd_unit_inactive")
             output.write(helpers.replace("/var/lib/postgresql", str(self.root / "var/lib/postgresql")))
-        for name in ('apt-get', 'chown', 'id', 'useradd', 'install', 'runuser', 'psql', 'pg_dump', 'git', 'node', 'npm', 'curl', 'systemctl'):
+        rendered_mock = (
+            MOCK_COMMAND
+            .replace('__TEST_ROOT__', str(self.root))
+            .replace('__REAL_PYTHON3__', sys.executable)
+        )
+        for name in ('apt-get', 'chown', 'id', 'useradd', 'pkill', 'python3', 'install', 'runuser', 'psql', 'pg_dump', 'git', 'node', 'npm', 'curl', 'systemctl'):
             path = self.root / 'mock-bin' / name
-            path.write_text(MOCK_COMMAND)
+            path.write_text(rendered_mock)
             path.chmod(0o755)
         arch = 'arm64' if os.uname().machine in ('aarch64', 'arm64') else 'x64'
         archive_name = f'node-v22.23.4-linux-{arch}.tar.xz'
         archive = self.root / 'node.tar.xz'
         with tarfile.open(archive, 'w:xz') as output:
             for name in ('node', 'npm'):
-                data = MOCK_COMMAND.encode()
+                data = rendered_mock.encode()
                 info = tarfile.TarInfo(f'node-v22.23.4-linux-{arch}/bin/{name}')
                 info.size = len(data)
                 info.mode = 0o755
@@ -160,7 +211,11 @@ purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
         )
         script = self.root / f'{action}.sh'
         script.write_text(source)
-        return subprocess.run(['bash', str(script)], env={**self.env, **environment}, capture_output=True, text=True, timeout=20)
+        run_env = {**self.env, **environment}
+        (self.root / '.af-test-env.json').write_text(
+            json.dumps({k: v for k, v in run_env.items() if k.startswith('TEST_')})
+        )
+        return subprocess.run(['bash', str(script)], env=run_env, capture_output=True, text=True, timeout=20)
 
     def install(self, **environment):
         result = self.run_script(**environment)
@@ -252,7 +307,10 @@ purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
         self.assertFalse(self.app.exists())
         self.assertFalse(self.unit.exists())
         self.assertFalse((self.root / 'install/.palate.lock').exists())
-        self.assertTrue(self.vault.exists())
+        # Wave 1B snapshots $DATA_DIR before seeding upstream vault/, so a failed
+        # first install cleanly rolls $DATA_DIR back to its pre-install state.
+        self.assertFalse(self.vault.exists())
+        self.assertTrue(self.vault.parent.exists())
         self.assertTrue(self.config.exists())
 
     def test_corrupt_runtime_and_unstable_tag_are_rejected(self):

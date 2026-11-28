@@ -722,9 +722,15 @@ af_logged my_shell_fn
         self.assertIn("AETHERFLOW_SKIP_PROVENANCE_VERIFY=1 is set", rm_src)
 
         # Functional test: state_snapshot fails closed if sha256sum fails
-        snippet = rm_src[
-            rm_src.index("state_snapshot() {") : rm_src.index("\nsync_legacy_package_paths()")
-        ]
+        writer_start = rm_src.index("write_atomic_private_file() {")
+        writer_end = rm_src.index("\n}\n", writer_start) + 3
+        snippet = (
+            rm_src[writer_start:writer_end]
+            + "\n"
+            + rm_src[
+                rm_src.index("has_python_sqlite3() {") : rm_src.index("\nsync_legacy_package_paths()")
+            ]
+        )
         with tempfile.TemporaryDirectory(prefix="af-r9-snap-") as tmp:
             tmp_path = Path(tmp)
             db_dir = tmp_path / "data"
@@ -753,6 +759,7 @@ RELEASE_DIR={str(tmp_path / 'rel')!r}
 DATA_DIR={str(db_dir)!r}
 SQLITE_DB="aetherflow.sqlite"
 SNAPSHOT_TIMEOUT=5
+atomic_publish_db_file() {{ cp "$2" "$3"; }}
 sqlite_online_backup() {{ cp "$1" "$2"; }}
 sqlite_integrity() {{ echo "ok"; }}
 log_info() {{ :; }}
@@ -763,7 +770,7 @@ state_snapshot
 """
             proc = subprocess.run(["bash", "-c", probe], capture_output=True, text=True, timeout=10)
             self.assertNotEqual(proc.returncode, 0)
-            self.assertIn("Failed to write snapshot SHA-256 manifest", proc.stderr)
+            self.assertIn("Failed to compute snapshot SHA-256 manifest", proc.stderr)
 
     def test_pass3_seedbox_hardening_apache_headers_vsftpd_opt_in_and_dropin_alignment(self) -> None:
         ssl_tpl = (ROOT / "setup/templates/default-ssl.conf.template").read_text(encoding="utf-8")

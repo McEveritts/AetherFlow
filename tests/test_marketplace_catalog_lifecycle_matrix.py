@@ -336,6 +336,13 @@ printf 'netdata bootstrap\\n' >> "$AF_FIXTURE_ROOT/bootstrap.log"
 
 HOST_COMMAND = r'''#!/usr/bin/python3
 import base64, hashlib, json, os, pathlib, re, shutil, subprocess, sys
+_snapshot_root = pathlib.Path(os.environ.get('AF_FIXTURE_ROOT') or '__AF_FIXTURE_ROOT__')
+_env_snapshot_path = _snapshot_root / '.af-fixture-env.json'
+if _env_snapshot_path.exists():
+    for _k, _v in json.loads(_env_snapshot_path.read_text()).items():
+        if _k.startswith(('AF_FIXTURE_', 'AF_TEST_')):
+            os.environ.setdefault(_k, _v)
+os.environ.setdefault('AF_FIXTURE_ROOT', str(_snapshot_root))
 root = pathlib.Path(os.environ['AF_FIXTURE_ROOT'])
 command, arguments = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
 if re.fullmatch(r'python3\.1[0-3]', command): command = 'python3'
@@ -462,6 +469,20 @@ elif command in ('python3', 'python'):
         if failure == 'bootstrap-python' and ('urllib.request' in program or 'import requests' in program):
             sys.exit(79)
         if 'urllib.request' not in program and 'import requests' not in program:
+            if 'pwd.getpwnam("af-palate")' in program and os.geteuid() != 0:
+                program = (
+                    'import os as _af_os, pwd as _af_pwd\n'
+                    'if _af_os.geteuid() != 0:\n'
+                    '    _af_orig_getpwnam = _af_pwd.getpwnam\n'
+                    '    def _af_getpwnam(name):\n'
+                    '        try:\n'
+                    '            return _af_orig_getpwnam(name)\n'
+                    '        except KeyError:\n'
+                    '            return _af_pwd.getpwuid(_af_os.geteuid())\n'
+                    '    _af_pwd.getpwnam = _af_getpwnam\n'
+                    '    _af_os.chown = lambda *a, **kw: None\n'
+                    '    _af_os.fchown = lambda *a, **kw: None\n'
+                ) + program
             real_python = next((p for p in ('/usr/bin/python3.13', '/usr/bin/python3.12', '/usr/bin/python3.11', '/usr/bin/python3') if os.path.isfile(p) and os.access(p, os.X_OK)), '/usr/bin/python3')
             sys.exit(subprocess.run([real_python, *arguments], input=program, text=True).returncode)
     else:
@@ -708,6 +729,12 @@ elif command == 'git':
         if failure in ('clone', 'build'): sys.exit(76)
         destination = pathlib.Path(arguments[-1])
         shutil.copytree(root / 'repository', destination, dirs_exist_ok=True)
+        pkg_json = destination / 'package.json'
+        if pkg_json.is_file():
+            pkg_data = json.loads(pkg_json.read_text())
+            if pkg_data.get('version') != version:
+                pkg_data['version'] = version
+                pkg_json.write_text(json.dumps(pkg_data) + '\n')
     elif 'pull' in arguments and failure == 'pull': sys.exit(76)
     elif 'ls-remote' in arguments:
         if arguments[-1] == 'HEAD': print('abcdef1234567890abcdef1234567890abcdef12\tHEAD')
@@ -993,7 +1020,16 @@ class InstallerFixture:
         )
         for directory in directories:
             (self.root / directory).mkdir(parents=True, exist_ok=True)
-        self.file("host-command", HOST_COMMAND.replace("__AF_TESTS_DIR__", str(ROOT / "tests"))).chmod(0o755)
+        self.file(
+            ".af-fixture-env.json",
+            json.dumps({"AF_FIXTURE_ROOT": str(self.root), "AF_FIXTURE_APP": self.app, "AF_FIXTURE_VERSION": "2.1.0"}),
+        )
+        self.file(
+            "host-command",
+            HOST_COMMAND
+            .replace("__AF_TESTS_DIR__", str(ROOT / "tests"))
+            .replace("__AF_FIXTURE_ROOT__", str(self.root)),
+        ).chmod(0o755)
         self.file("pihole-bootstrap.sh", PIHOLE_BOOTSTRAP_SCRIPT)
         self.file("nodesource-bootstrap.sh", NODESOURCE_BOOTSTRAP_SCRIPT)
         self.file("netdata-bootstrap.sh", NETDATA_BOOTSTRAP_SCRIPT)
@@ -1087,7 +1123,11 @@ youtube_private_port() {
         return pattern.sub(lambda match: str(self.root) + match.group(0), text)
 
     def prepare_release(self):
-        executable = HOST_COMMAND.replace("__AF_TESTS_DIR__", str(ROOT / "tests"))
+        executable = (
+            HOST_COMMAND
+            .replace("__AF_TESTS_DIR__", str(ROOT / "tests"))
+            .replace("__AF_FIXTURE_ROOT__", str(self.root))
+        )
         files = {
             "new-code": "fixture runtime\n", "package.json": '{"name":"fixture","version":"2.1.0"}\n',
             "index.php": "<?php echo 'fixture';\n", "occ": executable,
@@ -1232,6 +1272,10 @@ youtube_private_port() {
         else:
             variables.pop("AF_APP_PORT", None)
             variables.pop("AETHERFLOW_APP_PORT", None)
+        self.file(
+            ".af-fixture-env.json",
+            json.dumps({key: value for key, value in variables.items() if key.startswith(("AF_FIXTURE_", "AF_TEST_"))}),
+        )
         result = subprocess.run(["/bin/bash", str(script)], env=variables, stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=int(os.environ.get("AF_TEST_SUBPROCESS_TIMEOUT", "90")))
         if result.returncode:
             logfiles = sorted((self.root / "var/log/aetherflow").glob("*.log"))
