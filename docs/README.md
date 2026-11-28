@@ -83,7 +83,7 @@ Documentation index for **AetherFlow v4.0.2** — a 12-crate Rust bare-metal con
 | Document | Description |
 | :--- | :--- |
 | [Testing AetherFlow](./testing.md) | Full verification matrix across `backend-rs` (12 crates), `frontend-rs` (4 crates), Plugin SDK, Python suites, `build_gold.sh`, and Playwright E2E. |
-| [v4.0.2 Release Notes](./releases/v4.0.2.md) | Release summary, Wave 0–2 security and privilege-boundary hardening, distributed transcoding dispatch, service topology map, ingress/sandbox/installer fixes, and upgrade checklist for AetherFlow v4.0.2. |
+| [v4.0.2 Release Notes](./releases/v4.0.2.md) | Security hardening, load-aware transcoding, the service topology map, marketplace and installer fixes, and what to check before upgrading to AetherFlow v4.0.2. |
 | [v4.0.1 Release Notes](./releases/v4.0.1.md) | Release summary, Unified Flat Design System, Debian 13 installer & Apache ingress hardening, Jellyfin/Peer fixes, and in-place upgrade guide for AetherFlow v4.0.1. |
 | [v4.0.0 Release Notes](./releases/v4.0.0.md) | Release summary, highlights, breaking changes, and upgrade checklist for AetherFlow v4.0.0. |
 | [Clean-Host KVM Matrix Testing](./v4-clean-host-testing.md) | Four-OS QEMU/KVM clean-host bootstrap, upgrade, rollback, and GLIBC 2.35 baseline artifact contract (`scripts/v4_vm_matrix.py`). |

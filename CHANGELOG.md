@@ -1,18 +1,20 @@
-## Nightly Patch Notes — November 28, 2026 — v4.0.2 Security Hardening, Distributed Transcoding & Topology Map
+## Nightly Patch Notes — November 28, 2026 — v4.0.2
 
-- **Wave 0–2 Security & Privilege-Boundary Hardening:** Rewrites diagnostic and lifecycle secret redaction as a linear-time, UTF-8-safe line-classifier state machine with depth- and byte-budgeted JSON scrubbing and re-sanitization of persisted history; zeroizes JWT, AES, OIDC, peer, WireGuard and plugin signing secrets on drop (`SecretString`/`SecretBytes`); requires a `JWT_SECRET` of at least 32 bytes; strips forwarding headers from untrusted peers; bounds every privileged subprocess by process group, output size and timeout; confines root-side SQLite, lease and snapshot I/O with `O_NOFOLLOW`/dirfd and per-thread `fsuid`; restricts `af release --config` to 31 allowlisted keys in a root-owned file; and requires root-owned plugin trees with manifests of at most 256 KiB.
-- **Distributed Jellyfin Transcoding:** Probes real VA-API profiles (`vainfo`) and hardware Vulkan devices on each worker; scores workers by weight, free slots, live CPU/GPU load and tunnel RTT; adds `remote_first`/`local_first`/`balanced` dispatch policies with a local job cap (migration 28); adds backend adaptation (`AF_TRANSCODE_ADAPT_BACKEND`), an FFmpeg thread cap and a 512 MiB Mesa shader cache; and enables Vulkan Compute HDR tone-mapping by default, keeping it separate from opt-in Vulkan Video codecs.
-- **Service Topology Map:** Redesigns Overview → Service health as a three-tier Gateway → Service → Dependency map with status cards, curved labelled links, search highlighting, zoom and pan, a legend, a Map/List switcher and a richer Service inspector across all 6 locales.
-- **Marketplace Ingress & Lifecycle:** Accepts strictly confined managed Apache `sites-enabled` symlinks in snapshots; removes managed `aetherflow-*` vhosts when a package is removed; upgrades TLS-pending vhosts automatically once a certificate covers them (`POST /v1/ingress/resync-tls`); reconciles DNS after every lifecycle change; and prevents stale update probes from resurrecting "update available" after a remove or update.
-- **Sandbox & Peer Storage:** Writes a single canonical `10-aetherflow-sandbox.conf` drop-in, applies `UMask=0002` to 32 media, downloader and `*arr` unit families for group-shared and peer NFS media, and warns about writable peer NFS exports or mounts on host-local system GIDs (1–999).
-- **Debian 13 Installers:** Fixes fresh installs of Autobrr, Gitea, Jellyseerr, KasmVNC, Kavita, Nextcloud and Scrutiny (standalone InfluxDB 2.7.12), hardens Calibre-Web, SABnzbd, Palate, Dispatcharr, Invidious and Piped builds with isolated environments (resolving `/usr/sbin/runuser` so the scrubbed Piped and Invidious PostgreSQL bootstrap no longer fails), and serializes setup with `/run/aetherflow-setup.lock`.
-- **Release Pipeline:** Publishes from the protected `release-publish` environment under a PAT verified as `McEveritts`, caps worst-case Actions concurrency at 18 jobs, produces deterministic GNU tar archives, and restores green nightly gates (Clippy, Gitleaks, stale tests and timing-ratio flakes).
+Mostly security hardening, plus smarter Jellyfin transcoding and a new service topology map.
+
+- **Before you upgrade:** `JWT_SECRET` must be at least 32 bytes or the API won't start. Files passed to `af release --config` must be root-owned, not group- or world-writable, and use only allowlisted keys. Production plugins must be owned by root. The transcode worker only accepts its own user, root and `aetherflow` unless `AF_TRANSCODE_ALLOWED_PEER_UIDS` says otherwise. Forwarded client-IP headers are only trusted from `TRUSTED_PROXIES`.
+- **Transcoding:** workers advertise only the encoders their GPU really supports ("Silicon verified"), and are picked by load and latency as well as weight. New dispatch policies (`remote_first`, `local_first`, `balanced`) and a local job cap. Vulkan Compute HDR tone-mapping is on by default; Vulkan Video stays opt-in.
+- **Topology map:** Overview → Service health shows gateways, services and their dependencies as a searchable, zoomable map.
+- **Security:** secrets are scrubbed from logs more thoroughly and wiped from memory; root-run commands have timeouts and output limits; root no longer follows a service's symlinks when it reads or backs up that service's files.
+- **Marketplace:** removing an app removes its Apache sites, sites waiting on TLS switch to HTTPS once a certificate is issued, and stale "update available" notices are gone.
+- **Shared media:** sandbox settings live in one `10-aetherflow-sandbox.conf`; media, download and *arr apps use `UMask=0002` so shared libraries and hardlinks work.
+- **Debian 13:** Autobrr, Gitea, Jellyseerr, KasmVNC, Kavita, Nextcloud and Scrutiny install cleanly again.
 
 ---
 
 ## Release v4.0.2 — November 28, 2026
 
-Brings `stable` (`master`) and `nightly` back together. Combines the post-`v4.0.1` Wave 0–2 security hardening with the nightly transcoding, topology, ingress, sandbox and installer work. There are no breaking API or CLI changes, but review the stricter `JWT_SECRET`, release-config, plugin-ownership and transcode-peer requirements before upgrading.
+Security hardening, load-aware transcoding and a service topology map, with stable and nightly back on the same code. No breaking API or CLI changes, but check the [upgrade list](./docs/releases/v4.0.2.md#before-you-upgrade) first: `JWT_SECRET` length, release-config and plugin ownership, transcode-worker callers and trusted proxies.
 
 - **Full release notes:** [docs/releases/v4.0.2.md](./docs/releases/v4.0.2.md)
 - **Full compare:** https://github.com/McEveritts/AetherFlow/compare/v4.0.1...v4.0.2

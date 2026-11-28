@@ -32,16 +32,16 @@
 
 ## ✨ What's new in v4.0.2
 
-v4.0.2 brings **`stable` (`master`)** and **`nightly`** back together. It combines the post-`v4.0.1` **Wave 0–2 security hardening program** with the nightly **distributed transcoding**, **service topology map**, ingress, sandbox, and Debian 13 installer work ([`v4.0.1...v4.0.2`](https://github.com/McEveritts/AetherFlow/compare/v4.0.1...v4.0.2)). There are no breaking API or CLI changes, but several requirements are now stricter. See the upgrade checklist below.
+v4.0.2 is mostly security hardening, with smarter Jellyfin transcoding and a new service topology map. Stable and nightly are back on the same code ([`v4.0.1...v4.0.2`](https://github.com/McEveritts/AetherFlow/compare/v4.0.1...v4.0.2)). There are no breaking API or CLI changes, but a few checks are stricter, so read the [upgrade list](./docs/releases/v4.0.2.md#before-you-upgrade) first.
 
 | | Since v4.0.1 |
 | :--- | :--- |
-| 🛡️ **Wave 0–2 security hardening** | Linear-time, UTF-8-safe diagnostic redaction with depth- and byte-budgeted JSON scrubbing; zeroized in-memory secrets (`SecretString`/`SecretBytes`); a `JWT_SECRET` of at least 32 bytes; forwarding headers stripped from untrusted peers; process-group-bounded subprocesses; `O_NOFOLLOW`/dirfd and per-thread `fsuid` filesystem confinement; a 31-key release-config allowlist; and root-owned plugin trees. |
-| 🎞️ **Distributed transcoding** | Silicon-verified VA-API (`vainfo`) and hardware Vulkan probing, load- and RTT-aware worker scoring, `remote_first`/`local_first`/`balanced` dispatch policies with a local job cap, cross-vendor backend adaptation, an FFmpeg thread cap, a 512 MiB Mesa shader cache, and Vulkan Compute HDR tone-mapping on by default (separate from opt-in Vulkan Video codecs). |
-| 🗺️ **Service topology map** | Overview → Service health becomes a three-tier Gateway → Service → Dependency map with status cards, curved labelled links, search highlighting, zoom and pan, a legend, a Map/List switcher, and a richer Service inspector in all 6 locales. |
-| 🌐 **Ingress & lifecycle** | Confined managed `sites-enabled` symlinks in snapshots, managed vhost cleanup on package remove, automatic TLS-pending vhost upgrades (`POST /v1/ingress/resync-tls`), post-lifecycle DNS reconciliation, and update probes that can no longer resurrect stale "update available" rows. |
-| 🧱 **Sandbox & peer storage** | A single canonical `10-aetherflow-sandbox.conf` drop-in, `UMask=0002` for 32 media, downloader and `*arr` unit families, and warnings for writable peer NFS exports or mounts on host-local system GIDs (1–999). |
-| 🛠️ **Debian 13 installers & release pipeline** | Fresh-install fixes for Autobrr, Gitea, Jellyseerr, KasmVNC, Kavita, Nextcloud and Scrutiny (standalone InfluxDB 2.7.12), isolated builds for Calibre-Web, SABnzbd and Palate, a serialized setup lock, and `McEveritts`-verified publishing from a protected `release-publish` environment under an 18-job concurrency ceiling. |
+| 🛡️ **Security hardening** | Secrets are scrubbed from logs more thoroughly and wiped from memory. Root-run commands have timeouts and output limits, and root no longer follows a service's symlinks into its files. `JWT_SECRET` must be at least 32 bytes, and release configs and plugins must be owned by root. |
+| 🎞️ **Transcoding** | Workers advertise only the encoders their GPU really supports and are picked by load and latency. New dispatch policies and a local job cap. Vulkan HDR tone-mapping is on by default. |
+| 🗺️ **Topology map** | Overview → Service health shows gateways, services and their dependencies as a map you can search, zoom and pan. |
+| 🌐 **Marketplace** | Removing an app removes its Apache sites, sites waiting on TLS switch to HTTPS once a certificate is issued, and stale "update available" notices are gone. |
+| 🧱 **Shared media** | One sandbox file per app, and group-writable files for media, download and *arr apps so shared libraries and hardlinks work. |
+| 🛠️ **Debian 13** | Autobrr, Gitea, Jellyseerr, KasmVNC, Kavita, Nextcloud and Scrutiny install cleanly again. |
 
 Full notes: **[v4.0.2 release notes](./docs/releases/v4.0.2.md)** · **[CHANGELOG](./CHANGELOG.md)** · **[v4.0.1 release notes](./docs/releases/v4.0.1.md)** · **[Upgrading & Rollbacks](./docs/upgrading.md)**
 
@@ -78,7 +78,7 @@ Full notes: **[v4.0.2 release notes](./docs/releases/v4.0.2.md)** · **[CHANGELO
 </details>
 
 > [!IMPORTANT]
-> **Upgrading a v3.2.x node?** Database Migration 26 removes the legacy master/worker cluster (`CLUSTER_*` settings and `/api/v1/admin/cluster/*` routes). Take a WAL-safe backup first with `sudo af backup create`, then re-pair servers from the **Cluster** tab after the upgrade. Upgrading from `v4.0.x` to `v4.0.2` has no breaking API or CLI changes, but `JWT_SECRET` must be at least 32 bytes, `af release --config` files must be root-owned and use only allowlisted keys, and production plugin trees must be root-owned ([checklist](./docs/releases/v4.0.2.md#breaking-changes--upgrade-guide)). See [Upgrading & Rollbacks](./docs/upgrading.md).
+> **Upgrading a v3.2.x node?** Database Migration 26 removes the legacy master/worker cluster (`CLUSTER_*` settings and `/api/v1/admin/cluster/*` routes). Take a WAL-safe backup first with `sudo af backup create`, then re-pair servers from the **Cluster** tab after the upgrade. Upgrading from `v4.0.x` to `v4.0.2` has no breaking API or CLI changes, but `JWT_SECRET` must be at least 32 bytes, `af release --config` files must be root-owned and use only allowlisted keys, and production plugin trees must be root-owned ([checklist](./docs/releases/v4.0.2.md#before-you-upgrade)). See [Upgrading & Rollbacks](./docs/upgrading.md).
 
 ---
 
